@@ -597,6 +597,209 @@ def cmd_reject(args):
           "reason": args.reason, "report": state["report"]})
 
 
+# --- recovery / ops --------------------------------------------------------------
+
+def _adopt_changes(state, run_dir):
+    """resume --accept-changes: re-validate the edited YAML and adopt it."""
+    try:
+        doc = load_workflow(state["yaml_path"])
+    except Exception as e:
+        fail(str(e))
+    errors, _ = validate_workflow(doc)
+    if errors:
+        fail("edited workflow is invalid; fix it first", errors=errors)
+    new_ids = [n["id"] for n in doc["nodes"]]
+    recorded = [nid for nid, n in state["nodes"].items() if n["status"] != "pending"]
+    missing = [nid for nid in recorded if nid not in new_ids]
+    if missing:
+        fail(f"edited workflow removed nodes this run already executed: {missing}. "
+             "Use 'restart' for a fresh run instead.")
+    for n in doc["nodes"]:
+        if n["id"] not in state["nodes"]:
+            state["nodes"][n["id"]] = {"kind": n["kind"], "status": "pending",
+                                        "side_effects": bool(n.get("side_effects")),
+                                        "attempts": 0, "started_at": None,
+                                        "finished_at": None, "outputs": [],
+                                        "summary": None, "error": None,
+                                        "approval": None, "skip_reason": None}
+    state["node_order"] = new_ids
+    state["yaml_sha256"] = _sha256_file(state["yaml_path"])
+
+
+def _reset_node(node):
+    node.update({"status": "pending", "started_at": None, "finished_at": None,
+                 "error": None, "summary": None, "outputs": []})
+
+
+def cmd_resume(args):
+    run_dir, state = _load_run(args.run)
+    if state["status"] in ("done", "cancelled", "rejected"):
+        fail(f"run is {state['status']}; nothing to resume. Use 'restart' for a new run.")
+    if state["status"] == "waiting_approval":
+        fail("run is waiting for approval — use 'approve' or 'reject', not resume")
+
+    if args.accept_changes:
+        _adopt_changes(state, run_dir)
+    else:
+        _check_yaml_unchanged(state)
+
+    target = None
+    for nid in state["node_order"]:
+        if state["nodes"][nid]["status"] in ("failed", "running"):
+            target = nid
+            break
+    if target is None:
+        state["status"] = "running"
+        save_state(run_dir, state)
+        emit({"ok": True, "resumed_node": None, "run_status": "running",
+              "note": "no failed/interrupted node; continue with 'next'"})
+    node = state["nodes"][target]
+    if node["side_effects"] and args.force_node != target:
+        fail(f"node {target} has side_effects: true and may have already executed "
+             f"(e.g. a message may have been sent). Re-run with "
+             f"'resume --run {args.run} --force-node {target}' to force, or "
+             f"'skip --run {args.run} --node {target} --reason ...' if it completed.")
+    _reset_node(node)
+    state["status"] = "running"
+    save_state(run_dir, state)
+    emit({"ok": True, "resumed_node": target, "run_status": "running",
+          "attempts_so_far": node["attempts"]})
+
+
+def cmd_skip(args):
+    run_dir, state = _load_run(args.run)
+    node = state["nodes"].get(args.node)
+    if node is None:
+        fail(f"unknown node: {args.node}")
+    if node["status"] in ("ok", "skipped"):
+        fail(f"node {args.node} is already {node['status']}")
+    node["status"] = "skipped"
+    node["skip_reason"] = f"manual: {args.reason}"
+    node["finished_at"] = now_iso()
+    if state["status"] in ("failed", "waiting_approval"):
+        state["status"] = "running"
+    save_state(run_dir, state)
+    emit({"ok": True, "node_status": "skipped", "run_status": state["status"]})
+
+
+def cmd_cancel(args):
+    run_dir, state = _load_run(args.run)
+    if state["status"] in TERMINAL:
+        fail(f"run is already {state['status']}")
+    state["status"] = "cancelled"
+    save_state(run_dir, state)
+    emit({"ok": True, "run_status": "cancelled", "report": state["report"]})
+
+
+def _run_summary(state):
+    counts = {}
+    for n in state["nodes"].values():
+        counts[n["status"]] = counts.get(n["status"], 0) + 1
+    return {"run_id": state["run_id"], "workflow": state["workflow"],
+            "status": state["status"], "created_at": state["created_at"],
+            "updated_at": state["updated_at"], "node_counts": counts}
+
+
+def _iter_run_dirs(workflow=None):
+    root = runs_root()
+    if not root.exists():
+        return
+    wf_dirs = [root / workflow] if workflow else sorted(root.iterdir())
+    for wf_dir in wf_dirs:
+        if not wf_dir.is_dir():
+            continue
+        for run_dir in sorted(wf_dir.iterdir()):
+            if (run_dir / "state.json").exists():
+                yield run_dir
+
+
+def cmd_status(args):
+    if args.run:
+        run_dir, state = _load_run(args.run)
+        nodes = [{"id": nid, **{k: state["nodes"][nid][k] for k in
+                  ("status", "summary", "error", "skip_reason", "attempts")}}
+                 for nid in state["node_order"]]
+        emit({**_run_summary(state), "nodes": nodes, "run_dir": str(run_dir),
+              "report": state["report"]})
+    runs = []
+    for run_dir in _iter_run_dirs(args.workflow):
+        try:
+            runs.append(_run_summary(load_state(run_dir)))
+        except RuntimeError:
+            runs.append({"run_id": run_dir.name, "workflow": run_dir.parent.name,
+                         "status": "corrupt"})
+    emit({"runs": runs[-50:]})
+
+
+def cmd_list(args):
+    workflows = []
+    if workflows_dir().exists():
+        for p in sorted(workflows_dir().glob("*.yml")) + sorted(workflows_dir().glob("*.yaml")):
+            try:
+                doc = load_workflow(p)
+                workflows.append({"name": doc.get("name"), "description": doc.get("description"),
+                                  "version": doc.get("version"), "path": str(p)})
+            except Exception:
+                workflows.append({"name": p.stem, "description": "(unparseable)", "path": str(p)})
+    runs = []
+    for run_dir in _iter_run_dirs():
+        try:
+            runs.append(_run_summary(load_state(run_dir)))
+        except RuntimeError:
+            continue
+    emit({"workflows": workflows, "runs": runs[-20:]})
+
+
+def _parse_older_than(text):
+    m = re.match(r"^(\d+)d$", text or "")
+    if not m:
+        fail("--older-than must look like '30d'")
+    return int(m.group(1))
+
+
+def cmd_clean(args):
+    removed, protected = [], []
+
+    def _remove(run_dir):
+        try:
+            state = load_state(run_dir)
+            active = state["status"] in ("running", "waiting_approval")
+        except (RuntimeError, FileNotFoundError):
+            active = False
+        if active and not args.force:
+            protected.append(run_dir.name)
+            return
+        shutil.rmtree(run_dir)
+        removed.append(run_dir.name)
+
+    if args.run:
+        try:
+            _remove(find_run(args.run))
+        except FileNotFoundError as e:
+            fail(str(e))
+        if protected:
+            fail(f"run {protected[0]} is active (running/waiting_approval); "
+                 "use --force to delete anyway", removed=removed)
+    elif args.workflow:
+        keep = args.keep if args.keep is not None else 5
+        run_dirs = list(_iter_run_dirs(args.workflow))
+        for run_dir in run_dirs[:-keep] if keep else run_dirs:
+            _remove(run_dir)
+    elif args.all:
+        days = _parse_older_than(args.older_than)
+        cutoff = time.time() - days * 86400
+        for run_dir in _iter_run_dirs():
+            try:
+                state = load_state(run_dir)
+                if _parse_iso(state["updated_at"]) < cutoff:
+                    _remove(run_dir)
+            except (RuntimeError, FileNotFoundError):
+                continue
+    else:
+        fail("clean requires --run, --workflow, or --all")
+    emit({"ok": True, "removed": removed, "protected": protected})
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="workflow_ctl", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -638,6 +841,45 @@ def main(argv=None):
     p.add_argument("--run", required=True)
     p.add_argument("--reason", required=True)
     p.set_defaults(fn=cmd_reject)
+
+    p = sub.add_parser("resume", help="recover a failed/interrupted run")
+    p.add_argument("--run", required=True)
+    p.add_argument("--accept-changes", action="store_true")
+    p.add_argument("--force-node")
+    p.set_defaults(fn=cmd_resume)
+
+    p = sub.add_parser("skip", help="manually skip a node")
+    p.add_argument("--run", required=True)
+    p.add_argument("--node", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(fn=cmd_skip)
+
+    p = sub.add_parser("cancel", help="cancel a run")
+    p.add_argument("--run", required=True)
+    p.set_defaults(fn=cmd_cancel)
+
+    p = sub.add_parser("restart", help="start a fresh run of a workflow (alias of start)")
+    p.add_argument("workflow")
+    p.add_argument("--input", action="append", metavar="k=v")
+    p.set_defaults(fn=cmd_start)
+
+    p = sub.add_parser("status", help="run status")
+    p.add_argument("--run")
+    p.add_argument("--workflow")
+    p.add_argument("--all", action="store_true")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("list", help="list workflows + recent runs")
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("clean", help="delete run dirs")
+    p.add_argument("--run")
+    p.add_argument("--workflow")
+    p.add_argument("--keep", type=int)
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--older-than")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(fn=cmd_clean)
 
     args = ap.parse_args(argv)
     args.fn(args)

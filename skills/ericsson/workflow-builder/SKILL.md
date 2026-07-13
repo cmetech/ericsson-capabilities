@@ -47,6 +47,10 @@ workflow-orchestrator skill can execute. Read the schema FIRST:
 ## Pitfalls
 
 - Never invent tools — only reference toolsets/MCP tools that actually exist.
+- Never write `$inputs.x` literally inside a `prompt` or `command` string — it
+  is NOT interpolated. `$inputs.x` has meaning only in `when:` conditions;
+  in prompts, reference inputs by name in plain language (the executing agent
+  sees their values in the `inputs` field of `workflow_ctl next`/`status`).
 - Never write v2 schema features (loops, retries, parallel, on_reject).
 - One node = one responsibility; prefer 3–6 nodes.
 - The YAML filename must equal the workflow `name` (slug).

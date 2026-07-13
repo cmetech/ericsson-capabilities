@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 *.egg-info/
 msal_token_cache*.json
+.superpowers/

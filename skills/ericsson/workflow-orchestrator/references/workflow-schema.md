@@ -12,7 +12,7 @@ all authored workflows follow this document.
 | `description` | yes | one-line human description |
 | `version` | yes | semver string, bump on edit |
 | `tags` | no | list; shown in listings (always include `ericsson`) |
-| `requires.toolsets` | no | toolsets the nodes use (documentation + validation warning) |
+| `requires.toolsets` | no | toolsets the nodes use (documentation only — NOT validated; availability is checked by the agent at run time) |
 | `requires.env` | no | env vars needed; unset → validate WARNING (not error) |
 | `inputs` | no | list of `{name, default?}`; set at start with `--input name=value` |
 | `nodes` | yes | ordered list (see below) |
@@ -21,7 +21,7 @@ all authored workflows follow this document.
 
 ## Nodes
 
-Common: `id` (slug, unique), `kind`, optional `depends_on` (list of ids),
+Common: `id` (slug, unique), `kind`, optional `depends_on` (list of ids), optional `toolset` (documentation hint naming the toolset the node uses),
 `when` (condition), `output` (bare filename written into the run dir),
 `side_effects: true` (outward action — send/post/create; resume will never
 silently re-run it).

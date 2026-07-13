@@ -49,9 +49,9 @@ Control script (all commands print one JSON object; non-zero exit = error):
    - `action == "done"` → finish (see Finishing).
    - `action == "failed"` → report the failed node and its error; suggest
      `resume`. STOP.
-   - `action == "in_progress"` / `"interrupted"` → another session owns the
-     node / it crashed; relay the JSON `hint`. STOP.
+   - `action == "in_progress"` → another session is executing that node; say so and STOP. `action == "interrupted"` → the node crashed mid-run; relay the JSON `hint` (it names the resume command). STOP.
    - `action == "stalled"` → nothing is runnable; run `status --run <run_id>` and relay its per-node picture with the JSON hint. STOP.
+   - `action == "rejected"` / `"cancelled"` → the run is closed (a rejected approval or a cancel); report that with the recorded reason from `status --run <run_id>`. STOP.
    - If a kanban task is set, add a short comment after each `record`.
 6. Never edit state.json, never re-order nodes, never improvise on a
    workflow_ctl error — report the error verbatim and stop.

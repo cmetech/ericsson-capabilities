@@ -70,6 +70,19 @@ def lint(manifest_path: Path) -> list[str]:
     for i, entry in enumerate(doc["env"]):
         if not isinstance(entry, dict) or not entry.get("key") or not entry.get("description"):
             problems.append(f"env[{i}] needs key + description")
+
+    req_env = doc.get("requiresEnv", {})
+    if not isinstance(req_env, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in req_env.items()):
+        problems.append("requiresEnv must be a mapping of env-var name -> required value")
+    dbd = doc.get("disabledByDefault", {})
+    if not isinstance(dbd, dict):
+        problems.append("disabledByDefault must be a mapping")
+    else:
+        for key in ("skills", "toolsets"):
+            val = dbd.get(key, [])
+            if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+                problems.append(f"disabledByDefault.{key} must be a list of strings")
     return problems
 
 

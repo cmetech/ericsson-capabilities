@@ -28,6 +28,12 @@ def test_manifest_content():
     keys = {e["key"] for e in doc["env"]}
     assert {"ERICSSON_ENV", "JIRA_BASE_URL", "JIRA_PAT",
             "GLEAN_MCP_URL", "GLEAN_API_TOKEN"} <= keys
+    assert doc["version"] == "0.2.0"
+    assert doc["requiresEnv"] == {"ERICSSON_ENV": "1"}
+    assert doc["disabledByDefault"] == {
+        "skills": ["workflow-orchestrator", "workflow-builder"],
+        "toolsets": ["ericsson-jira", "ericsson-teams"],
+    }
 
 
 def test_lint_passes_on_real_manifest():
@@ -42,3 +48,12 @@ def test_lint_fails_on_broken_manifest(tmp_path):
     bad.write_text(json.dumps(doc))
     code, out = _lint(bad)
     assert code == 1 and any("ghost" in p for p in out["problems"])
+
+
+def test_lint_rejects_bad_disabled_block(tmp_path):
+    doc = json.loads(MANIFEST.read_text())
+    doc["disabledByDefault"] = {"skills": "not-a-list"}
+    bad = tmp_path / "bad2.json"
+    bad.write_text(json.dumps(doc))
+    code, out = _lint(bad)
+    assert code == 1 and any("disabledByDefault" in p for p in out["problems"])

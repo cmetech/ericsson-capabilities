@@ -3,7 +3,7 @@
 Shared Ericsson coworker capabilities for **OTTO** and **LOOP24** — standard
 Hermes artifacts bundled as the `ericsson` capability set and staged into
 each brand's build by the hermes-agent capability-staging seam.
-**Internal Ericsson content — keep the repo private.**
+**Public repo** — content is not proprietary; Ericsson-only behavior is enforced at runtime by the `ERICSSON_ENV` gate (and the set manifest's `requiresEnv`), not by repo access.
 
 Spec: otto_hermes workspace `docs/superpowers/specs/2026-07-13-ericsson-capabilities-design.md`.
 
@@ -30,7 +30,7 @@ Everything is gated on `ERICSSON_ENV=1` (plugin `check_fn`s; skills via
 skills → `$HERMES_HOME/skills/ericsson/…` · plugins → `$HERMES_HOME/plugins/…` ·
 `mcpServers` → merged into `config.yaml` (seam resolves `${CAPABILITY_DIR}`) ·
 `mcpLocal` → staged next to plugins · workflows → `$HERMES_HOME/workflows/` ·
-`env` → Keys-page metadata (seam-side). Unknown manifest keys must be ignored.
+`env` → Keys-page metadata (seam-side) · requiresEnv gates whether the set stages at all · disabledByDefault seeds skills.disabled / disabled_toolsets. Unknown manifest keys must be ignored.
 
 ## Dev (macOS primary)
 

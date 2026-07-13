@@ -85,6 +85,12 @@ def complete_device_flow() -> dict:
         _persist(cache)
         _PENDING_FLOW = None
         return {"ok": True, "account": result.get("id_token_claims", {}).get("preferred_username")}
-    return {"ok": False, "pending": True,
-            "detail": result.get("error_description", "authorization pending — "
-                                 "finish signing in, then run teams_auth complete again")}
+    err = result.get("error")
+    if err in ("authorization_pending", "slow_down"):
+        return {"ok": False, "pending": True,
+                "detail": result.get("error_description", "authorization pending — "
+                                     "finish signing in, then run teams_auth complete again")}
+    _PENDING_FLOW = None
+    return {"ok": False, "pending": False,
+            "error": result.get("error_description") or err or "device flow failed",
+            "hint": "run teams_auth again to restart sign-in"}

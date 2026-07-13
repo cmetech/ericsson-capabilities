@@ -79,3 +79,32 @@ def test_schemas_shape():
                                          "teams_read", "teams_send", "teams_reply"}
     for schema in teams_tools.SCHEMAS.values():
         assert set(schema) >= {"name", "description", "parameters"}
+
+
+class _FakeCache:
+    has_state_changed = False
+
+
+class _FakeApp:
+    def __init__(self, result):
+        self._result = result
+
+    def acquire_token_by_device_flow(self, flow):
+        return self._result
+
+
+def _pend(result):
+    graph_auth._PENDING_FLOW = (_FakeApp(result), _FakeCache(), {"user_code": "X"})
+
+
+def test_complete_device_flow_pending_keeps_flow():
+    _pend({"error": "authorization_pending"})
+    out = graph_auth.complete_device_flow()
+    assert out["pending"] is True and graph_auth._PENDING_FLOW is not None
+
+
+def test_complete_device_flow_terminal_clears_flow():
+    _pend({"error": "expired_token", "error_description": "code expired"})
+    out = graph_auth.complete_device_flow()
+    assert out["pending"] is False and "expired" in out["error"]
+    assert graph_auth._PENDING_FLOW is None

@@ -37,11 +37,11 @@ def test_my_tickets_extracts_gitlab_urls(jira_env):
             "summary": "Fix crash",
             "status": {"name": "Open"}, "priority": {"name": "High"},
             "updated": "2026-07-13T08:00:00.000+0000",
-            "description": "See https://gitlab.internal/group/repo for the code",
+            "description": "See https://gitlab.internal/group/repo. Also https://gitlab.internal/x/y: end",
         }}]}))
     tickets = jira_tools.my_tickets(max_results=5)
     assert tickets[0]["key"] == "PROJ-1"
-    assert tickets[0]["gitlab_urls"] == ["https://gitlab.internal/group/repo"]
+    assert tickets[0]["gitlab_urls"] == ["https://gitlab.internal/group/repo", "https://gitlab.internal/x/y"]
 
 
 @respx.mock

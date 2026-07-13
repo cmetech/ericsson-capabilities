@@ -27,6 +27,8 @@ def register(ctx) -> None:
                 return tool_error(str(e))
             except TypeError as e:
                 return tool_error(f"bad arguments: {e}")
+            except Exception as e:
+                return tool_error(f"jira tool failed: {type(e).__name__}: {e}")
         return handler
 
     handlers = {

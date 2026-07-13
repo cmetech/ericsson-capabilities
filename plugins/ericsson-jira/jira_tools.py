@@ -22,6 +22,11 @@ MY_TICKETS_JQL = ("assignee = currentUser() AND resolution = Unresolved "
                   "ORDER BY priority DESC, updated DESC")
 
 
+def _clean_urls(urls):
+    """Strip trailing punctuation from extracted URLs."""
+    return [u.rstrip(".,;:!?") for u in urls]
+
+
 def check_available() -> bool:
     return (os.environ.get("ERICSSON_ENV") == "1"
             and bool(os.environ.get("JIRA_BASE_URL"))
@@ -66,7 +71,7 @@ def my_tickets(max_results: int = 25) -> list[dict]:
                 "status": (f.get("status") or {}).get("name"),
                 "priority": (f.get("priority") or {}).get("name"),
                 "updated": f.get("updated"),
-                "gitlab_urls": GITLAB_URL_RE.findall(desc),
+                "gitlab_urls": _clean_urls(GITLAB_URL_RE.findall(desc)),
             })
         return out
 
@@ -84,7 +89,7 @@ def get_issue(key: str) -> dict:
                 "status": (f.get("status") or {}).get("name"),
                 "priority": (f.get("priority") or {}).get("name"),
                 "description": _text(f.get("description")),
-                "gitlab_urls": GITLAB_URL_RE.findall(_text(f.get("description"))),
+                "gitlab_urls": _clean_urls(GITLAB_URL_RE.findall(_text(f.get("description")))),
                 "comments": comments}
 
 

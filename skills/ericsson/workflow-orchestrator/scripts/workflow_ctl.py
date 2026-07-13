@@ -271,6 +271,259 @@ def cmd_validate(args):
     emit({"ok": True, "name": doc["name"], "version": doc["version"], "warnings": warnings})
 
 
+# --- run state io ------------------------------------------------------------
+
+def _sha256_file(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def find_run(run_id: str) -> Path:
+    root = runs_root()
+    if root.exists():
+        for wf_dir in sorted(root.iterdir()):
+            cand = wf_dir / run_id
+            if cand.is_dir():
+                return cand
+    raise FileNotFoundError(f"run not found: {run_id}")
+
+
+def save_state(run_dir: Path, state: dict) -> None:
+    state["updated_at"] = now_iso()
+    tmp = run_dir / "state.json.tmp"
+    tmp.write_text(json.dumps(state, indent=2))
+    os.replace(tmp, run_dir / "state.json")
+
+
+def load_state(run_dir: Path) -> dict:
+    sf = run_dir / "state.json"
+    if not sf.exists():
+        raise FileNotFoundError(f"no state.json in {run_dir}")
+    try:
+        return json.loads(sf.read_text())
+    except json.JSONDecodeError:
+        quarantine = run_dir / f"state.json.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        os.replace(sf, quarantine)
+        raise RuntimeError(
+            f"state.json was corrupt and has been quarantined to {quarantine.name}. "
+            "Start a fresh run with 'start', or delete this run with 'clean --run'."
+        )
+
+
+def _load_run(run_id: str):
+    """(run_dir, state) or fail()."""
+    try:
+        run_dir = find_run(run_id)
+        return run_dir, load_state(run_dir)
+    except (FileNotFoundError, RuntimeError) as e:
+        fail(str(e))
+
+
+def _check_yaml_unchanged(state: dict) -> None:
+    p = Path(state["yaml_path"])
+    if not p.exists():
+        fail(f"workflow file has been deleted: {p}. Use 'restart' with a new file or 'clean --run'.")
+    if _sha256_file(p) != state["yaml_sha256"]:
+        fail(f"workflow file changed since this run started: {p}. "
+             "Use 'resume --run <id> --accept-changes' to adopt the new file, or 'restart'.")
+
+
+# --- start -------------------------------------------------------------------
+
+def _parse_inputs(pairs, doc):
+    values = {}
+    for item in doc.get("inputs", []) or []:
+        if isinstance(item, dict) and "default" in item:
+            values[item["name"]] = item["default"]
+    declared = {item["name"] for item in doc.get("inputs", []) or []
+                if isinstance(item, dict) and "name" in item}
+    for pair in pairs or []:
+        if "=" not in pair:
+            fail(f"--input must be key=value, got: {pair}")
+        k, v = pair.split("=", 1)
+        if k not in declared:
+            fail(f"unknown input: {k} (declared: {sorted(declared) or 'none'})")
+        values[k] = v
+    return values
+
+
+def cmd_start(args):
+    try:
+        doc = load_workflow(args.workflow)
+    except Exception as e:
+        fail(str(e))
+    errors, warnings = validate_workflow(doc)
+    if errors:
+        fail("workflow is invalid; fix it or run 'validate' for details", errors=errors)
+    inputs = _parse_inputs(args.input, doc)
+
+    run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + secrets.token_hex(2)
+    run_dir = runs_root() / doc["name"] / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    report = dict(doc.get("report") or {})
+    state = {
+        "workflow": doc["name"], "version": doc["version"],
+        "yaml_path": str(Path(args.workflow).resolve()),
+        "yaml_sha256": _sha256_file(args.workflow),
+        "run_id": run_id, "status": "running",
+        "created_at": now_iso(), "updated_at": now_iso(),
+        "inputs": inputs,
+        "report": {"kanban": report.get("kanban", "auto"),
+                   "notify": report.get("notify", []),
+                   "kanban_task_id": None},
+        "node_order": [n["id"] for n in doc["nodes"]],
+        "nodes": {n["id"]: {"kind": n["kind"], "status": "pending",
+                             "side_effects": bool(n.get("side_effects")),
+                             "attempts": 0, "started_at": None, "finished_at": None,
+                             "outputs": [], "summary": None, "error": None,
+                             "approval": None, "skip_reason": None}
+                   for n in doc["nodes"]},
+    }
+    save_state(run_dir, state)
+    emit({"run_id": run_id, "workflow": doc["name"], "run_dir": str(run_dir),
+          "report": state["report"], "warnings": warnings})
+
+
+# --- next --------------------------------------------------------------------
+
+def _state_resolver(state):
+    def resolve(ref):
+        if ref.startswith("$inputs."):
+            return state["inputs"].get(ref[len("$inputs."):])
+        m = re.match(r"^\$([A-Za-z0-9_-]+)\.output$", ref)
+        if m:
+            node = state["nodes"].get(m.group(1))
+            if node and node["status"] == "ok":
+                return node.get("summary")
+        return None
+    return resolve
+
+
+def _parse_iso(ts):
+    return time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+
+
+def _is_stale(node, stale_after_min):
+    if not node.get("started_at"):
+        return False
+    age_min = (time.time() - _parse_iso(node["started_at"])) / 60.0
+    return age_min > stale_after_min
+
+
+def compute_next(state, doc, stale_after_min=STALE_AFTER_MIN):
+    """Advance the frontier. Mutates state (skips / marks running / parks) and
+    returns the response dict. Caller saves state afterwards."""
+    if state["status"] in TERMINAL:
+        return {"action": state["status"], "report": state["report"]}
+    node_defs = {n["id"]: n for n in doc["nodes"]}
+    resolver = _state_resolver(state)
+
+    for nid in state["node_order"]:
+        node = state["nodes"][nid]
+        if node["status"] == "running":
+            if _is_stale(node, stale_after_min):
+                return {"action": "interrupted", "node_id": nid,
+                        "hint": f"agent died mid-node; run 'resume --run {state['run_id']}'"}
+            return {"action": "in_progress", "node_id": nid}
+        if node["status"] == "waiting_approval":
+            return {"action": "wait_approval", "node_id": nid,
+                    "message": node_defs[nid].get("message", ""),
+                    "report": state["report"]}
+        if node["status"] != "pending":
+            continue
+
+        deps = node_defs[nid].get("depends_on", []) or []
+        dep_states = [state["nodes"][d]["status"] for d in deps]
+        if any(s in ("failed", "rejected") for s in dep_states):
+            continue  # run already failed via record; defensive
+        if any(s == "skipped" for s in dep_states):
+            node["status"] = "skipped"
+            node["skip_reason"] = "dependency skipped"
+            continue
+        if not all(s == "ok" for s in dep_states):
+            continue  # some dependency still ahead in order
+
+        when = node_defs[nid].get("when")
+        if when and not eval_when(when, resolver):
+            node["status"] = "skipped"
+            node["skip_reason"] = f"when evaluated false: {when}"
+            continue
+
+        if node["kind"] == "approval":
+            node["status"] = "waiting_approval"
+            state["status"] = "waiting_approval"
+            return {"action": "wait_approval", "node_id": nid,
+                    "message": node_defs[nid].get("message", ""),
+                    "report": state["report"]}
+
+        node["status"] = "running"
+        node["attempts"] += 1
+        node["started_at"] = now_iso()
+        d = node_defs[nid]
+        return {"action": "execute", "run_id": state["run_id"],
+                "node": {"id": nid, "kind": d["kind"], "prompt": d.get("prompt"),
+                         "command": d.get("command"), "output": d.get("output"),
+                         "side_effects": bool(d.get("side_effects"))},
+                "run_dir": str(find_run(state["run_id"])),
+                "report": state["report"]}
+
+    statuses = {n["status"] for n in state["nodes"].values()}
+    if statuses <= {"ok", "skipped"}:
+        state["status"] = "done"
+        return {"action": "done", "report": state["report"]}
+    return {"action": state["status"], "report": state["report"]}
+
+
+def cmd_next(args):
+    run_dir, state = _load_run(args.run)
+    if state["status"] not in TERMINAL:
+        _check_yaml_unchanged(state)
+    try:
+        doc = load_workflow(state["yaml_path"])
+    except Exception as e:
+        fail(str(e))
+    resp = compute_next(state, doc, args.stale_after_minutes)
+    save_state(run_dir, state)
+    emit(resp)
+
+
+# --- record / set-kanban -------------------------------------------------------
+
+def cmd_record(args):
+    run_dir, state = _load_run(args.run)
+    node = state["nodes"].get(args.node)
+    if node is None:
+        fail(f"unknown node: {args.node}")
+    if node["status"] != "running":
+        fail(f"node {args.node} is {node['status']}, not running — only running "
+             "nodes can be recorded (approvals use approve/reject)")
+    warnings = []
+    if args.status == "ok":
+        node["status"] = "ok"
+        node["summary"] = args.summary
+        node["outputs"] = list(args.output or [])
+        for rel in node["outputs"]:
+            if not (run_dir / rel).exists():
+                warnings.append(f"declared output not found in run dir: {rel}")
+    else:
+        if not args.error:
+            fail("--error is required when --status failed")
+        node["status"] = "failed"
+        node["error"] = args.error
+        state["status"] = "failed"
+    node["finished_at"] = now_iso()
+    save_state(run_dir, state)
+    emit({"ok": True, "run_status": state["status"], "node_status": node["status"],
+          "report": state["report"], "warnings": warnings})
+
+
+def cmd_set_kanban(args):
+    run_dir, state = _load_run(args.run)
+    state["report"]["kanban_task_id"] = args.task_id
+    save_state(run_dir, state)
+    emit({"ok": True, "kanban_task_id": args.task_id})
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="workflow_ctl", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -278,6 +531,30 @@ def main(argv=None):
     p = sub.add_parser("validate", help="structurally validate a workflow YAML")
     p.add_argument("workflow")
     p.set_defaults(fn=cmd_validate)
+
+    p = sub.add_parser("start", help="start a new run")
+    p.add_argument("workflow")
+    p.add_argument("--input", action="append", metavar="k=v")
+    p.set_defaults(fn=cmd_start)
+
+    p = sub.add_parser("next", help="get the next runnable node")
+    p.add_argument("--run", required=True)
+    p.add_argument("--stale-after-minutes", type=int, default=STALE_AFTER_MIN)
+    p.set_defaults(fn=cmd_next)
+
+    p = sub.add_parser("record", help="record a node result")
+    p.add_argument("--run", required=True)
+    p.add_argument("--node", required=True)
+    p.add_argument("--status", required=True, choices=["ok", "failed"])
+    p.add_argument("--output", action="append")
+    p.add_argument("--summary")
+    p.add_argument("--error")
+    p.set_defaults(fn=cmd_record)
+
+    p = sub.add_parser("set-kanban", help="record the mirroring kanban task id")
+    p.add_argument("--run", required=True)
+    p.add_argument("--task-id", required=True)
+    p.set_defaults(fn=cmd_set_kanban)
 
     args = ap.parse_args(argv)
     args.fn(args)

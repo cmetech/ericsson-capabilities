@@ -558,6 +558,45 @@ def cmd_set_kanban(args):
     emit({"ok": True, "kanban_task_id": args.task_id})
 
 
+# --- approvals -----------------------------------------------------------------
+
+def _waiting_node(state):
+    for nid in state["node_order"]:
+        if state["nodes"][nid]["status"] == "waiting_approval":
+            return nid
+    return None
+
+
+def cmd_approve(args):
+    run_dir, state = _load_run(args.run)
+    nid = _waiting_node(state)
+    if nid is None:
+        fail("no node is waiting for approval on this run")
+    node = state["nodes"][nid]
+    node["status"] = "ok"
+    node["finished_at"] = now_iso()
+    node["approval"] = {"decision": "approved", "response": args.response, "at": now_iso()}
+    state["status"] = "running"
+    save_state(run_dir, state)
+    emit({"ok": True, "run_status": "running", "approved_node": nid,
+          "report": state["report"]})
+
+
+def cmd_reject(args):
+    run_dir, state = _load_run(args.run)
+    nid = _waiting_node(state)
+    if nid is None:
+        fail("no node is waiting for approval on this run")
+    node = state["nodes"][nid]
+    node["status"] = "rejected"
+    node["finished_at"] = now_iso()
+    node["approval"] = {"decision": "rejected", "reason": args.reason, "at": now_iso()}
+    state["status"] = "rejected"
+    save_state(run_dir, state)
+    emit({"ok": True, "run_status": "rejected", "rejected_node": nid,
+          "reason": args.reason, "report": state["report"]})
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="workflow_ctl", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -589,6 +628,16 @@ def main(argv=None):
     p.add_argument("--run", required=True)
     p.add_argument("--task-id", required=True)
     p.set_defaults(fn=cmd_set_kanban)
+
+    p = sub.add_parser("approve", help="approve the waiting approval node")
+    p.add_argument("--run", required=True)
+    p.add_argument("--response")
+    p.set_defaults(fn=cmd_approve)
+
+    p = sub.add_parser("reject", help="reject the waiting approval node (ends the run)")
+    p.add_argument("--run", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(fn=cmd_reject)
 
     args = ap.parse_args(argv)
     args.fn(args)

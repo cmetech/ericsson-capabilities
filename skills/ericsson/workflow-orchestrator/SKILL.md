@@ -4,9 +4,6 @@ description: "Run, monitor, approve, and recover deterministic Ericsson workflow
 version: 1.0.0
 author: Ericsson (cmetech)
 platforms: [macos, linux, windows]
-requires_toolsets: [ericsson-teams]
-prerequisites:
-  env_vars: [ERICSSON_ENV]
 metadata:
   hermes:
     tags: [Ericsson, Workflows, Orchestration, Automation]

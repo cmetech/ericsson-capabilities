@@ -23,10 +23,9 @@
   ],
   "personas": [],
   "env": [
-    {"key": "ERICSSON_ENV", "description": "Set to 1 on Ericsson machines to enable Ericsson capabilities", "category": "skill"},
-    {"key": "JIRA_BASE_URL", "description": "Ericsson Jira base URL", "category": "skill"},
-    {"key": "JIRA_PAT", "description": "Jira personal access token", "category": "skill", "password": true},
-    {"key": "GLEAN_MCP_URL", "description": "Glean MCP endpoint (internal document search)", "category": "skill"},
-    {"key": "GLEAN_API_TOKEN", "description": "Glean API token", "category": "skill", "password": true}
+    {"key": "JIRA_BASE_URL", "description": "Ericsson Jira base URL", "category": "tool"},
+    {"key": "JIRA_PAT", "description": "Jira personal access token", "category": "tool", "password": true},
+    {"key": "GLEAN_MCP_URL", "description": "Glean MCP endpoint (internal document search)", "category": "tool"},
+    {"key": "GLEAN_API_TOKEN", "description": "Glean API token", "category": "tool", "password": true}
   ]
 }

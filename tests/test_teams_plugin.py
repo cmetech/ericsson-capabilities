@@ -20,10 +20,8 @@ def teams_env(home, monkeypatch):
 
 
 def test_check_available(monkeypatch):
-    monkeypatch.setenv("ERICSSON_ENV", "1")
-    assert teams_tools.check_available() is True
-    monkeypatch.setenv("ERICSSON_ENV", "0")
-    assert teams_tools.check_available() is False
+    monkeypatch.delenv("ERICSSON_ENV", raising=False)
+    assert teams_tools.check_available() is True          # always available; teams_auth guides sign-in
 
 
 def test_cache_path_under_hermes_home(home):

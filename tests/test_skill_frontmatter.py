@@ -24,11 +24,12 @@ def test_skills_exist():
 def test_frontmatter_required_fields():
     for p in all_skill_mds():
         fm = _frontmatter(p)
-        assert fm.get("name") == p.parent.name, f"{p}: name must match dir"
+        assert fm.get("name") == p.parent.name
         assert isinstance(fm.get("description"), str) and len(fm["description"]) <= 1024
         hermes = (fm.get("metadata") or {}).get("hermes") or {}
-        assert "ericsson" in [t.lower() for t in hermes.get("tags", [])], f"{p}: needs ericsson tag"
-        assert fm.get("requires_toolsets"), f"{p}: must gate on an Ericsson toolset"
+        assert "ericsson" in [t.lower() for t in hermes.get("tags", [])]
+        assert "requires_toolsets" not in fm, f"{p}: skills must NOT gate on a toolset (no-toggle model)"
+        assert "ERICSSON_ENV" not in ((fm.get("prerequisites") or {}).get("env_vars") or [])
 
 
 def test_orchestrator_mentions_all_commands():

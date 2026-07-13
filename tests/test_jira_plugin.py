@@ -19,9 +19,12 @@ def jira_env(monkeypatch):
 
 
 def test_check_available(jira_env, monkeypatch):
+    assert jira_tools.check_available() is True          # jira_env sets BASE_URL + PAT
+    monkeypatch.delenv("JIRA_PAT")
+    assert jira_tools.check_available() is False          # no PAT -> unavailable
+    monkeypatch.delenv("ERICSSON_ENV", raising=False)     # ERICSSON_ENV now irrelevant
+    monkeypatch.setenv("JIRA_PAT", "tok")
     assert jira_tools.check_available() is True
-    monkeypatch.delenv("ERICSSON_ENV")
-    assert jira_tools.check_available() is False
 
 
 def test_missing_env_raises(monkeypatch):

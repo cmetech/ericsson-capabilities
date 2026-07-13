@@ -28,9 +28,7 @@ def _clean_urls(urls):
 
 
 def check_available() -> bool:
-    return (os.environ.get("ERICSSON_ENV") == "1"
-            and bool(os.environ.get("JIRA_BASE_URL"))
-            and bool(os.environ.get("JIRA_PAT")))
+    return bool(os.environ.get("JIRA_BASE_URL")) and bool(os.environ.get("JIRA_PAT"))
 
 
 def _client() -> httpx.Client:

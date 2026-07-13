@@ -19,7 +19,8 @@ class TeamsError(RuntimeError):
 
 
 def check_available() -> bool:
-    return os.environ.get("ERICSSON_ENV") == "1"
+    # Always available; the tools guide the user to teams_auth (device-code) when not signed in.
+    return True
 
 
 def _get(path, **params):

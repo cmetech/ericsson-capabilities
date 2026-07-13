@@ -26,8 +26,10 @@ def test_manifest_content():
                                       "workflows/inbox-digest.yml"}
     assert doc["personas"] == []
     keys = {e["key"] for e in doc["env"]}
-    assert {"ERICSSON_ENV", "JIRA_BASE_URL", "JIRA_PAT",
+    assert {"JIRA_BASE_URL", "JIRA_PAT",
             "GLEAN_MCP_URL", "GLEAN_API_TOKEN"} <= keys
+    assert {e["category"] for e in doc["env"]} == {"tool"}
+    assert "ERICSSON_ENV" not in {e["key"] for e in doc["env"]}
     assert doc["version"] == "0.2.0"
     assert doc["requiresEnv"] == {"ERICSSON_ENV": "1"}
     assert doc["disabledByDefault"] == {

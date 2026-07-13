@@ -741,7 +741,7 @@ def cmd_status(args):
     if args.run:
         run_dir, state = _load_run(args.run)
         nodes = [{"id": nid, **{k: state["nodes"][nid][k] for k in
-                  ("status", "summary", "error", "skip_reason", "attempts")}}
+                  ("status", "summary", "error", "skip_reason", "attempts", "approval")}}
                  for nid in state["node_order"]]
         emit({**_run_summary(state), "nodes": nodes, "run_dir": str(run_dir),
               "report": state["report"]})

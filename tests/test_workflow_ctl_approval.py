@@ -63,6 +63,9 @@ def test_reject_ends_run(ctl, write_wf):
     state = json.loads((wc.find_run(rid) / "state.json").read_text())
     assert state["nodes"]["gate"]["status"] == "rejected"
     assert state["nodes"]["gate"]["approval"]["reason"] == "wrong audience"
+    code, out = ctl("status", "--run", rid)
+    gate = [n for n in out["nodes"] if n["id"] == "gate"][0]
+    assert gate["approval"]["reason"] == "wrong audience"
 
 
 def test_approve_without_waiting_node_fails(ctl, write_wf):

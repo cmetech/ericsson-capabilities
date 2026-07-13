@@ -498,11 +498,21 @@ def compute_next(state, doc, stale_after_min=STALE_AFTER_MIN):
     if statuses <= {"ok", "skipped"}:
         state["status"] = "done"
         return {"action": "done", "report": state["report"]}
-    # Defensive fallback: unreachable for a valid DAG once the fixpoint scan
-    # above has run — a full pass changed nothing and some node is still not
-    # ok/skipped, which validate_workflow()'s cycle/dependency checks should
-    # have already ruled out.
-    return {"action": state["status"], "report": state["report"]}
+
+    # Reconcile rather than leak a raw status: the fixpoint scan above only
+    # returns early for running/waiting_approval/execute nodes, so getting
+    # here with a node still "failed" means the top-level status drifted
+    # (e.g. skipping an unrelated node once incorrectly restored "running").
+    # Never surface a bare {"action": "running"} — that is a silent stall.
+    failed_ids = [nid for nid in state["node_order"]
+                  if state["nodes"][nid]["status"] == "failed"]
+    if failed_ids:
+        state["status"] = "failed"
+        return {"action": "failed", "node_id": failed_ids[0], "report": state["report"]}
+
+    return {"action": "stalled",
+            "hint": f"no runnable node; check 'status --run {state['run_id']}' and use resume/skip",
+            "report": state["report"]}
 
 
 def cmd_next(args):
@@ -614,6 +624,13 @@ def _adopt_changes(state, run_dir):
     if missing:
         fail(f"edited workflow removed nodes this run already executed: {missing}. "
              "Use 'restart' for a fresh run instead.")
+    # Executed nodes that vanished from the YAML are already blocked above;
+    # PENDING nodes that vanished are safe to drop, and must be — otherwise
+    # they linger in state forever and corrupt node_counts in status/list.
+    orphaned_pending = [nid for nid, n in state["nodes"].items()
+                         if nid not in new_ids and n["status"] == "pending"]
+    for nid in orphaned_pending:
+        del state["nodes"][nid]
     for n in doc["nodes"]:
         if n["id"] not in state["nodes"]:
             state["nodes"][n["id"]] = {"kind": n["kind"], "status": "pending",
@@ -673,10 +690,17 @@ def cmd_skip(args):
         fail(f"unknown node: {args.node}")
     if node["status"] in ("ok", "skipped"):
         fail(f"node {args.node} is already {node['status']}")
+    # Only revive the run if the skipped node was itself the blocker; skipping
+    # some other (e.g. pending) node must never flip a failed/waiting run back
+    # to "running" — that produces a silent stall (compute_next would then
+    # have nothing runnable to report but a run that claims to be active).
+    prior_status = node["status"]
+    was_blocker = prior_status in ("failed", "waiting_approval") or (
+        prior_status == "running" and _is_stale(node, STALE_AFTER_MIN))
     node["status"] = "skipped"
     node["skip_reason"] = f"manual: {args.reason}"
     node["finished_at"] = now_iso()
-    if state["status"] in ("failed", "waiting_approval"):
+    if was_blocker and state["status"] in ("failed", "waiting_approval"):
         state["status"] = "running"
     save_state(run_dir, state)
     emit({"ok": True, "node_status": "skipped", "run_status": state["status"]})
@@ -709,7 +733,7 @@ def _iter_run_dirs(workflow=None):
         if not wf_dir.is_dir():
             continue
         for run_dir in sorted(wf_dir.iterdir()):
-            if (run_dir / "state.json").exists():
+            if (run_dir / "state.json").exists() or any(run_dir.glob("state.json.corrupt-*")):
                 yield run_dir
 
 
@@ -725,7 +749,7 @@ def cmd_status(args):
     for run_dir in _iter_run_dirs(args.workflow):
         try:
             runs.append(_run_summary(load_state(run_dir)))
-        except RuntimeError:
+        except (RuntimeError, FileNotFoundError):
             runs.append({"run_id": run_dir.name, "workflow": run_dir.parent.name,
                          "status": "corrupt"})
     emit({"runs": runs[-50:]})
@@ -745,8 +769,9 @@ def cmd_list(args):
     for run_dir in _iter_run_dirs():
         try:
             runs.append(_run_summary(load_state(run_dir)))
-        except RuntimeError:
-            continue
+        except (RuntimeError, FileNotFoundError):
+            runs.append({"run_id": run_dir.name, "workflow": run_dir.parent.name,
+                         "status": "corrupt"})
     emit({"workflows": workflows, "runs": runs[-20:]})
 
 
@@ -791,10 +816,13 @@ def cmd_clean(args):
         for run_dir in _iter_run_dirs():
             try:
                 state = load_state(run_dir)
-                if _parse_iso(state["updated_at"]) < cutoff:
-                    _remove(run_dir)
             except (RuntimeError, FileNotFoundError):
+                # Corrupt/quarantined runs are unsweepable garbage by
+                # definition (no valid updated_at) — remove regardless of age.
+                _remove(run_dir)
                 continue
+            if _parse_iso(state["updated_at"]) < cutoff:
+                _remove(run_dir)
     else:
         fail("clean requires --run, --workflow, or --all")
     emit({"ok": True, "removed": removed, "protected": protected})

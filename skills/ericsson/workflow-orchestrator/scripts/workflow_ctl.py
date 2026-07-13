@@ -13,6 +13,7 @@ Layout: $HERMES_HOME/workflows/<name>.yml (library) and
 from __future__ import annotations
 
 import argparse
+import calendar
 import hashlib
 import json
 import os
@@ -294,19 +295,32 @@ def save_state(run_dir: Path, state: dict) -> None:
     os.replace(tmp, run_dir / "state.json")
 
 
+REQUIRED_STATE_KEYS = {"run_id", "status", "nodes", "node_order", "report", "inputs"}
+
+
+def _quarantine_state(run_dir: Path, sf: Path) -> RuntimeError:
+    """Rename a corrupt/malformed state.json out of the way and return the
+    actionable error to raise. Shared by the decode-error and shape-error
+    paths in load_state() so both fail the same way."""
+    quarantine = run_dir / f"state.json.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+    os.replace(sf, quarantine)
+    return RuntimeError(
+        f"state.json was corrupt and has been quarantined to {quarantine.name}. "
+        "Start a fresh run with 'start', or delete this run with 'clean --run'."
+    )
+
+
 def load_state(run_dir: Path) -> dict:
     sf = run_dir / "state.json"
     if not sf.exists():
         raise FileNotFoundError(f"no state.json in {run_dir}")
     try:
-        return json.loads(sf.read_text())
+        data = json.loads(sf.read_text())
     except json.JSONDecodeError:
-        quarantine = run_dir / f"state.json.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
-        os.replace(sf, quarantine)
-        raise RuntimeError(
-            f"state.json was corrupt and has been quarantined to {quarantine.name}. "
-            "Start a fresh run with 'start', or delete this run with 'clean --run'."
-        )
+        raise _quarantine_state(run_dir, sf) from None
+    if not isinstance(data, dict) or not REQUIRED_STATE_KEYS.issubset(data.keys()):
+        raise _quarantine_state(run_dir, sf) from None
+    return data
 
 
 def _load_run(run_id: str):
@@ -400,7 +414,7 @@ def _state_resolver(state):
 
 
 def _parse_iso(ts):
-    return time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    return calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 def _is_stale(node, stale_after_min):
@@ -418,66 +432,86 @@ def compute_next(state, doc, stale_after_min=STALE_AFTER_MIN):
     node_defs = {n["id"]: n for n in doc["nodes"]}
     resolver = _state_resolver(state)
 
-    for nid in state["node_order"]:
-        node = state["nodes"][nid]
-        if node["status"] == "running":
-            if _is_stale(node, stale_after_min):
-                return {"action": "interrupted", "node_id": nid,
-                        "hint": f"agent died mid-node; run 'resume --run {state['run_id']}'"}
-            return {"action": "in_progress", "node_id": nid}
-        if node["status"] == "waiting_approval":
-            return {"action": "wait_approval", "node_id": nid,
-                    "message": node_defs[nid].get("message", ""),
+    # Skip-cascades can span node_order in either direction (a dependency may
+    # be declared AFTER its dependent in the YAML). A single left-to-right
+    # pass only propagates one hop of "dependency skipped" per call, which
+    # can leave the frontier with no runnable node and nothing returned yet
+    # every node effectively resolved. Re-run the scan to a fixpoint: only
+    # stop once a full pass changes no node's status.
+    while True:
+        changed = False
+        for nid in state["node_order"]:
+            node = state["nodes"][nid]
+            if node["status"] == "running":
+                if _is_stale(node, stale_after_min):
+                    return {"action": "interrupted", "node_id": nid,
+                            "hint": f"agent died mid-node; run 'resume --run {state['run_id']}'"}
+                return {"action": "in_progress", "node_id": nid}
+            if node["status"] == "waiting_approval":
+                return {"action": "wait_approval", "node_id": nid,
+                        "message": node_defs[nid].get("message", ""),
+                        "report": state["report"]}
+            if node["status"] != "pending":
+                continue
+
+            deps = node_defs[nid].get("depends_on", []) or []
+            dep_states = [state["nodes"][d]["status"] for d in deps]
+            if any(s in ("failed", "rejected") for s in dep_states):
+                continue  # run already failed via record; defensive
+            if any(s == "skipped" for s in dep_states):
+                node["status"] = "skipped"
+                node["skip_reason"] = "dependency skipped"
+                changed = True
+                continue
+            if not all(s == "ok" for s in dep_states):
+                continue  # some dependency still ahead in order
+
+            when = node_defs[nid].get("when")
+            if when and not eval_when(when, resolver):
+                node["status"] = "skipped"
+                node["skip_reason"] = f"when evaluated false: {when}"
+                changed = True
+                continue
+
+            if node["kind"] == "approval":
+                node["status"] = "waiting_approval"
+                state["status"] = "waiting_approval"
+                return {"action": "wait_approval", "node_id": nid,
+                        "message": node_defs[nid].get("message", ""),
+                        "report": state["report"]}
+
+            node["status"] = "running"
+            node["attempts"] += 1
+            node["started_at"] = now_iso()
+            d = node_defs[nid]
+            return {"action": "execute", "run_id": state["run_id"],
+                    "node": {"id": nid, "kind": d["kind"], "prompt": d.get("prompt"),
+                             "command": d.get("command"), "output": d.get("output"),
+                             "side_effects": bool(d.get("side_effects"))},
+                    "run_dir": str(find_run(state["run_id"])),
                     "report": state["report"]}
-        if node["status"] != "pending":
-            continue
 
-        deps = node_defs[nid].get("depends_on", []) or []
-        dep_states = [state["nodes"][d]["status"] for d in deps]
-        if any(s in ("failed", "rejected") for s in dep_states):
-            continue  # run already failed via record; defensive
-        if any(s == "skipped" for s in dep_states):
-            node["status"] = "skipped"
-            node["skip_reason"] = "dependency skipped"
-            continue
-        if not all(s == "ok" for s in dep_states):
-            continue  # some dependency still ahead in order
-
-        when = node_defs[nid].get("when")
-        if when and not eval_when(when, resolver):
-            node["status"] = "skipped"
-            node["skip_reason"] = f"when evaluated false: {when}"
-            continue
-
-        if node["kind"] == "approval":
-            node["status"] = "waiting_approval"
-            state["status"] = "waiting_approval"
-            return {"action": "wait_approval", "node_id": nid,
-                    "message": node_defs[nid].get("message", ""),
-                    "report": state["report"]}
-
-        node["status"] = "running"
-        node["attempts"] += 1
-        node["started_at"] = now_iso()
-        d = node_defs[nid]
-        return {"action": "execute", "run_id": state["run_id"],
-                "node": {"id": nid, "kind": d["kind"], "prompt": d.get("prompt"),
-                         "command": d.get("command"), "output": d.get("output"),
-                         "side_effects": bool(d.get("side_effects"))},
-                "run_dir": str(find_run(state["run_id"])),
-                "report": state["report"]}
+        if not changed:
+            break
 
     statuses = {n["status"] for n in state["nodes"].values()}
     if statuses <= {"ok", "skipped"}:
         state["status"] = "done"
         return {"action": "done", "report": state["report"]}
+    # Defensive fallback: unreachable for a valid DAG once the fixpoint scan
+    # above has run — a full pass changed nothing and some node is still not
+    # ok/skipped, which validate_workflow()'s cycle/dependency checks should
+    # have already ruled out.
     return {"action": state["status"], "report": state["report"]}
 
 
 def cmd_next(args):
     run_dir, state = _load_run(args.run)
-    if state["status"] not in TERMINAL:
-        _check_yaml_unchanged(state)
+    if state["status"] in TERMINAL:
+        # Terminal runs are done; don't touch the YAML at all (it may have
+        # been deleted/moved since the run finished).
+        emit({"action": state["status"], "report": state["report"]})
+    _check_yaml_unchanged(state)
     try:
         doc = load_workflow(state["yaml_path"])
     except Exception as e:

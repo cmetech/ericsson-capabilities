@@ -67,6 +67,8 @@ def test_when_true_executes_send(ctl, write_wf):
     for node in ("fetch", "summarize"):
         code, nxt = ctl("next", "--run", rid)
         assert nxt["node"]["id"] == node
+        if node == "fetch":
+            assert nxt["inputs"]["deliver_to"] == "email"
         ctl("record", "--run", rid, "--node", node, "--status", "ok", "--summary", "s")
     code, nxt = ctl("next", "--run", rid)
     assert nxt["action"] == "execute" and nxt["node"]["id"] == "send"

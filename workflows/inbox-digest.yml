@@ -12,8 +12,9 @@ nodes:
   - id: collect
     kind: tool
     prompt: >
-      Using the Outlook MCP message_list tool, list unread inbox mail from the
-      last $inputs.since (limit $inputs.limit). For any message that looks
+      Using the Outlook MCP message_list tool, list unread inbox mail using this run's
+      `since` and `limit` input values (shown in the `inputs` field of the workflow_ctl
+      next/status output; defaults: last 1 day, 15 messages). For any message that looks
       important but truncated, use message_read for the full body. Save the
       collected data as inbox.json.
     output: inbox.json

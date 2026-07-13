@@ -16,6 +16,8 @@ def test_reference_workflows_validate_cleanly():
         errors, _warnings = wc.validate_workflow(doc)
         assert errors == [], f"{p.name}: {errors}"
         assert "ericsson" in doc.get("tags", []), f"{p.name}: missing ericsson tag"
+        for n in doc.get("nodes", []):
+            assert "$inputs" not in n.get("prompt", ""), f"{p.name} node {n.get('id')}: prompt uses non-interpolated $inputs syntax"
 
 
 def test_tickets_summary_has_approval_and_side_effect():

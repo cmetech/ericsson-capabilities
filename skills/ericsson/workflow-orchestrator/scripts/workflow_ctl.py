@@ -485,6 +485,7 @@ def compute_next(state, doc, stale_after_min=STALE_AFTER_MIN):
             node["started_at"] = now_iso()
             d = node_defs[nid]
             return {"action": "execute", "run_id": state["run_id"],
+                    "inputs": state["inputs"],
                     "node": {"id": nid, "kind": d["kind"], "prompt": d.get("prompt"),
                              "command": d.get("command"), "output": d.get("output"),
                              "side_effects": bool(d.get("side_effects"))},
@@ -743,7 +744,7 @@ def cmd_status(args):
         nodes = [{"id": nid, **{k: state["nodes"][nid][k] for k in
                   ("status", "summary", "error", "skip_reason", "attempts", "approval")}}
                  for nid in state["node_order"]]
-        emit({**_run_summary(state), "nodes": nodes, "run_dir": str(run_dir),
+        emit({**_run_summary(state), "inputs": state["inputs"], "nodes": nodes, "run_dir": str(run_dir),
               "report": state["report"]})
     runs = []
     for run_dir in _iter_run_dirs(args.workflow):

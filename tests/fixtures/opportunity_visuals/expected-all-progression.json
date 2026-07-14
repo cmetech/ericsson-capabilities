@@ -1,0 +1,114 @@
+{
+  "excluded": [
+    {
+      "code": "insufficient_stages",
+      "id": "OV-005"
+    }
+  ],
+  "included_ids": [
+    "OV-003",
+    "OV-004",
+    "OV-002",
+    "OV-006",
+    "OV-001",
+    "OV-010",
+    "OV-009",
+    "OV-011",
+    "OV-008",
+    "OV-007",
+    "OV-012"
+  ],
+  "terminals": {
+    "OV-001": {
+      "index": 2,
+      "kind": "positive",
+      "month": "2026-05"
+    },
+    "OV-002": null,
+    "OV-003": {
+      "index": 2,
+      "kind": "negative",
+      "month": "2026-05"
+    },
+    "OV-004": null,
+    "OV-006": null,
+    "OV-007": null,
+    "OV-008": null,
+    "OV-009": {
+      "index": 1,
+      "kind": "negative",
+      "month": "2026-04"
+    },
+    "OV-010": {
+      "index": 3,
+      "kind": "positive",
+      "month": "2026-06"
+    },
+    "OV-011": null,
+    "OV-012": null
+  },
+  "transitions": {
+    "OV-001": [
+      "initial",
+      "positive",
+      "won"
+    ],
+    "OV-002": [
+      "initial",
+      "positive",
+      "positive",
+      "neutral"
+    ],
+    "OV-003": [
+      "initial",
+      "negative",
+      "lost"
+    ],
+    "OV-004": [
+      "initial",
+      "neutral",
+      "neutral",
+      "neutral"
+    ],
+    "OV-006": [
+      "initial",
+      "empty",
+      "positive",
+      "neutral"
+    ],
+    "OV-007": [
+      "initial",
+      "mixed",
+      "neutral",
+      "neutral"
+    ],
+    "OV-008": [
+      "initial",
+      "positive",
+      "neutral",
+      "neutral"
+    ],
+    "OV-009": [
+      "initial",
+      "lost"
+    ],
+    "OV-010": [
+      "initial",
+      "negative",
+      "positive",
+      "won"
+    ],
+    "OV-011": [
+      "initial",
+      "unknown",
+      "neutral",
+      "neutral"
+    ],
+    "OV-012": [
+      "initial",
+      "positive",
+      "positive",
+      "neutral"
+    ]
+  }
+}

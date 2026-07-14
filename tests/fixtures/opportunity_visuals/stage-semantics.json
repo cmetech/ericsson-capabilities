@@ -1,0 +1,43 @@
+{
+  "negative_terminals": [
+    "Lost",
+    "Cancelled"
+  ],
+  "positive_terminals": [
+    "Won"
+  ],
+  "positive_transitions": [
+    [
+      "Proposal",
+      "Workshop"
+    ]
+  ],
+  "probability_order": [
+    "Low",
+    "Medium",
+    "High",
+    "Certain"
+  ],
+  "stage_paths": [
+    [
+      "Ideation",
+      "Solution",
+      "Proposal",
+      "SDP2",
+      "Won"
+    ],
+    [
+      "POC",
+      "Workshop",
+      "Commercials",
+      "Won"
+    ]
+  ],
+  "tcv_order": [
+    "X-Small",
+    "Small",
+    "Medium",
+    "Large",
+    "X-Large"
+  ]
+}

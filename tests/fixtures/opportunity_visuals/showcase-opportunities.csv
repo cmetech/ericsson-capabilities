@@ -1,0 +1,13 @@
+ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Mar '26 Probability,Apr '26,Apr '26 Probability,May '26,May '26 Probability,Jun '26,Jun '26 Probability
+OV-001,Core Group,Core,Aurora Core Renewal,X-Large,Certain,Ideation,Low,Proposal,Medium,Won,Certain,In Delivery,Certain
+OV-002,Core Group,Automation,Beacon Automation,Large,High,Proposal,Medium,Workshop,High,Commercials,High,Commercials,High
+OV-003,Cloud Group,Assurance,Cedar Assurance,X-Large,Low,Solution,High,Ideation,Medium,Lost,Low,,
+OV-004,Cloud Group,Assurance,Delta Capacity,Medium,Medium,Solution,Medium,Solution,Medium,Solution,Medium,Solution,Medium
+OV-005,Edge Group,Discovery,Echo Modernization,Small,Low,,,,,Discovery,Low,,
+OV-006,Core Group,Automation,Fjord Analytics,Medium,High,Ideation,Low,,,Proposal,High,Proposal,High
+OV-007,OSS Group,Orchestration,Grove Orchestration,Large,Medium,Solution,High,Proposal,Medium,Proposal,Medium,Proposal,Medium
+OV-008,OSS Group,Observability,Harbor Observability <Pilot> =1+1,Small,Medium,Ideation,Low,Solution,Medium,Solution,Medium,Solution,Medium
+OV-009,Edge Group,Delivery,Ion Edge Program,X-Large,Low,Proposal,High,Lost,Low,Restarted,Medium,Won,Certain
+OV-010,Core Group,Core,Juniper Expansion,Large,Certain,Proposal,High,Solution,Medium,Proposal,High,Won,Certain
+OV-011,Edge Group,Discovery,Kite Discovery,X-Small,Low,Discovery,Low,Deferred,Low,Deferred,Low,Deferred,Low
+OV-012,OSS Group,Platform,Lumen Platform,Medium,High,Ideation,Low,Solution,Medium,Proposal,High,Proposal,High

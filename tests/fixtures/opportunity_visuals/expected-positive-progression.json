@@ -1,0 +1,89 @@
+{
+  "excluded": [
+    {
+      "code": "insufficient_stages",
+      "id": "OV-005"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-003"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-004"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-007"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-009"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-011"
+    }
+  ],
+  "included_ids": [
+    "OV-002",
+    "OV-006",
+    "OV-001",
+    "OV-010",
+    "OV-008",
+    "OV-012"
+  ],
+  "terminals": {
+    "OV-001": {
+      "index": 2,
+      "kind": "positive",
+      "month": "2026-05"
+    },
+    "OV-002": null,
+    "OV-006": null,
+    "OV-008": null,
+    "OV-010": {
+      "index": 3,
+      "kind": "positive",
+      "month": "2026-06"
+    },
+    "OV-012": null
+  },
+  "transitions": {
+    "OV-001": [
+      "initial",
+      "positive",
+      "won"
+    ],
+    "OV-002": [
+      "initial",
+      "positive",
+      "positive",
+      "neutral"
+    ],
+    "OV-006": [
+      "initial",
+      "empty",
+      "positive",
+      "neutral"
+    ],
+    "OV-008": [
+      "initial",
+      "positive",
+      "neutral",
+      "neutral"
+    ],
+    "OV-010": [
+      "initial",
+      "negative",
+      "positive",
+      "won"
+    ],
+    "OV-012": [
+      "initial",
+      "positive",
+      "positive",
+      "neutral"
+    ]
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "excluded": [
+    {
+      "code": "insufficient_stages",
+      "id": "OV-005"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-001"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-002"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-004"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-006"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-007"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-008"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-010"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-011"
+    },
+    {
+      "code": "view_not_matched",
+      "id": "OV-012"
+    }
+  ],
+  "included_ids": [
+    "OV-003",
+    "OV-009"
+  ],
+  "terminals": {
+    "OV-003": {
+      "index": 2,
+      "kind": "negative",
+      "month": "2026-05"
+    },
+    "OV-009": {
+      "index": 1,
+      "kind": "negative",
+      "month": "2026-04"
+    }
+  },
+  "transitions": {
+    "OV-003": [
+      "initial",
+      "negative",
+      "lost"
+    ],
+    "OV-009": [
+      "initial",
+      "lost"
+    ]
+  }
+}

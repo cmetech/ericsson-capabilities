@@ -1392,3 +1392,96 @@ def test_analyze_cli_returns_structured_json_for_invalid_arguments(tmp_path):
         "message": "Invalid command arguments",
         "details": {},
     }
+
+
+@pytest.mark.parametrize(
+    ("alias", "terminal_key", "later_terminal"),
+    [
+        ("Closed Lost", "negative_terminals", "Won"),
+        ("Closed Won", "positive_terminals", "Lost"),
+    ],
+)
+@pytest.mark.parametrize(
+    "view", ["wins", "losses", "all-progression", "positive-progression"]
+)
+def test_analyze_reports_pre_range_terminal_alias_before_stable_exclusion(
+    tmp_path, semantics, alias, terminal_key, later_terminal, view
+):
+    source = tmp_path / "pre-range-alias.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26,May '26\n"
+        f"OV-A,North,One,Secret Alias,Large,High,{alias},Proposal,{later_terminal}\n"
+        f"OV-B,North,One,Blank Before,Medium,Medium,,Proposal,{later_terminal}\n"
+        f"OV-C,North,One,Known Before,Small,Low,Discovery,Proposal,{later_terminal}\n",
+        encoding="utf-8",
+    )
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    before_bytes = source.read_bytes()
+    before_names = sorted(path.name for path in tmp_path.iterdir())
+
+    report = analyze(
+        source,
+        view,
+        semantics_path,
+        months=["Apr '26", "May '26"],
+    )
+
+    assert report["unresolved_terminal_stages"] == [
+        {
+            "stage": alias,
+            "code": "unknown_terminal_status",
+            "occurrences": 1,
+            "affects_output": True,
+        }
+    ]
+    assert report["unresolved_transitions"] == []
+    serialized = json.dumps(report)
+    for private_value in ("OV-A", "Secret Alias", "Blank Before", "Known Before"):
+        assert private_value not in serialized
+    assert source.read_bytes() == before_bytes
+    assert sorted(path.name for path in tmp_path.iterdir()) == before_names
+
+    confirmed = dict(semantics)
+    confirmed[terminal_key] = [*semantics[terminal_key], alias.casefold()]
+    semantics_path.write_text(json.dumps(confirmed), encoding="utf-8")
+    output_dir = tmp_path / view
+    prepare(
+        source,
+        view,
+        semantics_path,
+        output_dir,
+        months=["Apr '26", "May '26"],
+    )
+    normalized = json.loads((output_dir / "normalized-data.json").read_text())
+    assert "OV-A" not in [record["id"] for record in normalized["records"]]
+    assert next(
+        item for item in normalized["exclusions"] if item["id"] == "OV-A"
+    )["code"] == "terminal_before_range"
+
+
+def test_analyze_rejects_uncached_formula_in_pre_range_stage(tmp_path, semantics):
+    source = tmp_path / "pre-range-formula.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append(HEADERS)
+    row = ROW.copy()
+    row[5] = '=IF(1=1,"Closed Lost","")'
+    sheet.append(row)
+    workbook.save(source)
+    workbook.close()
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    with pytest.raises(DataContractError) as error:
+        analyze(
+            source,
+            "wins",
+            semantics_path,
+            sheet="Pipeline",
+            months=["Apr '26", "May '26"],
+        )
+
+    assert error.value.code == "formula_cache_missing"
+    assert error.value.details == {"cells": [{"row": 2, "header": "Mar '26"}]}

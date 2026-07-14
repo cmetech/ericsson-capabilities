@@ -117,6 +117,7 @@ def test_opportunity_visuals_docs_match_the_live_port():
 def test_opportunity_visuals_interview_documents_read_only_analysis():
     skill = (SKILL_DIR / "SKILL.md").read_text()
     contract = (SKILL_DIR / "references/data-contract.md").read_text()
+    normalized_contract = " ".join(contract.split())
     interview = (SKILL_DIR / "references/interview-guide.md").read_text()
 
     assert "prepare_opportunities.py analyze" in skill
@@ -127,6 +128,12 @@ def test_opportunity_visuals_interview_documents_read_only_analysis():
     assert "terminal_status_resolved" in contract
     assert "affects_truncation" in contract
     assert "terminal metadata, and first-terminal cutoff" in contract
+    assert "pre-range stage history" in contract
+    assert (
+        "terminal-before-range exclusion is evaluated before filters"
+        in normalized_contract
+    )
+    assert "uncached formula" in contract
     assert "mixed_transitions" in contract
     assert "add it to `non_terminal_stages`" in interview
     assert "terminal status" in interview

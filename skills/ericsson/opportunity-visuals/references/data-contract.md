@@ -57,6 +57,16 @@ terminal metadata, and first-terminal cutoff. Resolve one stage at a time:
 add an alias to `positive_terminals` or `negative_terminals`, or add a
 confirmed non-terminal to `non_terminal_stages`, then rerun analyze.
 
+The terminal-status scan includes relevant pre-range stage history before the
+first selected month as well as selected normalized records. Movement-direction
+groups remain scoped to the selected range. Because terminal-before-range
+exclusion is evaluated before filters, analysis may conservatively report an
+unknown pre-range stage from a row that a later filter would exclude; confirming
+it can still change the exclusion audit. Blank and known stages are ignored.
+Every pre-range stage cell used by analysis has the same formula safety as a
+selected stage cell: an uncached formula returns `formula_cache_missing`, and
+formulas are never executed.
+
 Each grouped transition contains the exact display `from_stage` and
 `to_stage`, stable `code`, `occurrences`, `terminal_status_resolved`,
 `affects_inclusion`, and `affects_truncation`. Blank months remain blank; the

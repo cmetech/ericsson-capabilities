@@ -178,6 +178,7 @@ def _selected_formula_errors(
     metadata: dict[str, object],
     mapping: dict[str, object],
     selected_mapping: dict[str, object],
+    pre_range_months: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     selected_headers = {
         str(mapping[field])
@@ -187,6 +188,8 @@ def _selected_formula_errors(
         selected_headers.add(str(month["stage"]))
         if "probability" in month:
             selected_headers.add(str(month["probability"]))
+    for month in pre_range_months or []:
+        selected_headers.add(str(month["stage"]))
     return [
         item
         for item in metadata.get("uncached_formulas", [])
@@ -271,24 +274,30 @@ def _terminal_status_resolved(stage: str, semantics: dict[str, object]) -> bool:
 
 
 def _group_unresolved_terminal_stages(
-    records: list[dict[str, object]], semantics: dict[str, object]
+    records: list[dict[str, object]],
+    semantics: dict[str, object],
+    pre_range_stages: list[str] | None = None,
 ) -> list[dict[str, object]]:
     grouped: dict[str, dict[str, object]] = {}
-    for record in records:
-        for month in record["months"]:
-            stage = str(month["stage"])
-            if not stage.strip() or _terminal_status_resolved(stage, semantics):
-                continue
-            entry = grouped.setdefault(
-                stage,
-                {
-                    "stage": stage,
-                    "code": "unknown_terminal_status",
-                    "occurrences": 0,
-                    "affects_output": True,
-                },
-            )
-            entry["occurrences"] = int(entry["occurrences"]) + 1
+    observed_stages = list(pre_range_stages or [])
+    observed_stages.extend(
+        str(month["stage"])
+        for record in records
+        for month in record["months"]
+    )
+    for stage in observed_stages:
+        if not stage.strip() or _terminal_status_resolved(stage, semantics):
+            continue
+        entry = grouped.setdefault(
+            stage,
+            {
+                "stage": stage,
+                "code": "unknown_terminal_status",
+                "occurrences": 0,
+                "affects_output": True,
+            },
+        )
+        entry["occurrences"] = int(entry["occurrences"]) + 1
     return [
         grouped[stage]
         for stage in sorted(grouped, key=lambda value: (value.casefold(), value))
@@ -319,13 +328,14 @@ def analyze(
     selected_mapping, selected_months, first_selected_index = _selected_mapping(
         mapping, months
     )
+    pre_range_months = list(mapping["months"])[:first_selected_index]
     intersecting_formulas = _selected_formula_errors(
-        metadata, mapping, selected_mapping
+        metadata, mapping, selected_mapping, pre_range_months
     )
     if intersecting_formulas:
         raise DataContractError(
             "formula_cache_missing",
-            "A selected formula cell has no cached value",
+            "A required formula cell has no cached value",
             {"cells": intersecting_formulas},
         )
 
@@ -348,8 +358,13 @@ def analyze(
     ]
     filtered_records, filter_exclusions = apply_filters(records, filters)
     select_records(filtered_records, view)
+    pre_range_stages = [
+        str(row.get(str(month["stage"]), ""))
+        for row in rows
+        for month in pre_range_months
+    ]
     unresolved_terminals = _group_unresolved_terminal_stages(
-        filtered_records, semantics
+        filtered_records, semantics, pre_range_stages
     )
     unresolved = _group_transitions(
         filtered_records, view, "unknown", "unknown_transition", semantics
@@ -427,14 +442,15 @@ def prepare(
     selected_mapping, selected_months, first_selected_index = _selected_mapping(
         mapping, months
     )
+    pre_range_months = list(mapping["months"])[:first_selected_index]
 
     intersecting_formulas = _selected_formula_errors(
-        metadata, mapping, selected_mapping
+        metadata, mapping, selected_mapping, pre_range_months
     )
     if intersecting_formulas:
         raise DataContractError(
             "formula_cache_missing",
-            "A selected formula cell has no cached value",
+            "A required formula cell has no cached value",
             {"cells": intersecting_formulas},
         )
 

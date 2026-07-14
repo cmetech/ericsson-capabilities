@@ -84,6 +84,53 @@ def test_loaders_return_equivalent_rows(csv_source, json_source, xlsx_source):
     assert meta["sheet"] == "Pipeline"
 
 
+def test_loaders_and_mapping_preserve_padded_header_labels(tmp_path):
+    headers = [
+        "  Area  ",
+        " Sub-area",
+        "Opportunity Name ",
+        " TCV ",
+        "Probability  ",
+        " Mar '26 ",
+        " Apr '26 ",
+        "Apr '26 Probability ",
+    ]
+    expected_rows = [dict(zip(headers, ROW, strict=True))]
+
+    csv_source = tmp_path / "padded.csv"
+    csv_source.write_text(
+        ",".join(headers) + "\n" + ",".join(ROW) + "\n",
+        encoding="utf-8",
+    )
+    json_source = tmp_path / "padded.json"
+    json_source.write_text(json.dumps(expected_rows), encoding="utf-8")
+    xlsx_source = tmp_path / "padded.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append(headers)
+    sheet.append(ROW)
+    workbook.save(xlsx_source)
+
+    csv_rows, _ = load_source(csv_source)
+    json_rows, _ = load_source(json_source)
+    xlsx_rows, _ = load_source(xlsx_source, "Pipeline")
+
+    assert csv_rows == json_rows == xlsx_rows == expected_rows
+    mapping = resolve_mapping(list(csv_rows[0]), None)
+    assert mapping["area"] == "  Area  "
+    assert mapping["sub_area"] == " Sub-area"
+    assert mapping["months"] == [
+        {"key": "2026-03", "label": " Mar '26 ", "stage": " Mar '26 "},
+        {
+            "key": "2026-04",
+            "label": " Apr '26 ",
+            "stage": " Apr '26 ",
+            "probability": "Apr '26 Probability ",
+        },
+    ]
+
+
 def test_inspect_lists_sheets_headers_and_month_candidates(xlsx_source):
     report = inspect_source(xlsx_source, "Pipeline")
     assert report["format"] == "xlsx"
@@ -160,6 +207,73 @@ def test_explicit_mapping_is_validated_and_months_are_sorted():
         },
         {"key": "2026-04", "label": "April", "stage": "Apr '26"},
     ]
+
+
+@pytest.mark.parametrize(
+    ("months", "reused_header"),
+    [
+        (
+            [
+                {"key": "2026-03", "label": "March", "stage": "Mar '26"},
+                {"key": "2026-04", "label": "April", "stage": "Mar '26"},
+            ],
+            "Mar '26",
+        ),
+        (
+            [
+                {
+                    "key": "2026-03",
+                    "label": "March",
+                    "stage": "Mar '26",
+                    "probability": "Mar '26",
+                },
+            ],
+            "Mar '26",
+        ),
+        (
+            [
+                {
+                    "key": "2026-03",
+                    "label": "March",
+                    "stage": "Mar '26",
+                    "probability": "Monthly Probability",
+                },
+                {
+                    "key": "2026-04",
+                    "label": "April",
+                    "stage": "Apr '26",
+                    "probability": "Monthly Probability",
+                },
+            ],
+            "Monthly Probability",
+        ),
+    ],
+    ids=("stage-stage", "stage-probability", "probability-probability"),
+)
+def test_explicit_mapping_rejects_reused_month_headers(months, reused_header):
+    headers = [
+        "Area",
+        "Sub-area",
+        "Opportunity Name",
+        "TCV",
+        "Probability",
+        "Mar '26",
+        "Apr '26",
+        "Monthly Probability",
+    ]
+    explicit = {
+        "area": "Area",
+        "sub_area": "Sub-area",
+        "opportunity_name": "Opportunity Name",
+        "tcv": "TCV",
+        "probability": "Probability",
+        "months": months,
+    }
+
+    with pytest.raises(DataContractError, match="reused month header") as error:
+        resolve_mapping(headers, explicit)
+    assert error.value.code == "invalid_mapping"
+    assert error.value.details["header"] == reused_header
 
 
 def test_auto_mapping_pairs_month_probability_and_preserves_labels():

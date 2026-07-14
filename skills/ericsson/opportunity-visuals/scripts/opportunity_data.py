@@ -76,10 +76,9 @@ def _validate_table(
 ) -> None:
     if not headers or not rows:
         raise DataContractError("empty_source", "source contains no rows")
-    if any(not header for header in headers):
-        raise DataContractError("blank_header", "source contains a blank header")
-
     normalized = [_normalize_header(header) for header in headers]
+    if any(not header for header in normalized):
+        raise DataContractError("blank_header", "source contains a blank header")
     duplicates = sorted({header for header in normalized if normalized.count(header) > 1})
     if duplicates:
         raise DataContractError(
@@ -112,7 +111,7 @@ def load_source(
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             raw_headers = reader.fieldnames or []
-            headers = [header.strip() if header is not None else "" for header in raw_headers]
+            headers = [header if header is not None else "" for header in raw_headers]
             raw_rows = list(reader)
 
         malformed_rows = [
@@ -120,10 +119,7 @@ def load_source(
             for row_number, row in enumerate(raw_rows, start=2)
             if None in row or any(value is None for value in row.values())
         ]
-        rows = [
-            {headers[index]: row.get(raw_header) for index, raw_header in enumerate(raw_headers)}
-            for row in raw_rows
-        ]
+        rows = [dict(row) for row in raw_rows]
         _validate_table(headers, rows, malformed_rows=malformed_rows)
         return rows, {
             "format": "csv",
@@ -163,7 +159,7 @@ def load_source(
 
         if not all(isinstance(row, dict) for row in rows):
             raise DataContractError("invalid_json_row", "Every JSON row must be an object")
-        headers = [str(header).strip() for header in rows[0]] if rows else []
+        headers = [str(header) for header in rows[0]] if rows else []
         normalized_rows = [dict(row) for row in rows]
         _validate_table(headers, normalized_rows, first_row_number=1)
         return normalized_rows, {
@@ -203,7 +199,7 @@ def load_source(
                 next(formula_values)
             except StopIteration as error:
                 raise DataContractError("empty_source", "source contains no rows") from error
-            headers = [str(value).strip() if value is not None else "" for value in header_row]
+            headers = [str(value) if value is not None else "" for value in header_row]
             rows: list[dict[str, object]] = []
             uncached_formulas: list[dict[str, object]] = []
             for row_number, (row, formula_row) in enumerate(
@@ -274,6 +270,7 @@ def _validate_explicit_month(
     month: object,
     headers: list[str],
     seen_keys: set[str],
+    used_headers: dict[str, dict[str, str]],
 ) -> dict[str, object]:
     if not isinstance(month, dict):
         raise DataContractError("invalid_mapping", "Every explicit month must be an object")
@@ -292,6 +289,7 @@ def _validate_explicit_month(
         raise DataContractError("invalid_mapping", f"Invalid month key: {key}")
     if stage not in headers:
         raise DataContractError("mapping_header_not_found", f"Mapped header not found: {stage}")
+    _claim_month_header(used_headers, stage, key, "stage")
 
     result: dict[str, object] = {"key": key, "label": month["label"], "stage": stage}
     probability = month.get("probability")
@@ -301,9 +299,26 @@ def _validate_explicit_month(
                 "mapping_header_not_found",
                 f"Mapped header not found: {probability}",
             )
+        _claim_month_header(used_headers, probability, key, "probability")
         result["probability"] = probability
     seen_keys.add(key)
     return result
+
+
+def _claim_month_header(
+    used_headers: dict[str, dict[str, str]],
+    header: str,
+    key: str,
+    role: str,
+) -> None:
+    use = {"key": key, "role": role}
+    if header in used_headers:
+        raise DataContractError(
+            "invalid_mapping",
+            f"reused month header: {header}",
+            {"header": header, "first": used_headers[header], "second": use},
+        )
+    used_headers[header] = use
 
 
 def resolve_mapping(
@@ -330,8 +345,10 @@ def resolve_mapping(
         if not isinstance(explicit_months, list):
             raise DataContractError("invalid_mapping", "Explicit mapping requires months")
         seen_keys: set[str] = set()
+        used_headers: dict[str, dict[str, str]] = {}
         months = [
-            _validate_explicit_month(month, headers, seen_keys) for month in explicit_months
+            _validate_explicit_month(month, headers, seen_keys, used_headers)
+            for month in explicit_months
         ]
         mapping["months"] = sorted(months, key=lambda month: str(month["key"]))
         return mapping

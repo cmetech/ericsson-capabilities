@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import math
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from numbers import Real
@@ -29,6 +32,7 @@ FIXED_COLUMNS = (
 )
 MIN_MONTH_WIDTH = 116
 MAX_DIMENSION = 16384
+PNG_UNAVAILABLE_REASON = "Install playwright>=1.52 and Chromium to enable PNG output"
 
 STAGE_COLORS = {
     "initial": "#A6A6A6",
@@ -78,6 +82,10 @@ class RenderError(ValueError):
         self.details = details or {}
 
 
+class RasterUnavailable(RuntimeError):
+    """The optional local PNG renderer cannot run in this environment."""
+
+
 @dataclass(frozen=True)
 class PagePlan:
     number: int
@@ -93,6 +101,7 @@ class PagePlan:
 class _OwnedPublication:
     path: Path
     owner_path: Path
+    cleanup_dir: Path | None = None
 
 
 def _number(value: float | int) -> str:
@@ -185,6 +194,12 @@ def _validate_structure(
             or not isinstance(record.get("opportunity_name"), str)
         ):
             raise RenderError("invalid_record", "Normalized record grouping is invalid")
+        if (
+            isinstance(record.get("source_row"), bool)
+            or not isinstance(record.get("source_row"), int)
+            or record["source_row"] < 1
+        ):
+            raise RenderError("invalid_record", "Normalized record source row is invalid")
         if not isinstance(record.get("months"), list):
             raise RenderError("invalid_record", "Normalized record months are invalid")
         if validate_render_values:
@@ -708,6 +723,197 @@ def render_svg_page(
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + serialized + "\n"
 
 
+_FORBIDDEN_SVG_ELEMENTS = {
+    "a",
+    "foreignobject",
+    "iframe",
+    "image",
+    "script",
+    "use",
+}
+_URL_SCHEME = re.compile(
+    r"(?:https?|file|data|javascript|vbscript|ftp)\s*:", re.IGNORECASE
+)
+_CSS_URL = re.compile(r"url\s*\((.*?)\)", re.IGNORECASE | re.DOTALL)
+
+
+def _local_name(name: str) -> str:
+    return name.rsplit("}", 1)[-1].casefold()
+
+
+def _contains_non_fragment_url(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if _URL_SCHEME.search(stripped) or "://" in stripped or stripped.startswith("//"):
+        return True
+    if "@import" in stripped.casefold():
+        return True
+    for match in _CSS_URL.finditer(stripped):
+        target = match.group(1).strip().strip("\"'").strip()
+        if not target.startswith("#"):
+            return True
+    return False
+
+
+def _validate_embedded_svg(svg_text: str) -> None:
+    try:
+        root = ElementTree.fromstring(svg_text)
+    except (ElementTree.ParseError, ValueError):
+        raise RenderError("unsafe_svg", "HTML preview requires safe local SVG") from None
+    if root.tag != f"{_SVG}svg":
+        raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
+    for element in root.iter():
+        element_name = _local_name(str(element.tag))
+        if element_name in _FORBIDDEN_SVG_ELEMENTS:
+            raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
+        for attribute_name, raw_value in element.attrib.items():
+            name = _local_name(str(attribute_name))
+            value = str(raw_value)
+            if name.startswith("on"):
+                raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
+            if name in {"href", "src"} and value.strip() and not value.strip().startswith("#"):
+                raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
+            if _contains_non_fragment_url(value):
+                raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
+        if element_name == "style" and _contains_non_fragment_url(element.text or ""):
+            raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
+
+
+def _html_document(svg_text: str) -> str:
+    _validate_embedded_svg(svg_text)
+    return (
+        '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>Ericsson Opportunity Visual</title>"
+        "<style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style>"
+        "</head><body>"
+        + svg_text.strip()
+        + "</body></html>\n"
+    )
+
+
+def write_html(svg_text: str, output_path: Path) -> None:
+    """Validate generated SVG and publish a self-contained HTML preview."""
+
+    atomic_write_text(Path(output_path), _html_document(svg_text))
+
+
+def rasterize_html(
+    html_path: Path,
+    png_path: Path,
+    width: int,
+    height: int,
+    playwright_factory=None,
+) -> None:
+    """Capture one local HTML page while aborting every non-file request."""
+
+    width, height = _require_dimensions(width, height)
+    html_path = Path(html_path)
+    png_path = Path(png_path)
+    if png_path.exists() or png_path.is_symlink():
+        raise RenderError("output_exists", "Output artifact already exists")
+    if playwright_factory is None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise RasterUnavailable(PNG_UNAVAILABLE_REASON) from None
+        playwright_factory = sync_playwright
+    try:
+        with playwright_factory() as runtime:
+            browser = runtime.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": width, "height": height})
+
+                def local_only(route):
+                    if route.request.url.casefold().startswith("file:"):
+                        route.continue_()
+                    else:
+                        route.abort()
+
+                page.route("**/*", local_only)
+                page.goto(html_path.resolve().as_uri(), wait_until="load")
+                page.locator("body").screenshot(path=str(png_path))
+            finally:
+                browser.close()
+    except RenderError:
+        raise
+    except RasterUnavailable:
+        raise RasterUnavailable(PNG_UNAVAILABLE_REASON) from None
+    except Exception:
+        raise RasterUnavailable(PNG_UNAVAILABLE_REASON) from None
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+def _capability(status: str, reason: str = "") -> dict[str, str]:
+    return {"status": status, "reason": reason}
+
+
+def _probe_chromium() -> dict[str, str]:
+    if not _module_available("playwright"):
+        return _capability("unavailable", "Playwright package is unavailable")
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as runtime:
+            browser = runtime.chromium.launch(headless=True)
+            browser.close()
+    except Exception:
+        return _capability("unavailable", "Chromium is unavailable")
+    return _capability("available")
+
+
+def _probe_output_directory(output_dir: Path) -> dict[str, str]:
+    output_dir = Path(output_dir)
+    if output_dir.is_symlink() or not output_dir.is_dir():
+        return _capability("unavailable", "Output directory is not writable")
+    probe: Path | None = None
+    try:
+        descriptor, name = tempfile.mkstemp(
+            prefix=".opportunity-visual-preflight-", dir=output_dir
+        )
+        os.close(descriptor)
+        probe = Path(name)
+    except OSError:
+        return _capability("unavailable", "Output directory is not writable")
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+    if probe.exists() or probe.is_symlink():
+        return _capability("unavailable", "Output directory probe could not be removed")
+    return _capability("available")
+
+
+def preflight(output_dir: Path) -> dict[str, object]:
+    """Report independent local preparation and rendering capabilities."""
+
+    openpyxl_available = _module_available("openpyxl")
+    playwright_available = _module_available("playwright")
+    return {
+        "csv_json": _capability("available"),
+        "xlsx": _capability(
+            "available" if openpyxl_available else "unavailable",
+            "" if openpyxl_available else "openpyxl is unavailable",
+        ),
+        "svg_html": _capability("available"),
+        "png_package": _capability(
+            "available" if playwright_available else "unavailable",
+            "" if playwright_available else "Playwright package is unavailable",
+        ),
+        "chromium": _probe_chromium(),
+        "output_directory": _probe_output_directory(Path(output_dir)),
+    }
+
+
 def _publish_owned_text(path: Path, text: str) -> _OwnedPublication:
     """Publish without clobbering and retain a hard-link identity for rollback."""
     path = Path(path)
@@ -739,6 +945,36 @@ def _release_owner(publication: _OwnedPublication) -> None:
         publication.owner_path.unlink()
     except FileNotFoundError:
         pass
+    if publication.cleanup_dir is not None:
+        try:
+            publication.cleanup_dir.rmdir()
+        except OSError:
+            pass
+
+
+def _publish_owned_file(
+    source: Path,
+    target: Path,
+    *,
+    cleanup_dir: Path | None = None,
+) -> _OwnedPublication:
+    """Publish an existing regular file without clobbering its target."""
+
+    source = Path(source)
+    target = Path(target)
+    if source.is_symlink() or not source.is_file():
+        raise RenderError("output_unwritable", "Unable to write render artifacts")
+    if target.exists() or target.is_symlink():
+        raise RenderError("output_exists", "Output artifact already exists")
+    try:
+        os.link(source, target, follow_symlinks=False)
+    except FileExistsError:
+        raise RenderError("output_exists", "Output artifact already exists") from None
+    return _OwnedPublication(
+        path=target,
+        owner_path=source,
+        cleanup_dir=cleanup_dir,
+    )
 
 
 def _rollback_owned(publication: _OwnedPublication) -> None:
@@ -816,6 +1052,216 @@ def _load_document(path: Path) -> dict[str, object]:
     return _validate_structure(document, validate_render_values=True)
 
 
+def _sha256_file(path: Path, manifest_path: Path) -> str:
+    path = Path(path)
+    if path == manifest_path:
+        raise RenderError("invalid_artifact", "Render manifest cannot hash itself")
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        raise RenderError("output_unreadable", "Rendered artifact could not be hashed") from None
+
+
+def _project_source(source: object) -> dict[str, object]:
+    if not isinstance(source, dict):
+        raise RenderError("invalid_document", "Normalized source metadata is invalid")
+    basename = source.get("basename")
+    source_hash = source.get("sha256")
+    sheet = source.get("sheet")
+    if not isinstance(basename, str) or not isinstance(source_hash, str):
+        raise RenderError("invalid_document", "Normalized source metadata is invalid")
+    if (
+        not basename
+        or basename in {".", ".."}
+        or "/" in basename
+        or "\\" in basename
+        or "\x00" in basename
+    ):
+        raise RenderError("invalid_document", "Normalized source metadata is invalid")
+    if sheet is not None and not isinstance(sheet, str):
+        raise RenderError("invalid_document", "Normalized source metadata is invalid")
+    return {"basename": basename, "sha256": source_hash, "sheet": sheet}
+
+
+def _project_exclusions(exclusions: object) -> list[dict[str, object]]:
+    if not isinstance(exclusions, list):
+        raise RenderError("invalid_document", "Normalized exclusions are invalid")
+    projected: list[dict[str, object]] = []
+    for item in exclusions:
+        if not isinstance(item, dict):
+            raise RenderError("invalid_document", "Normalized exclusions are invalid")
+        row_id = item.get("id")
+        source_row = item.get("source_row")
+        code = item.get("code")
+        if not isinstance(row_id, str) or not isinstance(source_row, int) or not isinstance(code, str):
+            raise RenderError("invalid_document", "Normalized exclusions are invalid")
+        projected.append({"id": row_id, "source_row": source_row, "code": code})
+    return projected
+
+
+def _project_warnings(warnings: object) -> list[dict[str, object]]:
+    if not isinstance(warnings, list):
+        raise RenderError("invalid_document", "Normalized warnings are invalid")
+    allowed = ("id", "source_row", "code", "message", "month", "skipped_months")
+    projected: list[dict[str, object]] = []
+    for warning in warnings:
+        if not isinstance(warning, dict) or not isinstance(warning.get("code"), str):
+            raise RenderError("invalid_document", "Normalized warnings are invalid")
+        projected.append({key: warning[key] for key in allowed if key in warning})
+    return projected
+
+
+def _project_transitions(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    transitions: list[dict[str, object]] = []
+    for record in records:
+        warnings = record.get("warnings", [])
+        if not isinstance(warnings, list):
+            raise RenderError("invalid_document", "Normalized record warnings are invalid")
+        warning_codes = [
+            warning["code"]
+            for warning in warnings
+            if isinstance(warning, dict) and isinstance(warning.get("code"), str)
+        ]
+        transitions.append(
+            {
+                "id": record["id"],
+                "source_row": record.get("source_row"),
+                "months": [
+                    {
+                        "key": month["key"],
+                        "classification": month["classification"],
+                        "skipped_months": list(month.get("skipped_months", [])),
+                    }
+                    for month in record["months"]
+                ],
+                "warning_codes": warning_codes,
+            }
+        )
+    return transitions
+
+
+def _manifest_payload(
+    document: dict[str, object],
+    pages: list[PagePlan],
+    artifacts: list[dict[str, object]],
+    output_dir: Path,
+    width: int,
+    height: int,
+    png_status: dict[str, str],
+) -> dict[str, object]:
+    document = _validate_structure(document, validate_render_values=True)
+    width, height = _require_dimensions(width, height)
+    output_dir = Path(output_dir)
+    manifest_path = output_dir / "render-manifest.json"
+    if len(pages) != len(artifacts):
+        raise RenderError("invalid_artifact", "Render artifacts do not match page plans")
+    if (
+        not isinstance(png_status, dict)
+        or not isinstance(png_status.get("status"), str)
+        or not isinstance(png_status.get("reason"), str)
+    ):
+        raise RenderError("invalid_artifact", "PNG status is invalid")
+    try:
+        semantics_text = json.dumps(
+            document.get("semantics", {}), sort_keys=True, separators=(",", ":")
+        )
+    except (TypeError, ValueError):
+        raise RenderError("invalid_document", "Normalized semantics are invalid") from None
+    selected_months = document["selected_months"]
+    page_entries: list[dict[str, object]] = []
+    for page, artifact in zip(pages, artifacts, strict=True):
+        if not isinstance(artifact, dict) or artifact.get("page") != page.number:
+            raise RenderError("invalid_artifact", "Render artifacts do not match page plans")
+        svg_path = Path(artifact["svg"])
+        html_path = Path(artifact["html"])
+        png_value = artifact.get("png")
+        png_path = Path(png_value) if png_value is not None else None
+        page_entries.append(
+            {
+                "number": page.number,
+                "month_keys": list(page.month_keys),
+                "row_ids": list(page.row_ids),
+                "dimensions": {"width": page.width, "height": page.height},
+                "files": {
+                    "svg": svg_path.name,
+                    "html": html_path.name,
+                    "png": png_path.name if png_path is not None else None,
+                },
+                "sha256": {
+                    "svg": _sha256_file(svg_path, manifest_path),
+                    "html": _sha256_file(html_path, manifest_path),
+                    "png": (
+                        _sha256_file(png_path, manifest_path)
+                        if png_path is not None
+                        else None
+                    ),
+                },
+            }
+        )
+    records = document["records"]
+    return {
+        "renderer_version": 1,
+        "view": document["view"],
+        "range": {
+            "start": selected_months[0]["key"],
+            "end": selected_months[-1]["key"],
+            "months": selected_months,
+        },
+        "mapping": document.get("mapping", {}),
+        "filters": document.get("filters", {}),
+        "dimensions": {"width": width, "height": height},
+        "semantics_sha256": hashlib.sha256(semantics_text.encode("utf-8")).hexdigest(),
+        "source": _project_source(document.get("source")),
+        "included_rows": [
+            {"id": record["id"], "source_row": record.get("source_row")}
+            for record in records
+        ],
+        "excluded_rows": _project_exclusions(document.get("exclusions", [])),
+        "warnings": _project_warnings(document.get("warnings", [])),
+        "transitions": _project_transitions(records),
+        "pages": page_entries,
+        "png": dict(png_status),
+    }
+
+
+def _manifest_text(
+    document: dict[str, object],
+    pages: list[PagePlan],
+    artifacts: list[dict[str, object]],
+    output_dir: Path,
+    width: int,
+    height: int,
+    png_status: dict[str, str],
+) -> str:
+    payload = _manifest_payload(
+        document, pages, artifacts, output_dir, width, height, png_status
+    )
+    try:
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    except (TypeError, ValueError):
+        raise RenderError("invalid_document", "Normalized audit metadata is invalid") from None
+
+
+def write_render_manifest(
+    document: dict[str, object],
+    pages: list[PagePlan],
+    artifacts: list[dict[str, object]],
+    output_dir: Path,
+    width: int,
+    height: int,
+    png_status: dict[str, str],
+) -> Path:
+    """Write one deterministic audit manifest without hashing the manifest itself."""
+
+    output_dir = Path(output_dir)
+    manifest_path = output_dir / "render-manifest.json"
+    text = _manifest_text(
+        document, pages, artifacts, output_dir, width, height, png_status
+    )
+    atomic_write_text(manifest_path, text)
+    return manifest_path
+
+
 def _write_svg_pages(
     document: dict[str, object],
     output_dir: Path,
@@ -874,6 +1320,200 @@ def _write_svg_pages(
     return names
 
 
+def _validate_planned_outputs(output_dir: Path, targets: list[Path]) -> bool:
+    output_dir = Path(output_dir)
+    if output_dir.is_symlink():
+        raise RenderError("output_exists", "Output destination already exists")
+    if output_dir.exists() and not output_dir.is_dir():
+        raise RenderError("output_exists", "Output destination already exists")
+    for target in targets:
+        temporary = target.with_name(f".{target.name}.tmp")
+        if (
+            target.exists()
+            or target.is_symlink()
+            or temporary.exists()
+            or temporary.is_symlink()
+        ):
+            raise RenderError("output_exists", "Output artifact already exists")
+    return not output_dir.exists()
+
+
+def _discard_capture(capture_path: Path | None, capture_dir: Path | None) -> None:
+    if capture_path is not None:
+        try:
+            capture_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    if capture_dir is not None:
+        try:
+            capture_dir.rmdir()
+        except OSError:
+            pass
+
+
+def render_document(
+    normalized_path: Path,
+    output_dir: Path,
+    width: int = 1920,
+    height: int = 1080,
+    png_mode: str = "auto",
+) -> dict[str, object]:
+    """Render and transactionally publish SVG, HTML, optional PNG, and manifest."""
+
+    if png_mode not in {"auto", "never", "required"}:
+        raise RenderError("invalid_png_mode", "PNG mode must be auto, never, or required")
+    width, height = _require_dimensions(width, height)
+    document = _load_document(Path(normalized_path))
+    pages = paginate(document, width, height)
+    template = Path(__file__).resolve().parents[1] / "templates/opportunity-visual.svg"
+    svg_texts = [render_svg_page(document, page, template) for page in pages]
+    html_texts = [_html_document(svg_text) for svg_text in svg_texts]
+    output_dir = Path(output_dir)
+    svg_paths = [
+        output_dir / f"opportunity-visual-p{page.number:02d}.svg" for page in pages
+    ]
+    html_paths = [
+        output_dir / f"opportunity-visual-p{page.number:02d}.html" for page in pages
+    ]
+    png_paths = [
+        output_dir / f"opportunity-visual-p{page.number:02d}.png" for page in pages
+    ]
+    manifest_path = output_dir / "render-manifest.json"
+    planned = [*svg_paths, *html_paths, manifest_path]
+    if png_mode != "never":
+        planned.extend(png_paths)
+    created_directory = _validate_planned_outputs(output_dir, planned)
+    publications: list[_OwnedPublication] = []
+    artifacts: list[dict[str, object]] = [
+        {
+            "page": page.number,
+            "svg": svg_path,
+            "html": html_path,
+            "png": None,
+        }
+        for page, svg_path, html_path in zip(
+            pages, svg_paths, html_paths, strict=True
+        )
+    ]
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for svg_path, svg_text in zip(svg_paths, svg_texts, strict=True):
+            publications.append(_publish_owned_text(svg_path, svg_text))
+        for html_path, html_text in zip(html_paths, html_texts, strict=True):
+            publications.append(_publish_owned_text(html_path, html_text))
+
+        if png_mode == "never":
+            png_status = {"status": "disabled", "reason": "PNG output disabled"}
+        else:
+            png_publications: list[_OwnedPublication] = []
+            try:
+                for artifact, html_path, png_path in zip(
+                    artifacts, html_paths, png_paths, strict=True
+                ):
+                    capture_dir: Path | None = None
+                    capture_path: Path | None = None
+                    try:
+                        capture_dir = Path(
+                            tempfile.mkdtemp(
+                                prefix=f".{png_path.name}.capture-", dir=output_dir
+                            )
+                        )
+                        capture_path = capture_dir / "capture.png"
+                        rasterize_html(
+                            html_path,
+                            capture_path,
+                            width,
+                            height,
+                        )
+                        publication = _publish_owned_file(
+                            capture_path,
+                            png_path,
+                            cleanup_dir=capture_dir,
+                        )
+                    except BaseException:
+                        _discard_capture(capture_path, capture_dir)
+                        raise
+                    png_publications.append(publication)
+                    artifact["png"] = png_path
+            except RasterUnavailable:
+                for publication in reversed(png_publications):
+                    _rollback_owned(publication)
+                for artifact in artifacts:
+                    artifact["png"] = None
+                if png_mode == "required":
+                    raise RenderError(
+                        "png_unavailable",
+                        "Install playwright>=1.52 and Chromium for required PNG output",
+                    ) from None
+                png_status = {
+                    "status": "unavailable",
+                    "reason": PNG_UNAVAILABLE_REASON,
+                }
+            except BaseException:
+                for publication in reversed(png_publications):
+                    _rollback_owned(publication)
+                raise
+            else:
+                publications.extend(png_publications)
+                png_status = {"status": "available", "reason": ""}
+
+        manifest_text = _manifest_text(
+            document,
+            pages,
+            artifacts,
+            output_dir,
+            width,
+            height,
+            png_status,
+        )
+        publications.append(_publish_owned_text(manifest_path, manifest_text))
+    except RenderError:
+        for publication in reversed(publications):
+            _rollback_owned(publication)
+        if created_directory:
+            try:
+                output_dir.rmdir()
+            except OSError:
+                pass
+        raise
+    except OSError:
+        for publication in reversed(publications):
+            _rollback_owned(publication)
+        if created_directory:
+            try:
+                output_dir.rmdir()
+            except OSError:
+                pass
+        raise RenderError("output_unwritable", "Unable to write render artifacts") from None
+    except BaseException:
+        for publication in reversed(publications):
+            _rollback_owned(publication)
+        if created_directory:
+            try:
+                output_dir.rmdir()
+            except OSError:
+                pass
+        raise
+    for publication in publications:
+        _release_owner(publication)
+    page_results = [
+        {
+            "svg": str(artifact["svg"]),
+            "html": str(artifact["html"]),
+            "png": str(artifact["png"]) if artifact["png"] is not None else None,
+        }
+        for artifact in artifacts
+    ]
+    return {
+        "ok": True,
+        "manifest": str(manifest_path),
+        "pages": page_results,
+        "png": png_status,
+    }
+
+
 class _SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise RenderError("invalid_arguments", "Invalid command arguments")
@@ -881,31 +1521,36 @@ class _SafeArgumentParser(argparse.ArgumentParser):
 
 def _parser() -> argparse.ArgumentParser:
     parser = _SafeArgumentParser(prog="render_opportunity_visual.py")
-    parser.add_argument("normalized_data", type=Path)
+    parser.add_argument("normalized_data", nargs="?", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
+    parser.add_argument("--png", choices=("auto", "never", "required"), default="auto")
+    parser.add_argument("--preflight", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
-        document = _load_document(args.normalized_data)
-        template = Path(__file__).resolve().parents[1] / "templates/opportunity-visual.svg"
-        names = _write_svg_pages(
-            document,
-            args.output_dir,
-            args.width,
-            args.height,
-            template,
-        )
-        print(
-            json.dumps(
-                {"ok": True, "pages": len(names), "files": names},
-                separators=(",", ":"),
+        if args.preflight:
+            if args.normalized_data is not None:
+                raise RenderError("invalid_arguments", "Invalid command arguments")
+            result: dict[str, object] = {
+                "ok": True,
+                "preflight": preflight(args.output_dir),
+            }
+        else:
+            if args.normalized_data is None:
+                raise RenderError("invalid_arguments", "Invalid command arguments")
+            result = render_document(
+                args.normalized_data,
+                args.output_dir,
+                args.width,
+                args.height,
+                args.png,
             )
-        )
+        print(json.dumps(result, separators=(",", ":")))
         return 0
     except RenderError as error:
         print(
@@ -929,7 +1574,7 @@ def main(argv: list[str] | None = None) -> int:
                     "ok": False,
                     "error": {
                         "code": "output_unwritable",
-                        "message": "Unable to write SVG artifacts",
+                        "message": "Unable to write render artifacts",
                         "details": {},
                     },
                 },

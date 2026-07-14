@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -5,6 +6,7 @@ import sys
 from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import Mock
 from xml.etree import ElementTree
 
 import pytest
@@ -18,10 +20,16 @@ sys.path.insert(0, str(SCRIPTS))
 
 import render_opportunity_visual as renderer  # noqa: E402
 from render_opportunity_visual import (  # noqa: E402
+    RasterUnavailable,
     RenderError,
     atomic_write_text,
     paginate,
+    preflight,
+    rasterize_html,
+    render_document,
     render_svg_page,
+    write_html,
+    write_render_manifest,
 )
 
 
@@ -414,6 +422,598 @@ def test_atomic_write_text_cannot_overwrite_target_created_during_publish(
     assert not (tmp_path / ".page.svg.tmp").exists()
 
 
+def test_html_is_self_contained(tmp_path, normalized_document):
+    page = paginate(normalized_document, 1920, 1080)[0]
+    svg_text = render_svg_page(normalized_document, page, TEMPLATE)
+    output = tmp_path / "page.html"
+
+    write_html(svg_text, output)
+
+    html = output.read_text(encoding="utf-8")
+    assert svg_text.strip() in html
+    assert "<script" not in html.lower()
+    assert "https://" not in html
+    assert html.count("http://") == 1
+    assert 'xmlns="http://www.w3.org/2000/svg"' in html
+    assert 'href="http' not in html and 'href="https' not in html
+    assert "iframe" not in html.lower()
+    assert not (tmp_path / ".page.html.tmp").exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_svg",
+    [
+        '<svg xmlns="http://www.w3.org/2000/svg"><script>bad()</script></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><iframe /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,AA" /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><use href="#shape" /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><a href="#shape" /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><rect onclick="bad()" /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(https://example.test/x)" /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><rect data-x="javascript:bad()" /></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><rect data-x="//example.test/x" /></svg>',
+    ],
+)
+def test_html_rejects_network_capable_or_executable_svg(tmp_path, unsafe_svg):
+    with pytest.raises(RenderError, match="safe local SVG"):
+        write_html(unsafe_svg, tmp_path / "page.html")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_html_accepts_fragment_only_attribute_reference(tmp_path):
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<defs><linearGradient id="local" /></defs>'
+        '<rect fill="url(#local)" />'
+        "</svg>"
+    )
+    output = tmp_path / "page.html"
+
+    write_html(svg, output)
+
+    assert "url(#local)" in output.read_text(encoding="utf-8")
+
+
+class _FakeRoute:
+    def __init__(self, url):
+        self.request = type("Request", (), {"url": url})()
+        self.action = None
+
+    def continue_(self):
+        self.action = "continue"
+
+    def abort(self):
+        self.action = "abort"
+
+
+class _FakeLocator:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def screenshot(self, *, path):
+        self.calls["screenshot"] = path
+        Path(path).write_bytes(b"fake-png")
+
+
+class _FakePage:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def route(self, pattern, handler):
+        self.calls["route"] = pattern
+        self.calls["handler"] = handler
+
+    def goto(self, url, *, wait_until):
+        self.calls["goto"] = (url, wait_until)
+
+    def locator(self, selector):
+        self.calls["locator"] = selector
+        return _FakeLocator(self.calls)
+
+
+class _FakeBrowser:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def new_page(self, *, viewport):
+        self.calls["viewport"] = viewport
+        return _FakePage(self.calls)
+
+    def close(self):
+        self.calls["closed"] = True
+
+
+class _FakePlaywright:
+    def __init__(self, calls):
+        self.calls = calls
+        self.chromium = self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def launch(self, *, headless):
+        self.calls["headless"] = headless
+        return _FakeBrowser(self.calls)
+
+
+def test_rasterize_uses_exact_viewport_local_uri_and_denies_network(tmp_path):
+    html_path = tmp_path / "page.html"
+    html_path.write_text("<html><body>local</body></html>", encoding="utf-8")
+    png_path = tmp_path / "page.png"
+    calls = {}
+
+    rasterize_html(
+        html_path,
+        png_path,
+        1234,
+        678,
+        playwright_factory=lambda: _FakePlaywright(calls),
+    )
+
+    https_route = _FakeRoute("https://example.test/secret")
+    file_route = _FakeRoute(html_path.resolve().as_uri())
+    calls["handler"](https_route)
+    calls["handler"](file_route)
+    assert calls["route"] == "**/*"
+    assert https_route.action == "abort"
+    assert file_route.action == "continue"
+    assert calls["viewport"] == {"width": 1234, "height": 678}
+    assert calls["goto"] == (html_path.resolve().as_uri(), "load")
+    assert calls["locator"] == "body"
+    assert calls["screenshot"] == str(png_path)
+    assert calls["headless"] is True
+    assert calls["closed"] is True
+    assert png_path.read_bytes() == b"fake-png"
+
+
+def test_rasterize_reports_generic_unavailability_without_raw_exception(tmp_path):
+    class BrokenPlaywright:
+        def __enter__(self):
+            raise RasterUnavailable("sensitive /private/source and bearer token")
+
+        def __exit__(self, *args):
+            return None
+
+    with pytest.raises(RasterUnavailable) as caught:
+        rasterize_html(
+            tmp_path / "page.html",
+            tmp_path / "page.png",
+            1920,
+            1080,
+            playwright_factory=BrokenPlaywright,
+        )
+    assert str(caught.value) == "Install playwright>=1.52 and Chromium to enable PNG output"
+
+
+def test_preflight_reports_independent_capabilities_and_removes_probe(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "_module_available", lambda name: name == "openpyxl")
+    monkeypatch.setattr(
+        renderer,
+        "_probe_chromium",
+        lambda: {"status": "unavailable", "reason": "Chromium is unavailable"},
+    )
+    before = set(tmp_path.iterdir())
+
+    result = preflight(tmp_path)
+
+    assert set(result) == {
+        "csv_json",
+        "xlsx",
+        "svg_html",
+        "png_package",
+        "chromium",
+        "output_directory",
+    }
+    assert result["csv_json"]["status"] == "available"
+    assert result["xlsx"]["status"] == "available"
+    assert result["svg_html"]["status"] == "available"
+    assert result["png_package"]["status"] == "unavailable"
+    assert result["chromium"] == {
+        "status": "unavailable",
+        "reason": "Chromium is unavailable",
+    }
+    assert result["output_directory"]["status"] == "available"
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_preflight_keeps_package_and_chromium_statuses_independent(tmp_path, monkeypatch):
+    monkeypatch.setattr(renderer, "_module_available", lambda name: True)
+    monkeypatch.setattr(
+        renderer,
+        "_probe_chromium",
+        lambda: {"status": "available", "reason": ""},
+    )
+    monkeypatch.setattr(
+        renderer,
+        "_probe_output_directory",
+        lambda output_dir: {"status": "unavailable", "reason": "Output directory is not writable"},
+    )
+
+    result = preflight(tmp_path)
+
+    assert result["png_package"]["status"] == "available"
+    assert result["chromium"]["status"] == "available"
+    assert result["output_directory"]["status"] == "unavailable"
+
+
+def _write_normalized(tmp_path, document):
+    normalized_path = tmp_path / "normalized-data.json"
+    normalized_path.write_text(json.dumps(document), encoding="utf-8")
+    return normalized_path
+
+
+def test_png_auto_falls_back_without_failing_svg_html(
+    tmp_path, normalized_document, monkeypatch
+):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+
+    def unavailable(*args, **kwargs):
+        raise RasterUnavailable("sensitive missing binary detail")
+
+    monkeypatch.setattr(renderer, "rasterize_html", unavailable)
+    output_dir = tmp_path / "rendered"
+
+    result = render_document(normalized_path, output_dir, png_mode="auto")
+
+    assert result["ok"] is True
+    assert result["png"] == {
+        "status": "unavailable",
+        "reason": "Install playwright>=1.52 and Chromium to enable PNG output",
+    }
+    assert list(output_dir.glob("*.svg"))
+    assert list(output_dir.glob("*.html"))
+    assert not list(output_dir.glob("*.png"))
+    assert (output_dir / "render-manifest.json").is_file()
+    assert "sensitive missing binary detail" not in (output_dir / "render-manifest.json").read_text()
+
+
+def test_png_auto_removes_earlier_png_if_later_page_is_unavailable(
+    tmp_path, normalized_document, monkeypatch
+):
+    document = expanded_document(normalized_document, record_count=4, month_count=10)
+    normalized_path = _write_normalized(tmp_path, document)
+    calls = 0
+
+    def unavailable_on_second(html_path, png_path, width, height, playwright_factory=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RasterUnavailable("missing")
+        Path(png_path).write_bytes(b"first-png")
+
+    monkeypatch.setattr(renderer, "rasterize_html", unavailable_on_second)
+    output_dir = tmp_path / "rendered"
+
+    result = render_document(
+        normalized_path,
+        output_dir,
+        width=960,
+        height=540,
+        png_mode="auto",
+    )
+
+    assert result["ok"] is True
+    assert result["png"]["status"] == "unavailable"
+    assert len(list(output_dir.glob("*.svg"))) == 2
+    assert len(list(output_dir.glob("*.html"))) == 2
+    assert not list(output_dir.glob("*.png"))
+    assert not list(output_dir.glob(".*.tmp"))
+
+
+def test_png_required_uses_safe_error_and_leaves_no_partial_artifacts(
+    tmp_path, normalized_document, monkeypatch
+):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    monkeypatch.setattr(
+        renderer,
+        "rasterize_html",
+        Mock(side_effect=RasterUnavailable("sensitive /private/source")),
+    )
+    output_dir = tmp_path / "rendered"
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, output_dir, png_mode="required")
+
+    assert caught.value.code == "png_unavailable"
+    assert str(caught.value) == "Install playwright>=1.52 and Chromium for required PNG output"
+    assert "/private/source" not in str(caught.value)
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_png_never_does_not_invoke_rasterizer(tmp_path, normalized_document, monkeypatch):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    rasterizer = Mock(side_effect=AssertionError("must not be called"))
+    monkeypatch.setattr(renderer, "rasterize_html", rasterizer)
+
+    result = render_document(normalized_path, tmp_path / "rendered", png_mode="never")
+
+    assert result["png"] == {"status": "disabled", "reason": "PNG output disabled"}
+    assert all(page["png"] is None for page in result["pages"])
+    rasterizer.assert_not_called()
+
+
+def test_manifest_contains_complete_deterministic_audit_without_source_path(
+    tmp_path, normalized_document
+):
+    normalized_document["source"] = {
+        "basename": "showcase.json",
+        "sha256": "a" * 64,
+        "path": "/private/confidential/showcase.json",
+        "sheet": "Pipeline",
+    }
+    normalized_document["mapping"] = {"area": "Area"}
+    normalized_document["filters"] = {"areas": ["Core Group"]}
+    normalized_document["exclusions"] = [
+        {
+            "id": "OV-X",
+            "source_row": 99,
+            "code": "view_not_matched",
+            "message": "Row does not match view",
+        }
+    ]
+    normalized_document["warnings"] = [
+        {
+            "id": "OV-008",
+            "source_row": 4,
+            "code": "unknown_transition",
+            "message": "Transition stage order is unknown",
+            "month": "2026-04",
+        }
+    ]
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    output_dir = tmp_path / "rendered"
+
+    result = render_document(normalized_path, output_dir, png_mode="never")
+    manifest_path = Path(result["manifest"])
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+
+    expected_semantics_hash = hashlib.sha256(
+        json.dumps({}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert manifest["renderer_version"] == 1
+    assert manifest["view"] == "all-progression"
+    assert manifest["range"] == {
+        "start": "2026-03",
+        "end": "2026-06",
+        "months": MONTHS,
+    }
+    assert manifest["mapping"] == {"area": "Area"}
+    assert manifest["filters"] == {"areas": ["Core Group"]}
+    assert manifest["dimensions"] == {"width": 1920, "height": 1080}
+    assert manifest["semantics_sha256"] == expected_semantics_hash
+    assert manifest["source"] == {
+        "basename": "showcase.json",
+        "sha256": "a" * 64,
+        "sheet": "Pipeline",
+    }
+    assert manifest["included_rows"] == [
+        {"id": record["id"], "source_row": record["source_row"]}
+        for record in normalized_document["records"]
+    ]
+    assert manifest["excluded_rows"] == [
+        {"id": "OV-X", "source_row": 99, "code": "view_not_matched"}
+    ]
+    assert manifest["warnings"][0]["code"] == "unknown_transition"
+    transition = next(item for item in manifest["transitions"] if item["id"] == "OV-008")
+    assert transition["months"][1] == {
+        "key": "2026-04",
+        "classification": "positive",
+        "skipped_months": [],
+    }
+    assert transition["warning_codes"] == []
+    assert manifest["png"] == {"status": "disabled", "reason": "PNG output disabled"}
+    assert manifest["pages"][0]["row_ids"] == [
+        record["id"] for record in normalized_document["records"]
+    ]
+    assert manifest["pages"][0]["month_keys"] == [item["key"] for item in MONTHS]
+    assert manifest["pages"][0]["dimensions"] == {"width": 1920, "height": 1080}
+    assert manifest["pages"][0]["files"]["png"] is None
+    for kind in ("svg", "html"):
+        artifact = output_dir / manifest["pages"][0]["files"][kind]
+        assert manifest["pages"][0]["sha256"][kind] == hashlib.sha256(
+            artifact.read_bytes()
+        ).hexdigest()
+    assert manifest["pages"][0]["sha256"]["png"] is None
+    assert "render-manifest.json" not in json.dumps(manifest["pages"])
+    assert "/private/confidential" not in manifest_text
+    assert "timestamp" not in manifest
+    assert manifest_text == json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    second = render_document(
+        normalized_path,
+        tmp_path / "rendered-again",
+        png_mode="never",
+    )
+    assert Path(second["manifest"]).read_bytes() == manifest_path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "basename",
+    ["/private/confidential/showcase.json", r"C:\\private\\showcase.json"],
+)
+def test_manifest_rejects_source_metadata_disguised_as_a_basename(
+    tmp_path, normalized_document, basename
+):
+    normalized_document["source"]["basename"] = basename
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, tmp_path / "rendered", png_mode="never")
+
+    assert caught.value.code == "invalid_document"
+    assert basename not in str(caught.value)
+    assert not (tmp_path / "rendered").exists()
+
+
+def test_manifest_requires_auditable_integer_source_rows(tmp_path, normalized_document):
+    del normalized_document["records"][0]["source_row"]
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, tmp_path / "rendered", png_mode="never")
+
+    assert caught.value.code == "invalid_record"
+    assert not (tmp_path / "rendered").exists()
+
+
+def test_write_render_manifest_refuses_to_hash_or_overwrite_itself(
+    tmp_path, normalized_document
+):
+    page = paginate(normalized_document, 1920, 1080)[0]
+    svg = tmp_path / "opportunity-visual-p01.svg"
+    html = tmp_path / "opportunity-visual-p01.html"
+    svg.write_text("svg", encoding="utf-8")
+    html.write_text("html", encoding="utf-8")
+    artifacts = [{"page": 1, "svg": svg, "html": html, "png": None}]
+    png_status = {"status": "disabled", "reason": "PNG output disabled"}
+
+    manifest_path = write_render_manifest(
+        normalized_document,
+        [page],
+        artifacts,
+        tmp_path,
+        1920,
+        1080,
+        png_status,
+    )
+
+    assert manifest_path == tmp_path / "render-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "render-manifest.json" not in json.dumps(manifest["pages"])
+    with pytest.raises(RenderError, match="already exists"):
+        write_render_manifest(
+            normalized_document,
+            [page],
+            artifacts,
+            tmp_path,
+            1920,
+            1080,
+            png_status,
+        )
+
+
+def test_render_document_refuses_any_planned_artifact_without_writing_others(
+    tmp_path, normalized_document
+):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    output_dir = tmp_path / "rendered"
+    output_dir.mkdir()
+    existing = output_dir / "opportunity-visual-p01.html"
+    existing.write_text("competitor", encoding="utf-8")
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, output_dir, png_mode="never")
+
+    assert caught.value.code == "output_exists"
+    assert existing.read_text(encoding="utf-8") == "competitor"
+    assert list(output_dir.iterdir()) == [existing]
+
+
+def test_manifest_collision_rolls_back_owned_outputs_and_preserves_competitors(
+    tmp_path, normalized_document, monkeypatch
+):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    output_dir = tmp_path / "rendered"
+    real_link = os.link
+    calls = 0
+
+    def competitors_replace_html_and_claim_manifest(source, target, **kwargs):
+        nonlocal calls
+        calls += 1
+        target = Path(target)
+        if calls == 3:
+            html = output_dir / "opportunity-visual-p01.html"
+            html.unlink()
+            html.write_text("competitor-html\n", encoding="utf-8")
+            target.write_text("competitor-manifest\n", encoding="utf-8")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", competitors_replace_html_and_claim_manifest)
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, output_dir, png_mode="never")
+
+    assert caught.value.code == "output_exists"
+    assert not (output_dir / "opportunity-visual-p01.svg").exists()
+    assert (output_dir / "opportunity-visual-p01.html").read_text() == "competitor-html\n"
+    assert (output_dir / "render-manifest.json").read_text() == "competitor-manifest\n"
+    assert sorted(path.name for path in output_dir.iterdir()) == [
+        "opportunity-visual-p01.html",
+        "render-manifest.json",
+    ]
+
+
+def test_preflight_cli_prints_one_json_and_leaves_no_probe(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "render_opportunity_visual.py"),
+            "--preflight",
+            "--output-dir",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert set(payload["preflight"]) == {
+        "csv_json",
+        "xlsx",
+        "svg_html",
+        "png_package",
+        "chromium",
+        "output_directory",
+    }
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_png_required_cli_returns_two_one_safe_json_and_no_partials(
+    tmp_path, normalized_document, monkeypatch, capsys
+):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    output_dir = tmp_path / "rendered"
+    monkeypatch.setattr(
+        renderer,
+        "rasterize_html",
+        Mock(side_effect=RasterUnavailable("secret /private/browser detail")),
+    )
+
+    exit_code = renderer.main(
+        [
+            str(normalized_path),
+            "--output-dir",
+            str(output_dir),
+            "--png",
+            "required",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "error": {
+            "code": "png_unavailable",
+            "message": "Install playwright>=1.52 and Chromium for required PNG output",
+            "details": {},
+        },
+    }
+    assert "/private/browser" not in captured.out
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
 def test_cli_writes_unique_numbered_svg_files_and_one_json_result(
     tmp_path, normalized_document
 ):
@@ -432,6 +1032,8 @@ def test_cli_writes_unique_numbered_svg_files_and_one_json_result(
             "960",
             "--height",
             "540",
+            "--png",
+            "never",
         ],
         check=False,
         capture_output=True,
@@ -444,10 +1046,30 @@ def test_cli_writes_unique_numbered_svg_files_and_one_json_result(
     payload = json.loads(result.stdout)
     assert payload == {
         "ok": True,
-        "pages": 2,
-        "files": ["opportunity-visual-p01.svg", "opportunity-visual-p02.svg"],
+        "manifest": str(output_dir / "render-manifest.json"),
+        "pages": [
+            {
+                "svg": str(output_dir / "opportunity-visual-p01.svg"),
+                "html": str(output_dir / "opportunity-visual-p01.html"),
+                "png": None,
+            },
+            {
+                "svg": str(output_dir / "opportunity-visual-p02.svg"),
+                "html": str(output_dir / "opportunity-visual-p02.html"),
+                "png": None,
+            },
+        ],
+        "png": {"status": "disabled", "reason": "PNG output disabled"},
     }
-    assert sorted(path.name for path in output_dir.glob("*.svg")) == payload["files"]
+    assert sorted(path.name for path in output_dir.glob("*.svg")) == [
+        "opportunity-visual-p01.svg",
+        "opportunity-visual-p02.svg",
+    ]
+    assert sorted(path.name for path in output_dir.glob("*.html")) == [
+        "opportunity-visual-p01.html",
+        "opportunity-visual-p02.html",
+    ]
+    assert (output_dir / "render-manifest.json").is_file()
     for path in output_dir.glob("*.svg"):
         ElementTree.parse(path)
 
@@ -571,9 +1193,9 @@ def test_cli_rolls_back_all_pages_when_an_atomic_publish_fails(
     assert payload == {
         "ok": False,
         "error": {
-            "code": "output_unwritable",
-            "message": "Unable to write SVG artifacts",
-            "details": {},
+                "code": "output_unwritable",
+                "message": "Unable to write render artifacts",
+                "details": {},
         },
     }
     assert "/private/data" not in captured.out

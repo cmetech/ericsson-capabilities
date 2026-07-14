@@ -945,3 +945,47 @@ def test_prepare_cli_reports_atomic_write_failure_without_partial_artifacts(
     }
     assert "/private/secret" not in captured.out
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_prepare_cli_rejects_symlink_destination_without_touching_target(
+    tmp_path, csv_source, semantics
+):
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    output_link = tmp_path / "linked-output"
+    output_link.symlink_to(target_dir, target_is_directory=True)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "prepare_opportunities.py"),
+            "prepare",
+            str(csv_source),
+            "--view",
+            "wins",
+            "--semantics",
+            str(semantics_path),
+            "--output-dir",
+            str(output_link),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "error": {
+            "code": "output_exists",
+            "message": "Output destination already exists",
+            "details": {},
+        },
+    }
+    assert output_link.is_symlink()
+    assert list(target_dir.iterdir()) == []
+    assert str(output_link) not in result.stdout

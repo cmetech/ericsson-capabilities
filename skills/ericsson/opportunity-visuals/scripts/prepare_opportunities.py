@@ -127,7 +127,11 @@ def _validate_output_destination(output_dir: Path) -> bool:
     """Return whether the destination must be created, rejecting unsafe reuse."""
 
     try:
-        if output_dir.is_symlink() or output_dir.exists():
+        if output_dir.is_symlink():
+            raise DataContractError(
+                "output_exists", "Output destination already exists"
+            )
+        if output_dir.exists():
             if not output_dir.is_dir() or any(output_dir.iterdir()):
                 raise DataContractError(
                     "output_exists", "Output destination already exists"

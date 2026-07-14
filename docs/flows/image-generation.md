@@ -38,6 +38,8 @@ Untrusted generated HTML can load network resources or access local content if t
 
 Not ported. First decide whether the user wants a data-faithful branded infographic or an illustrative image. The former favors a branded-visual skill plus a constrained HTML renderer; the latter may use Hermes' native image generation. These should not be conflated.
 
+The approved port design chooses a focused, deterministic `opportunity-visuals` skill for the four opportunity views in the source Prompt Library. See the [Ericsson Opportunity Visuals skill design](../superpowers/specs/2026-07-14-ericsson-opportunity-visuals-design.md). The flow remains not ported until that skill and its showcase tests pass.
+
 ## How Hermes should explain and configure it
 
 Ask what data is being visualized, which template/story, required brand treatment, format/dimensions, and confidentiality. Explain the HTML-rendering approach. Validate with synthetic data and inspect the produced artifact for correctness, clipping, fonts, and external requests.

@@ -40,6 +40,7 @@ Supporting foundations already exist independently of a complete flow port: Jira
 - [Configuration guide](configuration.md) explains every current, planned, and source-only credential or machine prerequisite.
 - [Skill design context](skill-design-context.md) defines how a future Hermes skill should explain flows, assess readiness, guide configuration, validate safely, and troubleshoot.
 - [Flow template](flows/_template.md) is the required structure for documenting future source flows.
+- [Ericsson Opportunity Visuals skill design](superpowers/specs/2026-07-14-ericsson-opportunity-visuals-design.md) specifies the approved deterministic port of the Loop24 Image Generation flow, including natural-language triggers, coworker interview behavior, and synthetic showcase/test artifacts.
 
 ## Status vocabulary
 

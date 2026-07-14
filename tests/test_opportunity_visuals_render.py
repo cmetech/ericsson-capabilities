@@ -5,11 +5,13 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from copy import deepcopy
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import Mock
 from xml.etree import ElementTree
 
 import pytest
+from openpyxl import Workbook
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -19,6 +21,7 @@ TEMPLATE = SKILL_DIR / "templates/opportunity-visual.svg"
 sys.path.insert(0, str(SCRIPTS))
 
 import render_opportunity_visual as renderer  # noqa: E402
+from prepare_opportunities import prepare  # noqa: E402
 from render_opportunity_visual import (  # noqa: E402
     RasterUnavailable,
     RenderError,
@@ -155,7 +158,7 @@ def normalized_document():
     return {
         "schema_version": 1,
         "view": "all-progression",
-        "source": {"basename": "showcase.json", "sha256": "not-rendered"},
+        "source": {"basename": "showcase.json", "sha256": "a" * 64},
         "mapping": {},
         "semantics": {},
         "selected_months": deepcopy(MONTHS),
@@ -430,7 +433,10 @@ def test_html_is_self_contained(tmp_path, normalized_document):
     write_html(svg_text, output)
 
     html = output.read_text(encoding="utf-8")
-    assert svg_text.strip() in html
+    canonical_svg = ElementTree.tostring(
+        ElementTree.fromstring(svg_text), encoding="unicode"
+    )
+    assert canonical_svg in html
     assert "<script" not in html.lower()
     assert "https://" not in html
     assert html.count("http://") == 1
@@ -438,6 +444,70 @@ def test_html_is_self_contained(tmp_path, normalized_document):
     assert 'href="http' not in html and 'href="https' not in html
     assert "iframe" not in html.lower()
     assert not (tmp_path / ".page.html.tmp").exists()
+
+
+class _TagCollector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = []
+        self.remote_values = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(tag.casefold())
+        self.remote_values.extend(
+            value for _, value in attrs if value and "https://" in value.casefold()
+        )
+
+
+@pytest.mark.parametrize(
+    ("svg_text", "active_tag"),
+    [
+        (
+            '<?before ><script src="https://example.test/x.js"></script>?>'
+            '<svg xmlns="http://www.w3.org/2000/svg"/>',
+            "script",
+        ),
+        (
+            '<svg xmlns="http://www.w3.org/2000/svg"/>'
+            '<?after ><iframe src="https://example.test/frame"></iframe>?>',
+            "iframe",
+        ),
+        (
+            '<?before ><img src="https://example.test/pixel.png">?>'
+            '<svg xmlns="http://www.w3.org/2000/svg"/>',
+            "img",
+        ),
+    ],
+)
+def test_html_canonicalizes_away_processing_instruction_breakouts(
+    tmp_path, svg_text, active_tag
+):
+    output = tmp_path / "page.html"
+
+    write_html(svg_text, output)
+
+    html = output.read_text(encoding="utf-8")
+    parser = _TagCollector()
+    parser.feed(html)
+    assert active_tag not in parser.tags
+    assert parser.remote_values == []
+    assert "https://example.test" not in html
+    assert "<?before" not in html and "<?after" not in html
+
+
+def test_html_rejects_doctype_and_strips_xml_comments(tmp_path):
+    with pytest.raises(RenderError, match="safe local SVG"):
+        write_html(
+            '<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>',
+            tmp_path / "doctype.html",
+        )
+
+    output = tmp_path / "comment.html"
+    write_html(
+        '<svg xmlns="http://www.w3.org/2000/svg"><!-- untrusted comment --><rect /></svg>',
+        output,
+    )
+    assert "untrusted comment" not in output.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -638,6 +708,52 @@ def test_preflight_keeps_package_and_chromium_statuses_independent(tmp_path, mon
     assert result["png_package"]["status"] == "available"
     assert result["chromium"]["status"] == "available"
     assert result["output_directory"]["status"] == "unavailable"
+
+
+def test_preflight_accepts_nested_nonexistent_destination_without_residue(tmp_path):
+    output_dir = tmp_path / "one" / "two" / "rendered"
+    before = set(tmp_path.iterdir())
+
+    result = preflight(output_dir)
+
+    assert result["output_directory"] == {"status": "available", "reason": ""}
+    assert not output_dir.exists()
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_preflight_unwritable_probe_failure_leaves_no_residue(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        renderer.tempfile,
+        "mkdtemp",
+        Mock(side_effect=PermissionError("private path")),
+    )
+    before = set(tmp_path.iterdir())
+
+    result = renderer._probe_output_directory(tmp_path / "nested" / "rendered")
+
+    assert result == {
+        "status": "unavailable",
+        "reason": "Output directory is not writable",
+    }
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_preflight_cleans_probe_if_descriptor_close_reports_failure(
+    tmp_path, monkeypatch
+):
+    real_close = os.close
+
+    def close_then_fail(descriptor):
+        real_close(descriptor)
+        raise OSError("private close detail")
+
+    monkeypatch.setattr(os, "close", close_then_fail)
+    before = set(tmp_path.iterdir())
+
+    result = renderer._probe_output_directory(tmp_path / "nested" / "rendered")
+
+    assert result["status"] == "unavailable"
+    assert set(tmp_path.iterdir()) == before
 
 
 def _write_normalized(tmp_path, document):
@@ -849,6 +965,18 @@ def test_manifest_rejects_source_metadata_disguised_as_a_basename(
     assert not (tmp_path / "rendered").exists()
 
 
+def test_manifest_rejects_path_like_sheet_metadata(tmp_path, normalized_document):
+    normalized_document["source"]["sheet"] = "/private/confidential/Pipeline"
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, tmp_path / "rendered", png_mode="never")
+
+    assert caught.value.code == "invalid_document"
+    assert "/private/confidential" not in str(caught.value)
+    assert not (tmp_path / "rendered").exists()
+
+
 def test_manifest_requires_auditable_integer_source_rows(tmp_path, normalized_document):
     del normalized_document["records"][0]["source_row"]
     normalized_path = _write_normalized(tmp_path, normalized_document)
@@ -945,6 +1073,178 @@ def test_manifest_collision_rolls_back_owned_outputs_and_preserves_competitors(
         "opportunity-visual-p01.html",
         "render-manifest.json",
     ]
+
+
+@pytest.mark.parametrize("kind", ["svg", "html", "png"])
+def test_success_path_detects_artifact_replaced_between_hash_and_manifest_publish(
+    tmp_path, normalized_document, monkeypatch, kind
+):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    output_dir = tmp_path / "rendered"
+    if kind == "png":
+        def fake_rasterize(html_path, png_path, width, height, playwright_factory=None):
+            Path(png_path).write_bytes(b"renderer-png")
+
+        monkeypatch.setattr(renderer, "rasterize_html", fake_rasterize)
+        png_mode = "required"
+    else:
+        png_mode = "never"
+    victim = output_dir / f"opportunity-visual-p01.{kind}"
+    competitor = b"competitor-bytes"
+    competitor_hash = hashlib.sha256(competitor).hexdigest()
+    real_link = os.link
+    staged_manifest = []
+
+    def replace_after_hash(source, target, **kwargs):
+        target = Path(target)
+        if target.name == "render-manifest.json":
+            staged_manifest.append(Path(source).read_text(encoding="utf-8"))
+            victim.unlink()
+            victim.write_bytes(competitor)
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", replace_after_hash)
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, output_dir, png_mode=png_mode)
+
+    assert caught.value.code == "output_changed"
+    assert victim.read_bytes() == competitor
+    assert staged_manifest and competitor_hash not in staged_manifest[0]
+    assert not (output_dir / "render-manifest.json").exists()
+    assert not list(output_dir.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda document: document["records"][0]["months"][0].update(skipped_months=None),
+        lambda document: document["source"].update(sha256="not-a-sha256"),
+        lambda document: document["exclusions"].append(
+            {"id": "BAD", "source_row": True, "code": "view_not_matched"}
+        ),
+        lambda document: document["exclusions"].append(
+            {"id": "BAD", "source_row": 0, "code": "view_not_matched"}
+        ),
+        lambda document: document["exclusions"].append(
+            {"id": "BAD", "source_row": 9, "code": "view_not_matched"}
+        ),
+    ],
+)
+def test_cli_rejects_malformed_audit_fields_before_any_artifact(
+    tmp_path, normalized_document, mutate
+):
+    mutate(normalized_document)
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    output_dir = tmp_path / "rendered"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "render_opportunity_visual.py"),
+            str(normalized_path),
+            "--output-dir",
+            str(output_dir),
+            "--png",
+            "never",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] in {"invalid_document", "invalid_record"}
+    assert str(normalized_path) not in result.stdout
+    assert not output_dir.exists()
+
+
+def test_main_masks_unexpected_exception_without_masking_process_controls(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        renderer,
+        "render_document",
+        Mock(side_effect=RuntimeError("secret /private/source detail")),
+    )
+
+    exit_code = renderer.main(
+        ["normalized-data.json", "--output-dir", str(tmp_path / "rendered")]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "error": {
+            "code": "internal_error",
+            "message": "Unexpected renderer failure",
+            "details": {},
+        },
+    }
+    assert "/private/source" not in captured.out
+
+    monkeypatch.setattr(renderer, "render_document", Mock(side_effect=KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):
+        renderer.main(
+            ["normalized-data.json", "--output-dir", str(tmp_path / "rendered")]
+        )
+
+
+def test_prepared_xlsx_sheet_is_preserved_in_render_manifest(tmp_path):
+    source = tmp_path / "pipeline.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline Review"
+    sheet.append(
+        [
+            "Area",
+            "Sub-area",
+            "Opportunity Name",
+            "TCV",
+            "Probability",
+            "Mar '26",
+            "Apr '26",
+        ]
+    )
+    sheet.append(["Area", "Sub", "Synthetic", "Large", "High", "Idea", "Won"])
+    workbook.save(source)
+    semantics = tmp_path / "semantics.json"
+    semantics.write_text(
+        json.dumps(
+            {
+                "positive_terminals": ["Won"],
+                "negative_terminals": ["Lost"],
+                "stage_paths": [["Idea", "Won"]],
+                "positive_transitions": [],
+                "tcv_order": ["Large"],
+                "probability_order": ["High"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepared = tmp_path / "prepared"
+    prepare(
+        source,
+        "wins",
+        semantics,
+        prepared,
+        sheet="Pipeline Review",
+    )
+
+    result = render_document(
+        prepared / "normalized-data.json",
+        prepared,
+        png_mode="never",
+    )
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+
+    assert manifest["source"]["sheet"] == "Pipeline Review"
 
 
 def test_preflight_cli_prints_one_json_and_leaves_no_probe(tmp_path):

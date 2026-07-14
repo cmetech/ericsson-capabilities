@@ -66,6 +66,8 @@ _FIXED_LABELS = {
     "tcv": "TCV",
     "probability": "Probability",
 }
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
+_AUDIT_CLASSIFICATIONS = frozenset({*STAGE_COLORS, "empty"})
 
 
 class RenderError(ValueError):
@@ -145,6 +147,127 @@ def _validate_xml_text(value: str) -> str:
     ):
         raise RenderError("invalid_xml_text", "User value is not valid XML text")
     return value
+
+
+def _is_positive_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value > 0
+
+
+def _validate_safe_string(value: object, message: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RenderError("invalid_document", message)
+    _validate_xml_text(value)
+    return value
+
+
+def _validated_source(source: object) -> dict[str, object]:
+    if not isinstance(source, dict):
+        raise RenderError("invalid_document", "Normalized source metadata is invalid")
+    basename = _validate_safe_string(
+        source.get("basename"), "Normalized source metadata is invalid"
+    )
+    source_hash = source.get("sha256")
+    sheet = source.get("sheet")
+    if (
+        basename in {".", ".."}
+        or "/" in basename
+        or "\\" in basename
+        or not isinstance(source_hash, str)
+        or _SHA256.fullmatch(source_hash) is None
+    ):
+        raise RenderError("invalid_document", "Normalized source metadata is invalid")
+    if sheet is not None:
+        sheet = _validate_safe_string(sheet, "Normalized source metadata is invalid")
+        if any(character in sheet for character in "[]:*?/\\"):
+            raise RenderError("invalid_document", "Normalized source metadata is invalid")
+    return {"basename": basename, "sha256": source_hash, "sheet": sheet}
+
+
+def _validate_warning(warning: object, *, top_level: bool) -> None:
+    if not isinstance(warning, dict):
+        raise RenderError("invalid_document", "Normalized warnings are invalid")
+    _validate_safe_string(warning.get("code"), "Normalized warnings are invalid")
+    message = warning.get("message")
+    if not isinstance(message, str):
+        raise RenderError("invalid_document", "Normalized warnings are invalid")
+    if top_level:
+        _validate_safe_string(warning.get("id"), "Normalized warnings are invalid")
+        if not _is_positive_int(warning.get("source_row")):
+            raise RenderError("invalid_document", "Normalized warnings are invalid")
+    month = warning.get("month")
+    if month is not None:
+        _validate_safe_string(month, "Normalized warnings are invalid")
+    skipped = warning.get("skipped_months")
+    if skipped is not None and (
+        not isinstance(skipped, list)
+        or any(not isinstance(item, str) for item in skipped)
+    ):
+        raise RenderError("invalid_document", "Normalized warnings are invalid")
+
+
+def _validate_audit_structure(
+    document: dict[str, object], selected_keys: set[str]
+) -> None:
+    _validated_source(document.get("source"))
+    for key in ("mapping", "semantics", "filters"):
+        if not isinstance(document.get(key), dict):
+            raise RenderError("invalid_document", f"Normalized {key} metadata is invalid")
+    try:
+        json.dumps(
+            {
+                "mapping": document["mapping"],
+                "semantics": document["semantics"],
+                "filters": document["filters"],
+            },
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        raise RenderError("invalid_document", "Normalized audit metadata is invalid") from None
+
+    exclusions = document.get("exclusions")
+    if not isinstance(exclusions, list):
+        raise RenderError("invalid_document", "Normalized exclusions are invalid")
+    for exclusion in exclusions:
+        if not isinstance(exclusion, dict):
+            raise RenderError("invalid_document", "Normalized exclusions are invalid")
+        _validate_safe_string(exclusion.get("id"), "Normalized exclusions are invalid")
+        _validate_safe_string(exclusion.get("code"), "Normalized exclusions are invalid")
+        if not _is_positive_int(exclusion.get("source_row")):
+            raise RenderError("invalid_document", "Normalized exclusions are invalid")
+        if not isinstance(exclusion.get("message"), str):
+            raise RenderError("invalid_document", "Normalized exclusions are invalid")
+
+    warnings = document.get("warnings")
+    if not isinstance(warnings, list):
+        raise RenderError("invalid_document", "Normalized warnings are invalid")
+    for warning in warnings:
+        _validate_warning(warning, top_level=True)
+
+    for record in document["records"]:
+        nested_warnings = record.get("warnings")
+        if not isinstance(nested_warnings, list):
+            raise RenderError("invalid_document", "Normalized record warnings are invalid")
+        for warning in nested_warnings:
+            _validate_warning(warning, top_level=False)
+        for month in record["months"]:
+            key = month["key"]
+            classification = month["classification"]
+            skipped = month.get("skipped_months")
+            if key not in selected_keys:
+                raise RenderError("invalid_record", "Normalized record month is invalid")
+            if classification not in _AUDIT_CLASSIFICATIONS:
+                raise RenderError(
+                    "invalid_record", "Normalized stage classification is invalid"
+                )
+            if (not month["stage"].strip()) != (classification == "empty"):
+                raise RenderError(
+                    "invalid_record", "Normalized stage classification is invalid"
+                )
+            if not isinstance(skipped, list) or any(
+                not isinstance(item, str) for item in skipped
+            ):
+                raise RenderError("invalid_record", "Normalized skipped months are invalid")
 
 
 def _validate_structure(
@@ -228,6 +351,8 @@ def _validate_structure(
         row_ids.append(record["id"])
     if len(set(row_ids)) != len(row_ids):
         raise RenderError("duplicate_record", "Normalized record IDs must be unique")
+    if validate_render_values:
+        _validate_audit_structure(document, set(month_keys))
     return document
 
 
@@ -756,7 +881,9 @@ def _contains_non_fragment_url(value: str) -> bool:
     return False
 
 
-def _validate_embedded_svg(svg_text: str) -> None:
+def _validate_embedded_svg(svg_text: str) -> ElementTree.Element:
+    if re.search(r"<!DOCTYPE\b", svg_text, re.IGNORECASE):
+        raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
     try:
         root = ElementTree.fromstring(svg_text)
     except (ElementTree.ParseError, ValueError):
@@ -778,17 +905,22 @@ def _validate_embedded_svg(svg_text: str) -> None:
                 raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
         if element_name == "style" and _contains_non_fragment_url(element.text or ""):
             raise RenderError("unsafe_svg", "HTML preview requires safe local SVG")
+    return root
 
 
 def _html_document(svg_text: str) -> str:
-    _validate_embedded_svg(svg_text)
+    root = _validate_embedded_svg(svg_text)
+    ElementTree.register_namespace("", SVG_NS)
+    canonical_svg = ElementTree.tostring(
+        root, encoding="unicode", short_empty_elements=True
+    )
     return (
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         "<title>Ericsson Opportunity Visual</title>"
         "<style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style>"
         "</head><body>"
-        + svg_text.strip()
+        + canonical_svg
         + "</body></html>\n"
     )
 
@@ -871,15 +1003,38 @@ def _probe_chromium() -> dict[str, str]:
 
 def _probe_output_directory(output_dir: Path) -> dict[str, str]:
     output_dir = Path(output_dir)
-    if output_dir.is_symlink() or not output_dir.is_dir():
+    if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
         return _capability("unavailable", "Output directory is not writable")
+    missing_depth = 0
+    probe_parent = output_dir
+    while not probe_parent.exists():
+        if probe_parent.is_symlink() or probe_parent.parent == probe_parent:
+            return _capability("unavailable", "Output directory is not writable")
+        missing_depth += 1
+        probe_parent = probe_parent.parent
+    if not probe_parent.is_dir():
+        return _capability("unavailable", "Output directory is not writable")
+
+    private_root: Path | None = None
     probe: Path | None = None
+    created_dirs: list[Path] = []
+    cleanup_ok = True
     try:
-        descriptor, name = tempfile.mkstemp(
-            prefix=".opportunity-visual-preflight-", dir=output_dir
+        private_root = Path(
+            tempfile.mkdtemp(
+                prefix=".opportunity-visual-preflight-", dir=probe_parent
+            )
         )
-        os.close(descriptor)
+        probe_dir = private_root
+        for index in range(missing_depth):
+            probe_dir = probe_dir / f"nested-{index}"
+            probe_dir.mkdir()
+            created_dirs.append(probe_dir)
+        descriptor, name = tempfile.mkstemp(
+            prefix="probe-", dir=probe_dir
+        )
         probe = Path(name)
+        os.close(descriptor)
     except OSError:
         return _capability("unavailable", "Output directory is not writable")
     finally:
@@ -887,8 +1042,18 @@ def _probe_output_directory(output_dir: Path) -> dict[str, str]:
             try:
                 probe.unlink()
             except OSError:
-                pass
-    if probe.exists() or probe.is_symlink():
+                cleanup_ok = False
+        for directory in reversed(created_dirs):
+            try:
+                directory.rmdir()
+            except OSError:
+                cleanup_ok = False
+        if private_root is not None:
+            try:
+                private_root.rmdir()
+            except OSError:
+                cleanup_ok = False
+    if not cleanup_ok or (private_root is not None and private_root.exists()):
         return _capability("unavailable", "Output directory probe could not be removed")
     return _capability("available")
 
@@ -977,6 +1142,23 @@ def _publish_owned_file(
     )
 
 
+def _verify_publications(publications: list[_OwnedPublication]) -> None:
+    """Require every visible artifact to retain this transaction's inode."""
+
+    for publication in publications:
+        try:
+            owner_stat = publication.owner_path.lstat()
+            visible_stat = publication.path.lstat()
+        except OSError:
+            raise RenderError(
+                "output_changed", "A rendered artifact changed before commit"
+            ) from None
+        if not os.path.samestat(owner_stat, visible_stat):
+            raise RenderError(
+                "output_changed", "A rendered artifact changed before commit"
+            )
+
+
 def _rollback_owned(publication: _OwnedPublication) -> None:
     """Remove our visible inode, restoring a replaced competitor without clobbering.
 
@@ -1063,24 +1245,7 @@ def _sha256_file(path: Path, manifest_path: Path) -> str:
 
 
 def _project_source(source: object) -> dict[str, object]:
-    if not isinstance(source, dict):
-        raise RenderError("invalid_document", "Normalized source metadata is invalid")
-    basename = source.get("basename")
-    source_hash = source.get("sha256")
-    sheet = source.get("sheet")
-    if not isinstance(basename, str) or not isinstance(source_hash, str):
-        raise RenderError("invalid_document", "Normalized source metadata is invalid")
-    if (
-        not basename
-        or basename in {".", ".."}
-        or "/" in basename
-        or "\\" in basename
-        or "\x00" in basename
-    ):
-        raise RenderError("invalid_document", "Normalized source metadata is invalid")
-    if sheet is not None and not isinstance(sheet, str):
-        raise RenderError("invalid_document", "Normalized source metadata is invalid")
-    return {"basename": basename, "sha256": source_hash, "sheet": sheet}
+    return _validated_source(source)
 
 
 def _project_exclusions(exclusions: object) -> list[dict[str, object]]:
@@ -1093,7 +1258,11 @@ def _project_exclusions(exclusions: object) -> list[dict[str, object]]:
         row_id = item.get("id")
         source_row = item.get("source_row")
         code = item.get("code")
-        if not isinstance(row_id, str) or not isinstance(source_row, int) or not isinstance(code, str):
+        if (
+            not isinstance(row_id, str)
+            or not _is_positive_int(source_row)
+            or not isinstance(code, str)
+        ):
             raise RenderError("invalid_document", "Normalized exclusions are invalid")
         projected.append({"id": row_id, "source_row": source_row, "code": code})
     return projected
@@ -1174,8 +1343,14 @@ def _manifest_payload(
             raise RenderError("invalid_artifact", "Render artifacts do not match page plans")
         svg_path = Path(artifact["svg"])
         html_path = Path(artifact["html"])
+        svg_hash_path = Path(artifact.get("svg_owner", svg_path))
+        html_hash_path = Path(artifact.get("html_owner", html_path))
         png_value = artifact.get("png")
         png_path = Path(png_value) if png_value is not None else None
+        png_owner_value = artifact.get("png_owner", png_path)
+        png_hash_path = (
+            Path(png_owner_value) if png_owner_value is not None else None
+        )
         page_entries.append(
             {
                 "number": page.number,
@@ -1188,11 +1363,11 @@ def _manifest_payload(
                     "png": png_path.name if png_path is not None else None,
                 },
                 "sha256": {
-                    "svg": _sha256_file(svg_path, manifest_path),
-                    "html": _sha256_file(html_path, manifest_path),
+                    "svg": _sha256_file(svg_hash_path, manifest_path),
+                    "html": _sha256_file(html_hash_path, manifest_path),
                     "png": (
-                        _sha256_file(png_path, manifest_path)
-                        if png_path is not None
+                        _sha256_file(png_hash_path, manifest_path)
+                        if png_hash_path is not None
                         else None
                     ),
                 },
@@ -1399,10 +1574,18 @@ def render_document(
     ]
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
-        for svg_path, svg_text in zip(svg_paths, svg_texts, strict=True):
-            publications.append(_publish_owned_text(svg_path, svg_text))
-        for html_path, html_text in zip(html_paths, html_texts, strict=True):
-            publications.append(_publish_owned_text(html_path, html_text))
+        for artifact, svg_path, svg_text in zip(
+            artifacts, svg_paths, svg_texts, strict=True
+        ):
+            publication = _publish_owned_text(svg_path, svg_text)
+            publications.append(publication)
+            artifact["svg_owner"] = publication.owner_path
+        for artifact, html_path, html_text in zip(
+            artifacts, html_paths, html_texts, strict=True
+        ):
+            publication = _publish_owned_text(html_path, html_text)
+            publications.append(publication)
+            artifact["html_owner"] = publication.owner_path
 
         if png_mode == "never":
             png_status = {"status": "disabled", "reason": "PNG output disabled"}
@@ -1437,11 +1620,13 @@ def render_document(
                         raise
                     png_publications.append(publication)
                     artifact["png"] = png_path
+                    artifact["png_owner"] = publication.owner_path
             except RasterUnavailable:
                 for publication in reversed(png_publications):
                     _rollback_owned(publication)
                 for artifact in artifacts:
                     artifact["png"] = None
+                    artifact.pop("png_owner", None)
                 if png_mode == "required":
                     raise RenderError(
                         "png_unavailable",
@@ -1459,6 +1644,7 @@ def render_document(
                 publications.extend(png_publications)
                 png_status = {"status": "available", "reason": ""}
 
+        _verify_publications(publications)
         manifest_text = _manifest_text(
             document,
             pages,
@@ -1469,6 +1655,7 @@ def render_document(
             png_status,
         )
         publications.append(_publish_owned_text(manifest_path, manifest_text))
+        _verify_publications(publications)
     except RenderError:
         for publication in reversed(publications):
             _rollback_owned(publication)
@@ -1575,6 +1762,21 @@ def main(argv: list[str] | None = None) -> int:
                     "error": {
                         "code": "output_unwritable",
                         "message": "Unable to write render artifacts",
+                        "details": {},
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 2
+    except Exception:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "internal_error",
+                        "message": "Unexpected renderer failure",
                         "details": {},
                     },
                 },

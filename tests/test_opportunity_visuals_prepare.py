@@ -672,6 +672,7 @@ def test_prepare_cli_writes_stable_artifacts_and_refuses_nonempty_output(
     assert normalized["source"] == {
         "basename": "pipeline.csv",
         "sha256": summary["sha256"],
+        "sheet": None,
     }
     assert normalized["schema_version"] == 1
     assert [record["id"] for record in normalized["records"]] == ["OV-001"]

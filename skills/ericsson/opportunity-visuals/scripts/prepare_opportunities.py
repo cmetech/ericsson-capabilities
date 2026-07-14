@@ -279,7 +279,11 @@ def prepare(
     normalized_data = {
         "schema_version": 1,
         "view": view,
-        "source": {"basename": metadata["source"], "sha256": metadata["sha256"]},
+        "source": {
+            "basename": metadata["source"],
+            "sha256": metadata["sha256"],
+            "sheet": metadata.get("sheet"),
+        },
         "mapping": mapping,
         "semantics": semantics,
         "selected_months": selected_months,

@@ -11,6 +11,6 @@
     .stage { font-size: 16px; font-weight: 600; fill: #FFFFFF; }
     .grid { stroke: #D8D8D8; stroke-width: 1; }
   </style>
-  <rect width="1920" height="1080" fill="#FFFFFF"/>
+  <rect id="background" width="1920" height="1080" fill="#FFFFFF"/>
   <g id="content"/>
 </svg>

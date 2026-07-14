@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -317,13 +318,50 @@ def test_renderer_rejects_out_of_range_normalized_probability(normalized_documen
         render_svg_page(normalized_document, page, TEMPLATE)
 
 
-def test_body_and_stage_fonts_scale_above_canonical_size(normalized_document):
-    page = paginate(normalized_document, 3840, 2160)[0]
+@pytest.mark.parametrize(
+    ("width", "height", "title_font", "header_font", "body_font", "stage_font", "pill_height"),
+    [
+        (960, 540, "15", "8.5", "8", "8", "16"),
+        (3840, 2160, "60", "34", "32", "32", "64"),
+    ],
+)
+def test_entire_svg_frame_and_typography_scale_with_page(
+    normalized_document,
+    width,
+    height,
+    title_font,
+    header_font,
+    body_font,
+    stage_font,
+    pill_height,
+):
+    page = paginate(normalized_document, width, height)[0]
     svg = render_svg_page(normalized_document, page, TEMPLATE)
+    root = ElementTree.fromstring(svg)
+    namespace = {"svg": "http://www.w3.org/2000/svg"}
+    background = root.find("svg:rect[@id='background']", namespace)
+    visible_title = root.find(".//svg:g[@id='content']/svg:text[@class='title']", namespace)
+    stage_text = root.find(".//svg:text[@class='stage']", namespace)
+    stage_pill = root.find(".//svg:g[@data-classification='initial']/svg:rect", namespace)
 
-    assert 'width="3840" height="2160" viewBox="0 0 3840 2160"' in svg
-    assert 'style="font-size:32px"' in svg
-    assert 'style="font-size:34px;fill:#FFFFFF"' in svg
+    assert root.attrib == {
+        "width": str(width),
+        "height": str(height),
+        "viewBox": f"0 0 {width} {height}",
+        "role": "img",
+        "aria-labelledby": "title desc",
+    }
+    assert background is not None
+    assert background.attrib["width"] == str(width)
+    assert background.attrib["height"] == str(height)
+    assert visible_title is not None
+    assert visible_title.attrib["style"] == f"font-size:{title_font}px"
+    assert f'style="font-size:{header_font}px;fill:#FFFFFF"' in svg
+    assert f'style="font-size:{body_font}px"' in svg
+    assert stage_text is not None
+    assert stage_text.attrib["style"] == f"font-size:{stage_font}px"
+    assert stage_pill is not None
+    assert stage_pill.attrib["height"] == pill_height
 
 
 def test_renderer_rejects_xml_control_characters_in_user_values(normalized_document):
@@ -356,6 +394,24 @@ def test_atomic_write_text_uses_sibling_temporary_and_refuses_overwrite(tmp_path
     with pytest.raises(RenderError, match="already exists"):
         atomic_write_text(output, "second\n")
     assert output.read_text(encoding="utf-8") == "first\n"
+
+
+def test_atomic_write_text_cannot_overwrite_target_created_during_publish(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "page.svg"
+    real_link = os.link
+
+    def competing_publish(source, target):
+        Path(target).write_text("competitor\n", encoding="utf-8")
+        return real_link(source, target)
+
+    monkeypatch.setattr(os, "link", competing_publish)
+
+    with pytest.raises(RenderError, match="already exists"):
+        atomic_write_text(output, "renderer\n")
+    assert output.read_text(encoding="utf-8") == "competitor\n"
+    assert not (tmp_path / ".page.svg.tmp").exists()
 
 
 def test_cli_writes_unique_numbered_svg_files_and_one_json_result(
@@ -485,24 +541,24 @@ def test_cli_refuses_overwrite_without_changing_existing_page(tmp_path, normaliz
     assert list(output_dir.iterdir()) == [existing]
 
 
-def test_cli_rolls_back_all_pages_when_an_atomic_replace_fails(
+def test_cli_rolls_back_all_pages_when_an_atomic_publish_fails(
     tmp_path, normalized_document, monkeypatch, capsys
 ):
     document = expanded_document(normalized_document, record_count=4, month_count=10)
     normalized_path = tmp_path / "normalized-data.json"
     normalized_path.write_text(json.dumps(document), encoding="utf-8")
     output_dir = tmp_path / "rendered"
-    original_replace = Path.replace
+    real_link = os.link
     calls = 0
 
-    def fail_second_replace(self, target):
+    def fail_second_publish(source, target):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("sensitive /private/data")
-        return original_replace(self, target)
+        return real_link(source, target)
 
-    monkeypatch.setattr(Path, "replace", fail_second_replace)
+    monkeypatch.setattr(os, "link", fail_second_publish)
     result = renderer.main(
         [str(normalized_path), "--output-dir", str(output_dir), "--width", "960", "--height", "540"]
     )
@@ -522,3 +578,64 @@ def test_cli_rolls_back_all_pages_when_an_atomic_replace_fails(
     }
     assert "/private/data" not in captured.out
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_cli_rolls_back_only_its_pages_when_competitor_wins_later_page(
+    tmp_path, normalized_document, monkeypatch, capsys
+):
+    document = expanded_document(normalized_document, record_count=4, month_count=10)
+    normalized_path = tmp_path / "normalized-data.json"
+    normalized_path.write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "rendered"
+    real_link = os.link
+    calls = 0
+
+    def compete_on_second_page(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            Path(target).write_text("competitor\n", encoding="utf-8")
+        return real_link(source, target)
+
+    monkeypatch.setattr(os, "link", compete_on_second_page)
+    result = renderer.main(
+        [str(normalized_path), "--output-dir", str(output_dir), "--width", "960", "--height", "540"]
+    )
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.err == ""
+    assert json.loads(captured.out)["error"]["code"] == "output_exists"
+    assert not (output_dir / "opportunity-visual-p01.svg").exists()
+    competitor = output_dir / "opportunity-visual-p02.svg"
+    assert competitor.read_text(encoding="utf-8") == "competitor\n"
+    assert sorted(path.name for path in output_dir.iterdir()) == [competitor.name]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["normalized-data.json", "--output-dir", "rendered", "--width", "wide"],
+        ["normalized-data.json"],
+        ["normalized-data.json", "--output-dir", "rendered", "--unknown"],
+    ],
+)
+def test_cli_argument_errors_are_one_safe_json_object(arguments):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "render_opportunity_visual.py"), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "error": {
+            "code": "invalid_arguments",
+            "message": "Invalid command arguments",
+            "details": {},
+        },
+    }

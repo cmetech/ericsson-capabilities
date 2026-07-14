@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
@@ -484,11 +485,14 @@ def render_svg_page(
     root.set("viewBox", f"0 0 {width} {height}")
     title = root.find(f"{_SVG}title")
     description = root.find(f"{_SVG}desc")
+    background = root.find(f"{_SVG}rect[@id='background']")
     content = root.find(f"{_SVG}g[@id='content']")
-    if title is None or description is None or content is None:
+    if title is None or description is None or background is None or content is None:
         raise RenderError("invalid_template", "SVG template is missing required elements")
     title.text = VIEW_TITLES[str(document["view"])]
     description.text = f"Opportunity stage progression table, page {page.number}"
+    background.set("width", str(width))
+    background.set("height", str(height))
     content.clear()
     content.set("id", "content")
 
@@ -515,6 +519,7 @@ def render_svg_page(
         class_name="title",
         max_width=table_width - 180 * scale,
         font_size=30 * scale,
+        attributes={"style": f"font-size:{_number(30 * scale)}px"},
     )
     add_text(
         content,
@@ -698,9 +703,15 @@ def atomic_write_text(path: Path, text: str) -> None:
     if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
         raise RenderError("output_exists", "Output artifact already exists")
     try:
-        with temporary.open("x", encoding="utf-8") as handle:
-            handle.write(text)
-        temporary.replace(path)
+        try:
+            with temporary.open("x", encoding="utf-8") as handle:
+                handle.write(text)
+        except FileExistsError:
+            raise RenderError("output_exists", "Output artifact already exists") from None
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            raise RenderError("output_exists", "Output artifact already exists") from None
     finally:
         if temporary.exists() or temporary.is_symlink():
             try:
@@ -784,8 +795,13 @@ def _write_svg_pages(
     return names
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise RenderError("invalid_arguments", "Invalid command arguments")
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="render_opportunity_visual.py")
+    parser = _SafeArgumentParser(prog="render_opportunity_visual.py")
     parser.add_argument("normalized_data", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--width", type=int, default=1920)
@@ -794,8 +810,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
     try:
+        args = _parser().parse_args(argv)
         document = _load_document(args.normalized_data)
         template = Path(__file__).resolve().parents[1] / "templates/opportunity-visual.svg"
         names = _write_svg_pages(

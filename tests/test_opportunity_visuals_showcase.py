@@ -85,7 +85,10 @@ APPROVED_SVG_PALETTE = {
     "#F2F2F2",
     "#FFFFFF",
 }
-SVG_HEX_COLOR = re.compile(r"#[0-9a-f]{6}(?![0-9a-f])", re.IGNORECASE)
+SVG_HEX_COLOR = re.compile(
+    r"(?<![0-9a-f])#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{4}|[0-9a-f]{3})(?![0-9a-f])",
+    re.IGNORECASE,
+)
 
 
 def load_json(path: Path) -> dict[str, object]:
@@ -371,13 +374,28 @@ def test_golden_svgs_follow_the_reviewed_local_visual_contract():
     assert 'data-full-value="Harbor Observability &lt;Pilot&gt; =1+1"' in all_progression
 
 
-def test_svg_palette_validation_detects_css_and_stroke_colors():
+@pytest.mark.parametrize("location", ["css", "stroke"])
+@pytest.mark.parametrize("color", ["#123", "#1234", "#123456", "#12345678"])
+def test_svg_palette_validation_rejects_every_unapproved_hex_form(location, color):
+    payload = (
+        f"<style>.unapproved{{fill:{color}}}</style>"
+        if location == "css"
+        else f'<line stroke="{color}" />'
+    )
+    root = ElementTree.fromstring(
+        f'<svg xmlns="http://www.w3.org/2000/svg">{payload}</svg>'
+    )
+
+    with pytest.raises(AssertionError, match=color):
+        assert_approved_svg_palette(root)
+
+
+@pytest.mark.parametrize("color", ["#abc", "#abcd", "#abcdef", "#abcdef12"])
+def test_svg_hex_color_extraction_returns_each_complete_token_once(color):
     root = ElementTree.fromstring(
         '<svg xmlns="http://www.w3.org/2000/svg">'
-        "<style>.unapproved{fill:#123456}</style>"
-        '<line stroke="#123456" />'
+        f"<style>.sample{{fill:{color}}}</style>"
         "</svg>"
     )
 
-    with pytest.raises(AssertionError, match="#123456"):
-        assert_approved_svg_palette(root)
+    assert svg_hex_colors(root) == {color.upper()}

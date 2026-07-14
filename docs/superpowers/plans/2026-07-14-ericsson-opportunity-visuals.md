@@ -1378,7 +1378,7 @@ Expected: vendor test passes. Preserve unrelated user changes; stop and ask if t
 node scripts/vendor-ericsson.mjs
 ```
 
-Expected: output states `vendored ericsson-capabilities @ <source-short-sha>`, the complete skill directory appears under `skills/ericsson/opportunity-visuals/`, and `capabilities/ericsson.json` contains version `0.3.0`, the skill path once, and matching `vendoredFrom`.
+Expected: output states the short SHA returned by `git -C ../ericsson-capabilities rev-parse --short HEAD`, the complete skill directory appears under `skills/ericsson/opportunity-visuals/`, and `capabilities/ericsson.json` contains version `0.3.0`, the skill path once, and a `vendoredFrom` value equal to that command's output.
 
 - [ ] **Step 3: Verify copied runtime contents and excluded repository artifacts**
 

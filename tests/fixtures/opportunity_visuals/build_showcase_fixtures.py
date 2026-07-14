@@ -126,6 +126,7 @@ BASE_FIELDS = {
 SEMANTICS = {
     "positive_terminals": ["Won"],
     "negative_terminals": ["Lost", "Cancelled"],
+    "non_terminal_stages": ["Discovery"],
     "stage_paths": [
         ["Ideation", "Solution", "Proposal", "SDP2", "Won"],
         ["POC", "Workshop", "Commercials", "Won"],

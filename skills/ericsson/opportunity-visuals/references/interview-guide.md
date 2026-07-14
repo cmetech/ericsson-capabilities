@@ -22,8 +22,9 @@ Ask for missing decisions in this exact order:
 6. **Filters:** Accept optional Area, Sub-area, TCV, probability, or opportunity
    filters.
 7. **Analysis:** Run the read-only `analyze` command with the proposed choices.
-   Resolve each inclusion-affecting unknown one question at a time, update the
-   semantics, and rerun analysis before preparing artifacts.
+   First resolve each output-affecting unknown terminal status one question at
+   a time and rerun. Then resolve each remaining inclusion-affecting direction
+   one question at a time and rerun before preparing artifacts.
 8. **Output:** Default to 1920×1080 SVG, HTML, and PNG pages. Ask only when the
    user needs a different size, format, or destination.
 9. **Confidentiality:** If the data appears sensitive, state that file helpers
@@ -34,8 +35,9 @@ Ask for missing decisions in this exact order:
 
 Inspection or analysis can reveal another missing decision. Ask the next
 unresolved item in this order, then rerun the applicable read-only command.
-When multiple XLSX sheets, ambiguous columns or months, or unknown transitions
-affect inclusion, resolve only one ambiguity per question.
+When multiple XLSX sheets, ambiguous columns or months, unknown terminal
+statuses, or unknown directions affect output, resolve only one ambiguity per
+question.
 
 ## Question patterns
 
@@ -44,7 +46,8 @@ affect inclusion, resolve only one ambiguity per question.
   progression?”
 - Range: “I found monthly stages from March through May. Use all three months?”
 - Mapping: “Should `Deal Value` map to TCV?”
-- Semantics: “Should Deferred be a negative terminal or a non-terminal stage?”
+- Semantics: “Is Deferred a positive terminal, negative terminal, or
+  non-terminal stage?”
 - Direction: “For progression, is Discovery → Deferred forward, backward, or neutral?”
 - Filters: “Should I limit this to any Area, Sub-area, TCV, probability, or
   opportunity?”
@@ -55,9 +58,11 @@ affect inclusion, resolve only one ambiguity per question.
   destination?”
 
 When an unknown stage has more than one unresolved property, separate them.
-First confirm whether it is terminal. On the next turn ask whether the exact
-transition is forward, backward, or neutral. Update the confirmed stage path or
-edge, rerun `analyze`, and only then play back the execution summary.
+First confirm whether it is positive terminal, negative terminal, or
+non-terminal. If it is non-terminal, add it to `non_terminal_stages` and rerun
+`analyze`. Only after that rerun may the next turn ask whether the exact
+transition is forward, backward, or neutral. Update the confirmed stage path
+or edge, rerun `analyze` again, and only then play back the execution summary.
 
 ## Playback and confirmation
 
@@ -67,8 +72,9 @@ dimensions, and destination. Ask the user to confirm. Do not normalize into a
 run directory or render until confirmation. If the user corrects an item,
 return to that decision, update the playback, and ask for confirmation again.
 The analyze step must finish before preparing artifacts. A mixed transition is
-reported for review, but an inclusion-affecting unknown must be resolved and
-analysis rerun before playback and confirmation.
+reported for review, but every output-impact unknown terminal status and every
+inclusion-affecting unknown direction must be resolved and analysis rerun
+before playback and confirmation.
 
 ## Positive triggers
 

@@ -63,6 +63,7 @@ _NUMERIC_VALUE_PATTERN = re.compile(
 DEFAULT_SEMANTICS = {
     "positive_terminals": ["Won"],
     "negative_terminals": ["Lost", "Cancelled"],
+    "non_terminal_stages": [],
     "stage_paths": [],
     "positive_transitions": [["Proposal", "Workshop"]],
     "tcv_order": ["X-Small", "Small", "Medium", "Large", "X-Large"],
@@ -545,6 +546,13 @@ def validate_semantics(semantics: dict[str, object] | None) -> dict[str, object]
     if set(positive) & set(negative):
         raise DataContractError(
             "invalid_semantics", "Positive and negative terminal lists overlap"
+        )
+    non_terminal = _casefolded_strings(
+        result["non_terminal_stages"], "non_terminal_stages"
+    )
+    if (set(positive) | set(negative)) & set(non_terminal):
+        raise DataContractError(
+            "invalid_semantics", "Terminal and non-terminal stage lists overlap"
         )
 
     for key in ("tcv_order", "probability_order"):

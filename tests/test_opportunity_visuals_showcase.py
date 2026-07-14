@@ -22,7 +22,7 @@ SHOWCASE_XLSX = FIXTURES / "showcase-opportunities.xlsx"
 
 sys.path.insert(0, str(SCRIPTS))
 
-from prepare_opportunities import prepare  # noqa: E402
+from prepare_opportunities import analyze, prepare  # noqa: E402
 from render_opportunity_visual import render_document  # noqa: E402
 
 
@@ -169,6 +169,36 @@ def test_showcase_pack_contains_every_committed_artifact():
         if not path.is_file()
     ]
     assert missing == []
+
+
+def test_showcase_semantics_leave_only_deferred_terminal_status_unresolved():
+    semantics = load_json(FIXTURES / "stage-semantics.json")
+    assert semantics["non_terminal_stages"] == ["Discovery"]
+
+    report = analyze(
+        SHOWCASE_CSV,
+        "positive-progression",
+        FIXTURES / "stage-semantics.json",
+    )
+    assert report["unresolved_terminal_stages"] == [
+        {
+            "stage": "Deferred",
+            "code": "unknown_terminal_status",
+            "occurrences": 3,
+            "affects_output": True,
+        }
+    ]
+    assert report["unresolved_transitions"] == [
+        {
+            "from_stage": "Discovery",
+            "to_stage": "Deferred",
+            "code": "unknown_transition",
+            "occurrences": 1,
+            "affects_inclusion": True,
+            "terminal_status_resolved": False,
+            "affects_truncation": True,
+        }
+    ]
 
 
 def test_showcase_builder_is_byte_deterministic(tmp_path):

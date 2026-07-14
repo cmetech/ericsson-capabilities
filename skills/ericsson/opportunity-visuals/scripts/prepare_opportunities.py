@@ -199,6 +199,7 @@ def _group_transitions(
     view: str,
     classification: str,
     code: str,
+    semantics: dict[str, object],
 ) -> list[dict[str, object]]:
     grouped: dict[tuple[str, str], dict[str, object]] = {}
     for record in records:
@@ -213,6 +214,7 @@ def _group_transitions(
                 continue
             if previous_stage is not None and month["classification"] == classification:
                 key = (previous_stage, stage)
+                terminal_status_resolved = _terminal_status_resolved(stage, semantics)
                 entry = grouped.setdefault(
                     key,
                     {
@@ -221,10 +223,12 @@ def _group_transitions(
                         "code": code,
                         "occurrences": 0,
                         "affects_inclusion": False,
+                        "terminal_status_resolved": terminal_status_resolved,
+                        "affects_truncation": not terminal_status_resolved,
                     },
                 )
                 entry["occurrences"] = int(entry["occurrences"]) + 1
-                if (
+                if not terminal_status_resolved or (
                     classification == "unknown"
                     and view == "positive-progression"
                     and not has_positive
@@ -242,6 +246,52 @@ def _group_transitions(
                 pair[1],
             ),
         )
+    ]
+
+
+def _known_terminal_status_stages(semantics: dict[str, object]) -> set[str]:
+    known = {
+        str(stage).casefold()
+        for key in (
+            "positive_terminals",
+            "negative_terminals",
+            "non_terminal_stages",
+        )
+        for stage in semantics[key]
+    }
+    for path in semantics["stage_paths"]:
+        known.update(str(stage).casefold() for stage in path)
+    for transition in semantics["positive_transitions"]:
+        known.update(str(stage).casefold() for stage in transition)
+    return known
+
+
+def _terminal_status_resolved(stage: str, semantics: dict[str, object]) -> bool:
+    return stage.casefold() in _known_terminal_status_stages(semantics)
+
+
+def _group_unresolved_terminal_stages(
+    records: list[dict[str, object]], semantics: dict[str, object]
+) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for record in records:
+        for month in record["months"]:
+            stage = str(month["stage"])
+            if not stage.strip() or _terminal_status_resolved(stage, semantics):
+                continue
+            entry = grouped.setdefault(
+                stage,
+                {
+                    "stage": stage,
+                    "code": "unknown_terminal_status",
+                    "occurrences": 0,
+                    "affects_output": True,
+                },
+            )
+            entry["occurrences"] = int(entry["occurrences"]) + 1
+    return [
+        grouped[stage]
+        for stage in sorted(grouped, key=lambda value: (value.casefold(), value))
     ]
 
 
@@ -298,10 +348,15 @@ def analyze(
     ]
     filtered_records, filter_exclusions = apply_filters(records, filters)
     select_records(filtered_records, view)
-    unresolved = _group_transitions(
-        filtered_records, view, "unknown", "unknown_transition"
+    unresolved_terminals = _group_unresolved_terminal_stages(
+        filtered_records, semantics
     )
-    mixed = _group_transitions(filtered_records, view, "mixed", "mixed_signals")
+    unresolved = _group_transitions(
+        filtered_records, view, "unknown", "unknown_transition", semantics
+    )
+    mixed = _group_transitions(
+        filtered_records, view, "mixed", "mixed_signals", semantics
+    )
     warning_count = sum(len(record["warnings"]) for record in filtered_records)
 
     return {
@@ -324,6 +379,10 @@ def analyze(
             + len(invalid_exclusions)
             + len(filter_exclusions),
             "warnings": warning_count,
+            "unresolved_terminal_stage_groups": len(unresolved_terminals),
+            "unresolved_terminal_stage_occurrences": sum(
+                int(item["occurrences"]) for item in unresolved_terminals
+            ),
             "unresolved_transition_groups": len(unresolved),
             "unresolved_transition_occurrences": sum(
                 int(item["occurrences"]) for item in unresolved
@@ -333,6 +392,7 @@ def analyze(
                 int(item["occurrences"]) for item in mixed
             ),
         },
+        "unresolved_terminal_stages": unresolved_terminals,
         "unresolved_transitions": unresolved,
         "mixed_transitions": mixed,
     }

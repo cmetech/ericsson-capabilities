@@ -97,6 +97,9 @@ def test_opportunity_visuals_docs_match_the_live_port():
         "$RunRoot =",
         "Python 3.11+",
         "bootstrap.sh` does not enforce",
+        ".venv/bin/python --version",
+        "reuses an existing `.venv`",
+        "selected Python 3.11+ interpreter",
         "minimal stage labels and diagnostics",
     ):
         assert phrase in showcase
@@ -119,7 +122,14 @@ def test_opportunity_visuals_interview_documents_read_only_analysis():
     assert "prepare_opportunities.py analyze" in skill
     assert "prepare_opportunities.py analyze SOURCE --view VIEW" in contract
     assert "unresolved_transitions" in contract
+    assert "unresolved_terminal_stages" in contract
+    assert '"non_terminal_stages": ["Discovery"]' in contract
+    assert "terminal_status_resolved" in contract
+    assert "affects_truncation" in contract
+    assert "terminal metadata, and first-terminal cutoff" in contract
     assert "mixed_transitions" in contract
+    assert "add it to `non_terminal_stages`" in interview
+    assert "terminal status" in interview
     assert "rerun" in interview
     assert "before preparing artifacts" in interview
     assert "forward, backward, or neutral" in interview

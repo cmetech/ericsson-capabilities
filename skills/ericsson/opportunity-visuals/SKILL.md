@@ -41,8 +41,10 @@ Chromium. Missing PNG support does not block SVG/HTML.
    `scripts/prepare_opportunities.py analyze` with the proposed view, mapping,
    months, semantics, and filters. Analysis is read-only and creates no output
    artifacts.
-5. Ask about each inclusion-affecting unresolved transition one question at a
-   time. Update the confirmed semantics and rerun analyze until resolved.
+5. Ask about each output-affecting unresolved terminal status one question at
+   a time. Add confirmed non-terminals to `non_terminal_stages` and rerun
+   analyze. Then resolve any remaining inclusion-affecting direction one
+   question at a time, updating semantics and rerunning after each answer.
 6. Play back source, view, range, rules, filters, formats, and destination.
    Wait for the user to confirm before writing.
 7. Run `scripts/prepare_opportunities.py prepare` into a new timestamped output
@@ -64,13 +66,14 @@ Chromium. Missing PNG support does not block SVG/HTML.
 Use the exact CLI forms documented in `references/data-contract.md`. If
 inspection reports more than one sheet or ambiguous columns/months, ask one
 resolving question and rerun. Use analyze to find unknown transitions before
-preparing artifacts; confirm terminal status and direction separately, then
-rerun analysis. For confidential data, explain that file helpers remain local
-but minimal metadata and stage labels used for the interview may enter the
-model-backed chat. Do not ask the user to paste confidential rows unless their
-configured model and privacy policy permit it. Confirm the output directory,
-then play back the execution summary before writing. Never overwrite an
-existing run directory by default.
+preparing artifacts; confirm terminal status, rerun, confirm direction, then
+rerun again. Do not play back or prepare while analysis contains an
+output-impact unknown. For confidential data, explain that file helpers remain
+local but minimal metadata and stage labels used for the interview may enter
+the model-backed chat. Do not ask the user to paste confidential rows unless
+their configured model and privacy policy permit it. Confirm the output
+directory, then play back the execution summary before writing. Never overwrite
+an existing run directory by default.
 
 ## Pitfalls
 

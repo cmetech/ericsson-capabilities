@@ -136,7 +136,14 @@ Select Python 3.11+ before creating the repository venv. `bootstrap.sh` uses
 ```bash
 python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
 ./bootstrap.sh
+.venv/bin/python --version
 ```
+
+The bootstrap reuses an existing `.venv`. If that environment reports Python
+older than 3.11, stop. After preserving anything needed, manually remove or
+rename the stale venv, recreate it with a selected Python 3.11+ interpreter
+(for example, `/path/to/python3.11 -m venv .venv`), and rerun bootstrap. The
+coworker must not remove an environment automatically.
 
 Run preflight with the intended destination before preparing data:
 

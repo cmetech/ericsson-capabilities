@@ -22,6 +22,7 @@ from opportunity_data import (  # noqa: E402
     parse_month_header,
     resolve_mapping,
     select_records,
+    validate_semantics,
 )
 import prepare_opportunities  # noqa: E402
 from prepare_opportunities import analyze, prepare  # noqa: E402
@@ -404,6 +405,7 @@ def semantics():
     return {
         "positive_terminals": ["Won"],
         "negative_terminals": ["Lost", "Cancelled"],
+        "non_terminal_stages": ["Discovery"],
         "stage_paths": [
             ["Ideation", "Solution", "Proposal", "SDP2", "Won"],
             ["POC", "Workshop", "Commercials", "Won"],
@@ -1026,6 +1028,8 @@ def test_analyze_groups_safe_transitions_and_marks_positive_inclusion(
             "code": "unknown_transition",
             "occurrences": 1,
             "affects_inclusion": True,
+            "terminal_status_resolved": False,
+            "affects_truncation": True,
         }
     ]
     assert all_progression["unresolved_transitions"] == [
@@ -1034,7 +1038,9 @@ def test_analyze_groups_safe_transitions_and_marks_positive_inclusion(
             "to_stage": "Deferred",
             "code": "unknown_transition",
             "occurrences": 1,
-            "affects_inclusion": False,
+            "affects_inclusion": True,
+            "terminal_status_resolved": False,
+            "affects_truncation": True,
         }
     ]
     assert positive["mixed_transitions"] == [
@@ -1044,6 +1050,16 @@ def test_analyze_groups_safe_transitions_and_marks_positive_inclusion(
             "code": "mixed_signals",
             "occurrences": 1,
             "affects_inclusion": False,
+            "terminal_status_resolved": True,
+            "affects_truncation": False,
+        }
+    ]
+    assert positive["unresolved_terminal_stages"] == [
+        {
+            "stage": "Deferred",
+            "code": "unknown_terminal_status",
+            "occurrences": 3,
+            "affects_output": True,
         }
     ]
     assert positive["source"] == {
@@ -1060,6 +1076,8 @@ def test_analyze_groups_safe_transitions_and_marks_positive_inclusion(
         "filtered_rows": 11,
         "excluded_rows": 1,
         "warnings": 3,
+        "unresolved_terminal_stage_groups": 1,
+        "unresolved_terminal_stage_occurrences": 3,
         "unresolved_transition_groups": 1,
         "unresolved_transition_occurrences": 1,
         "mixed_transition_groups": 1,
@@ -1082,11 +1100,16 @@ def test_analyze_rerun_resolves_unknown_with_confirmed_direction(tmp_path, seman
     ]
 
     resolved = dict(semantics)
+    resolved["non_terminal_stages"] = [
+        *semantics["non_terminal_stages"],
+        "Deferred",
+    ]
     resolved["stage_paths"] = [*semantics["stage_paths"], ["Deferred", "Discovery"]]
     semantics_path.write_text(json.dumps(resolved), encoding="utf-8")
 
     report = analyze(source, "positive-progression", semantics_path)
     assert report["unresolved_transitions"] == []
+    assert report["unresolved_terminal_stages"] == []
     assert report["counts"]["unresolved_transition_occurrences"] == 0
 
 
@@ -1120,12 +1143,163 @@ def test_analyze_uses_previous_populated_stage_groups_and_filters(
             "code": "unknown_transition",
             "occurrences": 2,
             "affects_inclusion": True,
+            "terminal_status_resolved": False,
+            "affects_truncation": True,
         }
     ]
     assert filtered["unresolved_transitions"][0]["occurrences"] == 1
     assert filtered["counts"]["filtered_rows"] == 1
     assert filtered["filter_keys"] == ["areas"]
     assert "Hidden Name" not in json.dumps(filtered)
+
+
+def test_non_terminal_stages_are_casefolded_and_disjoint_from_terminals(semantics):
+    legacy = dict(semantics)
+    legacy.pop("non_terminal_stages")
+    assert validate_semantics(legacy)["non_terminal_stages"] == []
+
+    casefolded = dict(semantics)
+    casefolded["non_terminal_stages"] = ["deferred"]
+    validated = validate_semantics(casefolded)
+    assert validated["non_terminal_stages"] == ["deferred"]
+
+    overlapping = dict(semantics)
+    overlapping["positive_terminals"] = ["Won", "Deferred"]
+    overlapping["non_terminal_stages"] = ["deFERred"]
+    with pytest.raises(DataContractError) as error:
+        validate_semantics(overlapping)
+    assert error.value.code == "invalid_semantics"
+    assert str(error.value) == "Terminal and non-terminal stage lists overlap"
+
+    duplicated = dict(semantics)
+    duplicated["non_terminal_stages"] = ["Deferred", "deferred"]
+    with pytest.raises(DataContractError) as error:
+        validate_semantics(duplicated)
+    assert error.value.code == "invalid_semantics"
+
+    blank = dict(semantics)
+    blank["non_terminal_stages"] = ["   "]
+    with pytest.raises(DataContractError) as error:
+        validate_semantics(blank)
+    assert error.value.code == "invalid_semantics"
+
+
+@pytest.mark.parametrize(
+    "view", ["wins", "losses", "all-progression", "positive-progression"]
+)
+def test_analyze_requires_terminal_confirmation_for_unknown_positive_alias(
+    tmp_path, semantics, view
+):
+    source = tmp_path / "positive-alias.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26,May '26\n"
+        "OV-A,North,One,Secret Alias,Large,High,Proposal,Closed Won,Proposal\n",
+        encoding="utf-8",
+    )
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    before = source.read_bytes()
+
+    report = analyze(source, view, semantics_path)
+
+    assert report["unresolved_terminal_stages"] == [
+        {
+            "stage": "Closed Won",
+            "code": "unknown_terminal_status",
+            "occurrences": 1,
+            "affects_output": True,
+        }
+    ]
+    transition = next(
+        item
+        for item in report["unresolved_transitions"]
+        if item["from_stage"] == "Proposal" and item["to_stage"] == "Closed Won"
+    )
+    assert transition["terminal_status_resolved"] is False
+    assert transition["affects_inclusion"] is True
+    assert transition["affects_truncation"] is True
+    assert "Secret Alias" not in json.dumps(report)
+    assert "OV-A" not in json.dumps(report)
+    assert source.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "positive-alias.csv",
+        "semantics.json",
+    ]
+
+
+def test_confirmed_positive_alias_enables_wins_and_terminal_cutoff(
+    tmp_path, semantics
+):
+    source = tmp_path / "positive-alias.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26,May '26\n"
+        "OV-A,North,One,Secret Alias,Large,High,Proposal,Closed Won,Proposal\n",
+        encoding="utf-8",
+    )
+    confirmed = dict(semantics)
+    confirmed["positive_terminals"] = [*semantics["positive_terminals"], "closed won"]
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(confirmed), encoding="utf-8")
+
+    report = analyze(source, "wins", semantics_path)
+    assert report["unresolved_terminal_stages"] == []
+    output_dir = tmp_path / "wins"
+    prepare(source, "wins", semantics_path, output_dir)
+    normalized = json.loads((output_dir / "normalized-data.json").read_text())
+    assert [record["id"] for record in normalized["records"]] == ["OV-A"]
+    assert normalized["records"][0]["terminal"] == {
+        "kind": "positive",
+        "month": "2026-04",
+        "index": 1,
+    }
+    assert [month["stage"] for month in normalized["records"][0]["months"]] == [
+        "Proposal",
+        "Closed Won",
+    ]
+
+
+@pytest.mark.parametrize("view", ["all-progression", "positive-progression"])
+def test_unknown_negative_alias_flags_terminal_impact_then_truncates_when_confirmed(
+    tmp_path, semantics, view
+):
+    source = tmp_path / "negative-alias.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26,May '26\n"
+        "OV-N,North,One,Secret Loss,Large,High,Proposal,Closed Lost,Won\n",
+        encoding="utf-8",
+    )
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    unresolved = analyze(source, view, semantics_path)
+    transition = next(
+        item
+        for item in unresolved["unresolved_transitions"]
+        if item["to_stage"] == "Closed Lost"
+    )
+    assert transition["terminal_status_resolved"] is False
+    assert transition["affects_inclusion"] is True
+    assert transition["affects_truncation"] is True
+
+    confirmed = dict(semantics)
+    confirmed["negative_terminals"] = [
+        *semantics["negative_terminals"],
+        "closed lost",
+    ]
+    semantics_path.write_text(json.dumps(confirmed), encoding="utf-8")
+    assert analyze(source, view, semantics_path)["unresolved_terminal_stages"] == []
+    output_dir = tmp_path / view
+    prepare(source, view, semantics_path, output_dir)
+    normalized = json.loads((output_dir / "normalized-data.json").read_text())
+    if view == "all-progression":
+        assert [record["id"] for record in normalized["records"]] == ["OV-N"]
+        assert normalized["records"][0]["terminal"]["kind"] == "negative"
+        assert [month["stage"] for month in normalized["records"][0]["months"]] == [
+            "Proposal",
+            "Closed Lost",
+        ]
+    else:
+        assert normalized["records"] == []
 
 
 def test_analyze_cli_prints_one_json_object_without_artifacts(tmp_path, semantics):

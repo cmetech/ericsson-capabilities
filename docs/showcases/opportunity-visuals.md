@@ -23,7 +23,15 @@ that interpreter before the script creates `.venv`:
 ```bash
 python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
 ./bootstrap.sh
+.venv/bin/python --version
 ```
+
+`bootstrap.sh` reuses an existing `.venv`. If the final version command reports
+Python older than 3.11, stop rather than continuing with that environment.
+After preserving anything needed, manually remove or rename the stale venv,
+use a selected Python 3.11+ interpreter to recreate it (for example,
+`/path/to/python3.11 -m venv .venv`), then rerun `./bootstrap.sh`. The coworker
+must not remove an environment automatically.
 
 The main command blocks below are POSIX shell commands. Native Windows users
 should use the complete PowerShell path later in this guide. Use only the
@@ -81,8 +89,8 @@ opportunity/deal pipeline data with one of the supported progression outcomes.
 ### 1. Fully specified
 
 > **User:** Create a 1920×1080 wins view from `pipeline.csv`, using March
-> through June and our confirmed stage rules. Write SVG, HTML, and PNG to
-> `/tmp/q2-wins`.
+> through June and our confirmed stage rules. Write SVG and HTML, plus PNG if
+> available, to `/tmp/q2-wins`.
 >
 > **Coworker:** I’ll read `pipeline.csv`, select wins from March through June,
 > apply the confirmed stage rules, and write local 1920×1080 SVG, HTML, and
@@ -109,27 +117,27 @@ range, semantics, and destination into one question.
 
 ### 3. Unknown stage
 
-> **Coworker:** Read-only analysis found Discovery → Deferred and reports that
-> its unknown direction affects positive-progression inclusion. Should Deferred
-> be a negative terminal or a non-terminal stage?
+> **Coworker:** Read-only analysis found Deferred has unknown terminal status.
+> Confirming it can change inclusion, terminal metadata, and cutoff. Is Deferred
+> a positive terminal, negative terminal, or non-terminal stage?
 >
 > **User:** Non-terminal.
 >
-> **Coworker:** For progression, is Discovery → Deferred forward, backward, or
-> neutral?
+> **Coworker:** I added Deferred to `non_terminal_stages` and reran `analyze`.
+> Its terminal status is resolved, but its direction is still unknown. For
+> progression, is Discovery → Deferred forward, backward, or neutral?
 >
 > **User:** Backward.
 >
 > **Coworker:** I updated the confirmed stage path with Deferred before
-> Discovery and reran `analyze`; no unresolved transitions remain. I’ll create
+> Discovery and reran `analyze`; no output-impact unknowns remain. I’ll create
 > positive progression for March through June with Deferred non-terminal and
 > Discovery → Deferred backward, writing the confirmed formats to the approved
 > destination. Proceed?
 
-Terminal status and movement direction are separate questions on separate
-turns. The coworker never guesses an unknown stage order and does not prepare
-positive-progression artifacts while analysis still reports an
-inclusion-affecting unknown.
+Terminal status and movement direction are separate questions with an analysis
+rerun between them. The coworker never guesses an unknown stage order and does
+not prepare artifacts while analysis still reports an output-impact unknown.
 
 ### 4. Confidential destination
 
@@ -186,10 +194,11 @@ Then run the read-only semantics analysis for the proposed view. It has no
   --semantics tests/fixtures/opportunity_visuals/stage-semantics.json
 ```
 
-This test fixture intentionally reports Discovery → Deferred as unresolved so
-the regression pack can prove `unknown_transition` behavior. A real coworker
-interview must resolve an inclusion-affecting transition, update the confirmed
-semantics, rerun analyze, and receive confirmation before `prepare` writes.
+This test fixture intentionally reports Deferred terminal status and Discovery
+→ Deferred direction as unresolved so the regression pack can prove both
+analysis behaviors. A real coworker interview must confirm terminal status,
+rerun, resolve any output-impact direction, rerun again, and receive
+confirmation before `prepare` writes.
 The commands below reproduce the committed regression oracle as-is; they are
 not an example of bypassing that interview rule for real data.
 
@@ -330,7 +339,8 @@ foreach ($View in $Views) {
 
 For a single view, set `$Views = @("wins")`. The analysis command intentionally
 has no output directory. As in the POSIX regression commands, resolve any
-inclusion-affecting unknown before using the preparation loop with real data.
+output-impact terminal status or direction before using the preparation loop
+with real data.
 
 ## Real-Playwright PNG demonstration
 

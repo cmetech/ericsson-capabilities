@@ -3,6 +3,9 @@
     "Lost",
     "Cancelled"
   ],
+  "non_terminal_stages": [
+    "Discovery"
+  ],
   "positive_terminals": [
     "Won"
   ],

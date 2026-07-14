@@ -46,16 +46,27 @@ to a new output directory and never overwrites an existing run by default.
 Run `analyze` after initial inspection and proposed semantics, and before
 playback or preparation. It returns one structured JSON object containing safe
 source metadata, the selected mapping/months, filter key names, counts,
-`unresolved_transitions`, and `mixed_transitions`. It never creates an output
-directory or artifact and never exposes opportunity names, IDs, or raw rows.
+`unresolved_terminal_stages`, `unresolved_transitions`, and
+`mixed_transitions`. It never creates an output directory or artifact and
+never exposes opportunity names, IDs, or raw rows.
+
+Each grouped `unresolved_terminal_stages` item contains the exact display
+`stage`, stable code `unknown_terminal_status`, `occurrences`, and
+`affects_output: true`. Terminal confirmation can change view inclusion,
+terminal metadata, and first-terminal cutoff. Resolve one stage at a time:
+add an alias to `positive_terminals` or `negative_terminals`, or add a
+confirmed non-terminal to `non_terminal_stages`, then rerun analyze.
 
 Each grouped transition contains the exact display `from_stage` and
-`to_stage`, stable `code`, `occurrences`, and `affects_inclusion`. Blank months
-remain blank; the transition uses the previous populated stage. For
-`positive-progression`, an unknown transition affects inclusion only when its
-filtered record has no other `positive` or `won` transition. Unknowns do not
-affect selection for the other views. Ask one semantics question at a time,
-update the semantics JSON, and rerun analyze before preparing artifacts.
+`to_stage`, stable `code`, `occurrences`, `terminal_status_resolved`,
+`affects_inclusion`, and `affects_truncation`. Blank months remain blank; the
+transition uses the previous populated stage. An unresolved destination
+terminal status conservatively sets both impact fields true in every view.
+After terminal status is resolved as non-terminal, an unknown direction
+affects `positive-progression` inclusion only when its filtered record has no
+other `positive` or `won` transition; it does not affect selection for other
+views. Ask one semantics question at a time, update the semantics JSON, and
+rerun analyze before preparing artifacts.
 
 Only the local helpers are guaranteed not to call a model or network service.
 Do not paste confidential rows into chat unless the configured model and the
@@ -109,6 +120,7 @@ The required semantics document has this exact shape:
 {
   "positive_terminals": ["Won"],
   "negative_terminals": ["Lost", "Cancelled"],
+  "non_terminal_stages": ["Discovery"],
   "stage_paths": [["Ideation", "Solution", "Proposal", "SDP2", "Won"]],
   "positive_transitions": [["Proposal", "Workshop"]],
   "tcv_order": ["X-Small", "Small", "Medium", "Large", "X-Large"],
@@ -126,6 +138,13 @@ probability movement when available. Opposing directional signals are
 `mixed`; unchanged signals are `neutral`; an unrecognized transition without
 a usable probability signal is `unknown` and produces a warning. Never infer
 forward or backward movement from an unknown stage order.
+
+`non_terminal_stages` is optional and defaults to `[]`. Its values must be
+unique, nonblank strings and must not overlap positive or negative terminals
+case-insensitively. Stages named in confirmed stage paths or positive
+transitions also have confirmed non-terminal status unless a terminal list
+names them; terminal lists take precedence. Listing a stage as known does not
+change its display label or invent a direction.
 
 Every `mixed` transition emits a `mixed_signals` warning.
 Every `unknown` transition emits an `unknown_transition` warning.

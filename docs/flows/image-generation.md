@@ -69,9 +69,10 @@ records why the intent port deliberately differs from the Langflow graph.
 ## How Hermes should explain and configure it
 
 Inspect the request and source metadata, ask only for missing decisions one at
-a time, run read-only semantics analysis, resolve inclusion-affecting unknowns,
-and rerun analysis. Then play back the source, view, range, semantics, filters,
-formats, dimensions, and destination before writing. Explain the distinction
+a time, run read-only semantics analysis, resolve unknown terminal status,
+rerun, resolve any remaining output-impact direction, and rerun again. Then
+play back the source, view, range, semantics, filters, formats, dimensions, and
+destination before writing. Explain the distinction
 between local helpers and model-backed chat. Validate with synthetic data;
 review labels, clipping, colors, blank months, terminal cutoffs, warnings,
 hashes, and any PNG fallback against `render-manifest.json`.

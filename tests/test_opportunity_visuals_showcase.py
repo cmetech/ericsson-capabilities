@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import zipfile
@@ -74,6 +75,17 @@ EXPECTED_WARNINGS = [
     {"id": "OV-007", "code": "mixed_signals"},
     {"id": "OV-011", "code": "unknown_transition"},
 ]
+APPROVED_SVG_PALETTE = {
+    "#000000",
+    "#1174E6",
+    "#23969A",
+    "#A6A6A6",
+    "#D8D8D8",
+    "#E65D6A",
+    "#F2F2F2",
+    "#FFFFFF",
+}
+SVG_HEX_COLOR = re.compile(r"#[0-9a-f]{6}(?![0-9a-f])", re.IGNORECASE)
 
 
 def load_json(path: Path) -> dict[str, object]:
@@ -102,6 +114,27 @@ def project_view(output_dir: Path) -> dict[str, object]:
 def canonical_svg(path: Path) -> str:
     root = ElementTree.parse(path).getroot()
     return ElementTree.tostring(root, encoding="unicode")
+
+
+def svg_hex_colors(root: ElementTree.Element) -> set[str]:
+    values = [value for element in root.iter() for value in element.attrib.values()]
+    values.extend(
+        element.text or ""
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1].casefold() == "style"
+    )
+    return {
+        match.group(0).upper()
+        for value in values
+        for match in SVG_HEX_COLOR.finditer(value)
+    }
+
+
+def assert_approved_svg_palette(root: ElementTree.Element) -> set[str]:
+    colors = svg_hex_colors(root)
+    unapproved = colors - APPROVED_SVG_PALETTE
+    assert not unapproved, f"unapproved SVG colors: {sorted(unapproved)}"
+    return colors
 
 
 def prepare_source(source: Path, output_dir: Path) -> dict[str, object]:
@@ -299,37 +332,26 @@ def test_showcase_xlsx_is_one_visible_plain_value_sheet():
 
 
 def test_golden_svgs_follow_the_reviewed_local_visual_contract():
-    allowed_palette = {
-        "#000000",
-        "#1174E6",
-        "#23969A",
-        "#A6A6A6",
-        "#D8D8D8",
-        "#E65D6A",
-        "#F2F2F2",
-        "#FFFFFF",
-    }
     forbidden_elements = {"a", "foreignObject", "iframe", "image", "script", "use"}
     for name in REQUIRED_GOLDENS:
         path = GOLDEN / name
         text = path.read_text(encoding="utf-8")
         root = ElementTree.parse(path).getroot()
-        fills = {
-            value
-            for element in root.iter()
-            for attribute, value in element.attrib.items()
-            if attribute == "fill"
-        }
-        style_colors = {
-            color
-            for style in root.iter("{http://www.w3.org/2000/svg}style")
-            for color in allowed_palette
-            if color in (style.text or "")
-        }
+        colors = assert_approved_svg_palette(root)
         assert root.attrib["width"] == "1920"
         assert root.attrib["height"] == "1080"
         assert root.attrib["viewBox"] == "0 0 1920 1080"
-        assert fills | style_colors <= allowed_palette
+        assert {
+            "#000000",
+            "#1174E6",
+            "#A6A6A6",
+            "#D8D8D8",
+            "#E65D6A",
+            "#F2F2F2",
+            "#FFFFFF",
+        } <= colors
+        if name != "losses-p01.svg":
+            assert "#23969A" in colors
         assert text.casefold().count("http://") == 1
         assert "https://" not in text.casefold()
         assert all(
@@ -347,3 +369,15 @@ def test_golden_svgs_follow_the_reviewed_local_visual_contract():
         in all_progression
     )
     assert 'data-full-value="Harbor Observability &lt;Pilot&gt; =1+1"' in all_progression
+
+
+def test_svg_palette_validation_detects_css_and_stroke_colors():
+    root = ElementTree.fromstring(
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        "<style>.unapproved{fill:#123456}</style>"
+        '<line stroke="#123456" />'
+        "</svg>"
+    )
+
+    with pytest.raises(AssertionError, match="#123456"):
+        assert_approved_svg_palette(root)

@@ -674,6 +674,9 @@ def test_prepare_cli_writes_stable_artifacts_and_refuses_nonempty_output(
     }
     assert normalized["schema_version"] == 1
     assert [record["id"] for record in normalized["records"]] == ["OV-001"]
+    assert json.loads((output_dir / "exclusions.json").read_text()) == {
+        "exclusions": normalized["exclusions"]
+    }
     for artifact in output_dir.iterdir():
         text = artifact.read_text(encoding="utf-8")
         assert text.endswith("\n")
@@ -744,3 +747,112 @@ def test_semantics_reject_conflicting_case_insensitive_configuration(semantics):
     with pytest.raises(DataContractError) as error:
         classify_transition({"stage": "Ideation"}, {"stage": "Solution"}, conflicting)
     assert error.value.code == "conflicting_stage_order"
+
+
+def test_semantics_reject_transitive_case_insensitive_cycle(semantics):
+    conflicting = dict(semantics)
+    conflicting["stage_paths"] = [["A", "B"], ["b", "C"], ["c", "a"]]
+
+    with pytest.raises(DataContractError) as error:
+        classify_transition({"stage": "A"}, {"stage": "B"}, conflicting)
+    assert error.value.code == "conflicting_stage_order"
+    assert str(error.value) == "Stage paths assign contradictory ranks"
+
+
+def test_prepare_retains_warning_for_record_excluded_by_view(tmp_path, semantics):
+    source = tmp_path / "pipeline.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26\n"
+        "OV-U,Area,Sub,Unknown Path,Large,High,Discovery,Deferred\n",
+        encoding="utf-8",
+    )
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    output_dir = tmp_path / "prepared"
+
+    prepare(
+        source,
+        "positive-progression",
+        semantics_path,
+        output_dir,
+    )
+
+    normalized = json.loads((output_dir / "normalized-data.json").read_text())
+    assert normalized["records"] == []
+    assert normalized["warnings"] == [
+        {
+            "id": "OV-U",
+            "source_row": 2,
+            "code": "unknown_transition",
+            "message": "Transition stage order is unknown",
+            "month": "2026-04",
+        }
+    ]
+    assert normalized["counts"]["warnings"] == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "contents", "code", "message"),
+    [
+        ("malformed.json", b'{"rows": [', "invalid_json", "Source JSON is malformed"),
+        (
+            "invalid.csv",
+            b"Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26\n\xff",
+            "invalid_encoding",
+            "Source text is not valid UTF-8",
+        ),
+        (
+            "corrupt.xlsx",
+            b"not an xlsx archive",
+            "invalid_xlsx",
+            "Source XLSX is invalid or corrupt",
+        ),
+    ],
+)
+def test_inspect_cli_returns_safe_structured_source_errors(
+    tmp_path, name, contents, code, message
+):
+    source = tmp_path / name
+    source.write_bytes(contents)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "prepare_opportunities.py"), "inspect", str(source)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message,
+            "details": {"source": name},
+        },
+    }
+
+
+def test_inspect_cli_returns_safe_structured_error_for_missing_source(tmp_path):
+    source = tmp_path / "missing.json"
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "prepare_opportunities.py"), "inspect", str(source)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "error": {
+            "code": "source_not_found",
+            "message": "Source file not found",
+            "details": {"source": "missing.json"},
+        },
+    }

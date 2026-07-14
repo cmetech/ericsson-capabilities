@@ -195,20 +195,20 @@ def prepare(
         for item in invalid_exclusions
         if (item["id"], item["source_row"]) not in range_excluded_rows
     ]
-    filtered_records, filter_exclusions = apply_filters(records, filters)
-    selected_records, view_exclusions = select_records(filtered_records, view)
-    exclusions = (
-        range_exclusions + invalid_exclusions + filter_exclusions + view_exclusions
-    )
     warnings = [
         {
             "id": record["id"],
             "source_row": record["source_row"],
             **warning,
         }
-        for record in selected_records
+        for record in records
         for warning in record["warnings"]
     ]
+    filtered_records, filter_exclusions = apply_filters(records, filters)
+    selected_records, view_exclusions = select_records(filtered_records, view)
+    exclusions = (
+        range_exclusions + invalid_exclusions + filter_exclusions + view_exclusions
+    )
     counts = {
         "source_rows": len(rows),
         "normalized_rows": len(records),
@@ -245,7 +245,7 @@ def prepare(
     output_dir.mkdir(parents=True, exist_ok=True)
     _atomic_json(output_dir / "source-summary.json", source_summary)
     _atomic_json(output_dir / "normalized-data.json", normalized_data)
-    _atomic_json(output_dir / "exclusions.json", exclusions)
+    _atomic_json(output_dir / "exclusions.json", {"exclusions": exclusions})
     return {
         "output_dir": str(output_dir),
         "artifacts": [

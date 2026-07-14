@@ -123,7 +123,7 @@ def _validate_table(
             )
 
 
-def load_source(
+def _load_source(
     path: Path,
     sheet: str | None = None,
     json_key: str | None = None,
@@ -254,6 +254,45 @@ def load_source(
             formulas.close()
 
     raise DataContractError("unsupported_format", f"Unsupported source format: {suffix}")
+
+
+def load_source(
+    path: Path,
+    sheet: str | None = None,
+    json_key: str | None = None,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Load a source and translate parser/I/O failures into safe contract errors."""
+
+    path = Path(path)
+    details = {"source": path.name}
+    if not path.exists():
+        raise DataContractError(
+            "source_not_found", "Source file not found", details
+        )
+    try:
+        return _load_source(path, sheet, json_key)
+    except DataContractError:
+        raise
+    except UnicodeDecodeError:
+        raise DataContractError(
+            "invalid_encoding", "Source text is not valid UTF-8", details
+        ) from None
+    except json.JSONDecodeError:
+        raise DataContractError(
+            "invalid_json", "Source JSON is malformed", details
+        ) from None
+    except PermissionError:
+        raise DataContractError(
+            "source_unreadable", "Source file is not readable", details
+        ) from None
+    except Exception:
+        if path.suffix.casefold() == ".xlsx":
+            raise DataContractError(
+                "invalid_xlsx", "Source XLSX is invalid or corrupt", details
+            ) from None
+        raise DataContractError(
+            "source_unreadable", "Source file could not be read", details
+        ) from None
 
 
 def parse_month_header(header: str) -> tuple[str, str] | None:
@@ -514,24 +553,36 @@ def validate_semantics(semantics: dict[str, object] | None) -> dict[str, object]
     paths = result["stage_paths"]
     if not isinstance(paths, list):
         raise DataContractError("invalid_semantics", "stage_paths must be a list")
-    pair_directions: dict[tuple[str, str], int] = {}
+    stage_graph: dict[str, set[str]] = {}
     for path in paths:
         if not isinstance(path, list) or not path:
             raise DataContractError(
                 "invalid_semantics", "Every stage path must be a non-empty list"
             )
         folded_path = _casefolded_strings(path, "stage_paths entry")
-        for left_index, left in enumerate(folded_path):
-            for right in folded_path[left_index + 1 :]:
-                pair = tuple(sorted((left, right)))
-                direction = 1 if pair == (left, right) else -1
-                existing = pair_directions.get(pair)
-                if existing is not None and existing != direction:
-                    raise DataContractError(
-                        "conflicting_stage_order",
-                        "Stage paths assign contradictory ranks",
-                    )
-                pair_directions[pair] = direction
+        for previous, current in zip(folded_path, folded_path[1:]):
+            stage_graph.setdefault(previous, set()).add(current)
+            stage_graph.setdefault(current, set())
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(stage: str) -> bool:
+        if stage in visiting:
+            return True
+        if stage in visited:
+            return False
+        visiting.add(stage)
+        if any(visit(next_stage) for next_stage in stage_graph.get(stage, set())):
+            return True
+        visiting.remove(stage)
+        visited.add(stage)
+        return False
+
+    if any(visit(stage) for stage in stage_graph if stage not in visited):
+        raise DataContractError(
+            "conflicting_stage_order", "Stage paths assign contradictory ranks"
+        )
 
     transitions = result["positive_transitions"]
     if not isinstance(transitions, list):

@@ -133,7 +133,16 @@ def test_opportunity_visuals_interview_documents_read_only_analysis():
         "terminal-before-range exclusion is evaluated before filters"
         in normalized_contract
     )
-    assert "uncached formula" in contract
+    assert "uncached stage formula" in normalized_contract
+    assert (
+        "stops immediately after each row's first confirmed terminal"
+        in normalized_contract
+    )
+    assert "formulas after that cutoff are ignored" in normalized_contract
+    assert (
+        "selected formulas on that range-excluded row are also ignored"
+        in normalized_contract
+    )
     assert "mixed_transitions" in contract
     assert "add it to `non_terminal_stages`" in interview
     assert "terminal status" in interview

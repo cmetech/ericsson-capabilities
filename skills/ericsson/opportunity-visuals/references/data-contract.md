@@ -63,9 +63,12 @@ groups remain scoped to the selected range. Because terminal-before-range
 exclusion is evaluated before filters, analysis may conservatively report an
 unknown pre-range stage from a row that a later filter would exclude; confirming
 it can still change the exclusion audit. Blank and known stages are ignored.
-Every pre-range stage cell used by analysis has the same formula safety as a
-selected stage cell: an uncached formula returns `formula_cache_missing`, and
-formulas are never executed.
+The scan stops immediately after each row's first confirmed terminal and never
+groups or discloses a later stage. An uncached stage formula before that cutoff
+returns `formula_cache_missing`; formulas after that cutoff are ignored.
+Because the confirmed terminal excludes the row before normalization, selected
+formulas on that range-excluded row are also ignored. Selected formulas on
+other rows keep the existing safety rules. Formulas are never executed.
 
 Each grouped transition contains the exact display `from_stage` and
 `to_stage`, stable `code`, `occurrences`, `terminal_status_resolved`,

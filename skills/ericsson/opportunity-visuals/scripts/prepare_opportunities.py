@@ -178,23 +178,59 @@ def _selected_formula_errors(
     metadata: dict[str, object],
     mapping: dict[str, object],
     selected_mapping: dict[str, object],
-    pre_range_months: list[dict[str, object]] | None = None,
+    excluded_source_rows: set[int] | None = None,
 ) -> list[dict[str, object]]:
-    selected_headers = {
+    fixed_headers = {
         str(mapping[field])
         for field in ("area", "sub_area", "opportunity_name", "tcv", "probability")
     }
+    selected_headers: set[str] = set()
     for month in selected_mapping["months"]:
         selected_headers.add(str(month["stage"]))
         if "probability" in month:
             selected_headers.add(str(month["probability"]))
-    for month in pre_range_months or []:
-        selected_headers.add(str(month["stage"]))
+    excluded_source_rows = excluded_source_rows or set()
     return [
         item
         for item in metadata.get("uncached_formulas", [])
-        if item["header"] in selected_headers
+        if item["header"] in fixed_headers
+        or (
+            item["header"] in selected_headers
+            and int(item["row"]) not in excluded_source_rows
+        )
     ]
+
+
+def _scan_pre_range_stages(
+    rows: list[dict[str, object]],
+    pre_range_months: list[dict[str, object]],
+    semantics: dict[str, object],
+    metadata: dict[str, object],
+) -> tuple[list[str], set[int], list[dict[str, object]]]:
+    positive = {str(stage).casefold() for stage in semantics["positive_terminals"]}
+    negative = {str(stage).casefold() for stage in semantics["negative_terminals"]}
+    formula_cells = {
+        (int(item["row"]), str(item["header"])): item
+        for item in metadata.get("uncached_formulas", [])
+    }
+    observed_stages: list[str] = []
+    terminal_source_rows: set[int] = set()
+    formula_errors: list[dict[str, object]] = []
+    for source_row, row in enumerate(rows, start=2):
+        for month in pre_range_months:
+            header = str(month["stage"])
+            formula_error = formula_cells.get((source_row, header))
+            if formula_error is not None:
+                formula_errors.append(formula_error)
+                break
+            stage = str(row.get(header, ""))
+            if not stage.strip():
+                continue
+            observed_stages.append(stage)
+            if stage.casefold() in positive | negative:
+                terminal_source_rows.add(source_row)
+                break
+    return observed_stages, terminal_source_rows, formula_errors
 
 
 def _group_transitions(
@@ -329,9 +365,15 @@ def analyze(
         mapping, months
     )
     pre_range_months = list(mapping["months"])[:first_selected_index]
-    intersecting_formulas = _selected_formula_errors(
-        metadata, mapping, selected_mapping, pre_range_months
+    pre_range_stages, pre_range_terminal_rows, pre_range_formula_errors = (
+        _scan_pre_range_stages(rows, pre_range_months, semantics, metadata)
     )
+    intersecting_formulas = [
+        *pre_range_formula_errors,
+        *_selected_formula_errors(
+            metadata, mapping, selected_mapping, pre_range_terminal_rows
+        ),
+    ]
     if intersecting_formulas:
         raise DataContractError(
             "formula_cache_missing",
@@ -358,11 +400,6 @@ def analyze(
     ]
     filtered_records, filter_exclusions = apply_filters(records, filters)
     select_records(filtered_records, view)
-    pre_range_stages = [
-        str(row.get(str(month["stage"]), ""))
-        for row in rows
-        for month in pre_range_months
-    ]
     unresolved_terminals = _group_unresolved_terminal_stages(
         filtered_records, semantics, pre_range_stages
     )
@@ -443,10 +480,15 @@ def prepare(
         mapping, months
     )
     pre_range_months = list(mapping["months"])[:first_selected_index]
-
-    intersecting_formulas = _selected_formula_errors(
-        metadata, mapping, selected_mapping, pre_range_months
+    _, pre_range_terminal_rows, pre_range_formula_errors = _scan_pre_range_stages(
+        rows, pre_range_months, semantics, metadata
     )
+    intersecting_formulas = [
+        *pre_range_formula_errors,
+        *_selected_formula_errors(
+            metadata, mapping, selected_mapping, pre_range_terminal_rows
+        ),
+    ]
     if intersecting_formulas:
         raise DataContractError(
             "formula_cache_missing",

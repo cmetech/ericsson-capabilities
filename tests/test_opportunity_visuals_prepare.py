@@ -1460,15 +1460,28 @@ def test_analyze_reports_pre_range_terminal_alias_before_stable_exclusion(
     )["code"] == "terminal_before_range"
 
 
-def test_analyze_rejects_uncached_formula_in_pre_range_stage(tmp_path, semantics):
+def test_analyze_rejects_uncached_formula_before_pre_range_terminal(
+    tmp_path, semantics
+):
     source = tmp_path / "pre-range-formula.xlsx"
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Pipeline"
-    sheet.append(HEADERS)
-    row = ROW.copy()
-    row[5] = '=IF(1=1,"Closed Lost","")'
-    sheet.append(row)
+    headers = [*HEADERS, "Jun '26"]
+    sheet.append(headers)
+    sheet.append(
+        [
+            "North",
+            "Cloud",
+            "Project Cedar",
+            "Large",
+            "High",
+            '=IF(1=1,"Closed Lost","")',
+            "Lost",
+            "Proposal",
+            "Won",
+        ]
+    )
     workbook.save(source)
     workbook.close()
     semantics_path = tmp_path / "semantics.json"
@@ -1480,8 +1493,175 @@ def test_analyze_rejects_uncached_formula_in_pre_range_stage(tmp_path, semantics
             "wins",
             semantics_path,
             sheet="Pipeline",
-            months=["Apr '26", "May '26"],
+            months=["May '26", "Jun '26"],
         )
 
     assert error.value.code == "formula_cache_missing"
     assert error.value.details == {"cells": [{"row": 2, "header": "Mar '26"}]}
+
+
+@pytest.mark.parametrize(("terminal", "later_terminal"), [("Lost", "Won"), ("Won", "Lost")])
+@pytest.mark.parametrize(
+    "view", ["wins", "losses", "all-progression", "positive-progression"]
+)
+def test_analyze_stops_pre_range_scan_at_first_confirmed_terminal(
+    tmp_path, semantics, terminal, later_terminal, view
+):
+    source = tmp_path / "first-terminal.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26,May '26,Jun '26\n"
+        f"OV-T,North,One,Private Terminal,Large,High,{terminal},Deferred,Proposal,{later_terminal}\n",
+        encoding="utf-8",
+    )
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    before_bytes = source.read_bytes()
+    before_names = sorted(path.name for path in tmp_path.iterdir())
+
+    report = analyze(
+        source,
+        view,
+        semantics_path,
+        months=["May '26", "Jun '26"],
+    )
+
+    assert report["unresolved_terminal_stages"] == []
+    assert report["unresolved_transitions"] == []
+    serialized = json.dumps(report)
+    assert "Deferred" not in serialized
+    assert "Private Terminal" not in serialized
+    assert "OV-T" not in serialized
+    assert source.read_bytes() == before_bytes
+    assert sorted(path.name for path in tmp_path.iterdir()) == before_names
+
+    output_dir = tmp_path / view
+    prepare(
+        source,
+        view,
+        semantics_path,
+        output_dir,
+        months=["May '26", "Jun '26"],
+    )
+    normalized = json.loads((output_dir / "normalized-data.json").read_text())
+    assert normalized["records"] == []
+    assert normalized["exclusions"] == [
+        {
+            "id": "OV-T",
+            "source_row": 2,
+            "code": "terminal_before_range",
+            "message": "Row reached a terminal before the selected range",
+        }
+    ]
+
+
+def test_analyze_keeps_unresolved_pre_range_stage_before_terminal(tmp_path, semantics):
+    source = tmp_path / "unknown-before-terminal.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26,May '26,Jun '26\n"
+        "OV-U,North,One,Private Unknown,Large,High,Deferred,Lost,Proposal,Won\n",
+        encoding="utf-8",
+    )
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    report = analyze(
+        source,
+        "wins",
+        semantics_path,
+        months=["May '26", "Jun '26"],
+    )
+
+    assert report["unresolved_terminal_stages"] == [
+        {
+            "stage": "Deferred",
+            "code": "unknown_terminal_status",
+            "occurrences": 1,
+            "affects_output": True,
+        }
+    ]
+    assert report["unresolved_transitions"] == []
+
+
+def test_analyze_ignores_uncached_pre_range_formula_after_terminal(tmp_path, semantics):
+    source = tmp_path / "formula-after-terminal.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append([*HEADERS, "Jun '26"])
+    sheet.append(
+        [
+            "North",
+            "Cloud",
+            "Private Formula",
+            "Large",
+            "High",
+            "Lost",
+            '=IF(1=1,"Deferred","")',
+            "Proposal",
+            "Won",
+        ]
+    )
+    workbook.save(source)
+    workbook.close()
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    report = analyze(
+        source,
+        "wins",
+        semantics_path,
+        sheet="Pipeline",
+        months=["May '26", "Jun '26"],
+    )
+
+    assert report["unresolved_terminal_stages"] == []
+    assert "Deferred" not in json.dumps(report)
+
+
+def test_selected_formula_after_pre_range_terminal_does_not_block(
+    tmp_path, semantics
+):
+    source = tmp_path / "selected-formula-after-terminal.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append([*HEADERS, "Jun '26"])
+    sheet.append(
+        [
+            "North",
+            "Cloud",
+            "Private Selected Formula",
+            "Large",
+            "High",
+            "Lost",
+            "Deferred",
+            '=IF(1=1,"Proposal","")',
+            "Won",
+        ]
+    )
+    workbook.save(source)
+    workbook.close()
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    report = analyze(
+        source,
+        "wins",
+        semantics_path,
+        sheet="Pipeline",
+        months=["May '26", "Jun '26"],
+    )
+    assert report["unresolved_terminal_stages"] == []
+
+    output_dir = tmp_path / "wins"
+    prepare(
+        source,
+        "wins",
+        semantics_path,
+        output_dir,
+        sheet="Pipeline",
+        months=["May '26", "Jun '26"],
+    )
+    normalized = json.loads((output_dir / "normalized-data.json").read_text())
+    assert normalized["records"] == []
+    assert normalized["exclusions"][0]["code"] == "terminal_before_range"

@@ -20,10 +20,20 @@ python3 scripts/render_opportunity_visual.py normalized-data.json \
   [--png auto|never|required]
 ```
 
-`VIEW` is one of `wins`, `losses`, `all-stage progression`, or `positive
-progression`. Inspection reports candidate sheets, JSON arrays, mappings,
-months, and ambiguities without creating render artifacts. Preparation writes
-to a new output directory and never overwrites an existing run by default.
+Canonical `VIEW` argument values and normalized `view` identifiers are exactly `wins`, `losses`, `all-progression`, and `positive-progression`.
+Valid CLI forms are:
+
+- `--view wins`
+- `--view losses`
+- `--view all-progression`
+- `--view positive-progression`
+
+The normalized `view` key stores the bare identifier without the `--view` option name.
+Human-facing “all-stage progression” maps to `all-progression`, and human-facing
+“positive progression” maps to `positive-progression`. Inspection reports
+candidate sheets, JSON arrays, mappings, months, and ambiguities without
+creating render artifacts. Preparation writes to a new output directory and
+never overwrites an existing run by default.
 
 ## Accepted sources
 
@@ -90,6 +100,11 @@ probability movement when available. Opposing directional signals are
 a usable probability signal is `unknown` and produces a warning. Never infer
 forward or backward movement from an unknown stage order.
 
+Every `mixed` transition emits a `mixed_signals` warning.
+Every `unknown` transition emits an `unknown_transition` warning.
+Both warnings are retained in `normalized-data.json`
+and carried into `render-manifest.json`; neither classification may be silently omitted.
+
 ## Normalized output
 
 `normalized-data.json` contains these top-level keys:
@@ -123,14 +138,14 @@ The stable exclusion codes are:
 
 ## View behavior
 
-- **Wins:** include rows reaching a positive terminal in range and truncate at
-  the first positive terminal.
-- **Losses:** include rows reaching a negative terminal in range and truncate
-  at the first negative terminal.
-- **All-stage progression:** include rows with at least two populated stages
-  and truncate at the first terminal of either kind.
-- **Positive progression:** include rows with at least one `positive`
-  transition and truncate at the first terminal of either kind.
+- **Wins (`wins`):** include rows reaching a positive terminal in range and
+  truncate at the first positive terminal.
+- **Losses (`losses`):** include rows reaching a negative terminal in range and
+  truncate at the first negative terminal.
+- **All-stage progression (`all-progression`):** include rows with at least two
+  populated stages and truncate at the first terminal of either kind.
+- **Positive progression (`positive-progression`):** include rows with at least
+  one `positive` transition and truncate at the first terminal of either kind.
 
 Empty months remain empty. Transitions compare consecutive populated stages
 without carrying values across gaps. Group by Area then Sub-area. Within each

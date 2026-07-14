@@ -48,3 +48,30 @@ def test_opportunity_visuals_references_and_requirements_exist():
     requirements = (SKILL_DIR / "requirements.txt").read_text().splitlines()
     assert "openpyxl>=3.1.5" in requirements
     assert "playwright>=1.52" in requirements
+
+
+def test_data_contract_uses_canonical_view_identifiers():
+    text = (SKILL_DIR / "references/data-contract.md").read_text()
+    assert (
+        "Canonical `VIEW` argument values and normalized `view` identifiers are "
+        "exactly `wins`, `losses`, `all-progression`, and `positive-progression`."
+        in text
+    )
+    for view in ("wins", "losses", "all-progression", "positive-progression"):
+        assert f"--view {view}" in text
+    assert "--view all-stage progression" not in text
+    assert "--view positive progression" not in text
+    assert (
+        "The normalized `view` key stores the bare identifier without the "
+        "`--view` option name." in text
+    )
+    assert "all-stage progression” maps to `all-progression`" in text
+    assert "positive progression” maps to `positive-progression`" in text
+
+
+def test_data_contract_requires_transition_warnings_in_both_manifests():
+    text = (SKILL_DIR / "references/data-contract.md").read_text()
+    assert "Every `mixed` transition emits a `mixed_signals` warning." in text
+    assert "Every `unknown` transition emits an `unknown_transition` warning." in text
+    assert "Both warnings are retained in `normalized-data.json`" in text
+    assert "and carried into `render-manifest.json`" in text

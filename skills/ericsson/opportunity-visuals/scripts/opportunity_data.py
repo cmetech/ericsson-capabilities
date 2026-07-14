@@ -5,7 +5,9 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import re
+from numbers import Real
 from pathlib import Path
 
 
@@ -53,6 +55,29 @@ MONTHS = {
 _FIXED_FIELDS = tuple(FIELD_ALIASES)
 _MONTH_WORD_PATTERN = re.compile(r"^([a-z]+)\s*'?\s*(\d{2}|\d{4})$", re.IGNORECASE)
 _ISO_MONTH_PATTERN = re.compile(r"^(\d{4})-(\d{2})$")
+_NUMERIC_VALUE_PATTERN = re.compile(
+    r"^(?:[$€£¥])?([+-]?)(\d+(?:\.\d+)?|\.\d+)([kmb])?(%)?$",
+    re.IGNORECASE,
+)
+
+DEFAULT_SEMANTICS = {
+    "positive_terminals": ["Won"],
+    "negative_terminals": ["Lost", "Cancelled"],
+    "stage_paths": [],
+    "positive_transitions": [["Proposal", "Workshop"]],
+    "tcv_order": ["X-Small", "Small", "Medium", "Large", "X-Large"],
+    "probability_order": ["Low", "Medium", "High", "Certain"],
+}
+
+_FILTER_KEYS = {
+    "areas",
+    "sub_areas",
+    "opportunity_contains",
+    "tcv_min",
+    "tcv_max",
+    "probability_min",
+    "probability_max",
+}
 
 
 def _normalize_header(header: str) -> str:
@@ -448,3 +473,533 @@ def inspect_source(
         "mapping": mapping,
         "ambiguities": ambiguities,
     }
+
+
+def _casefolded_strings(value: object, key: str) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise DataContractError("invalid_semantics", f"{key} must be a list of strings")
+    folded = [item.casefold() for item in value]
+    if len(set(folded)) != len(folded):
+        raise DataContractError(
+            "invalid_semantics", f"{key} contains a case-insensitive duplicate"
+        )
+    return folded
+
+
+def validate_semantics(semantics: dict[str, object] | None) -> dict[str, object]:
+    """Apply defaults and validate case-insensitive stage semantics."""
+
+    if semantics is None:
+        semantics = {}
+    if not isinstance(semantics, dict):
+        raise DataContractError("invalid_semantics", "Semantics must be an object")
+    result = {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in DEFAULT_SEMANTICS.items()
+    }
+    result.update(semantics)
+
+    positive = _casefolded_strings(result["positive_terminals"], "positive_terminals")
+    negative = _casefolded_strings(result["negative_terminals"], "negative_terminals")
+    if set(positive) & set(negative):
+        raise DataContractError(
+            "invalid_semantics", "Positive and negative terminal lists overlap"
+        )
+
+    for key in ("tcv_order", "probability_order"):
+        _casefolded_strings(result[key], key)
+
+    paths = result["stage_paths"]
+    if not isinstance(paths, list):
+        raise DataContractError("invalid_semantics", "stage_paths must be a list")
+    pair_directions: dict[tuple[str, str], int] = {}
+    for path in paths:
+        if not isinstance(path, list) or not path:
+            raise DataContractError(
+                "invalid_semantics", "Every stage path must be a non-empty list"
+            )
+        folded_path = _casefolded_strings(path, "stage_paths entry")
+        for left_index, left in enumerate(folded_path):
+            for right in folded_path[left_index + 1 :]:
+                pair = tuple(sorted((left, right)))
+                direction = 1 if pair == (left, right) else -1
+                existing = pair_directions.get(pair)
+                if existing is not None and existing != direction:
+                    raise DataContractError(
+                        "conflicting_stage_order",
+                        "Stage paths assign contradictory ranks",
+                    )
+                pair_directions[pair] = direction
+
+    transitions = result["positive_transitions"]
+    if not isinstance(transitions, list):
+        raise DataContractError(
+            "invalid_semantics", "positive_transitions must be a list"
+        )
+    for transition in transitions:
+        if (
+            not isinstance(transition, list)
+            or len(transition) != 2
+            or any(not isinstance(stage, str) or not stage.strip() for stage in transition)
+        ):
+            raise DataContractError(
+                "invalid_semantics", "Every positive transition must contain two strings"
+            )
+    return result
+
+
+def normalize_rank(
+    value: object,
+    configured_order: object,
+    field: str,
+) -> tuple[str, int | float, str]:
+    """Preserve a display value and derive a deterministic numeric sort rank."""
+
+    if field not in {"tcv", "probability"}:
+        raise ValueError(f"Unsupported rank field: {field}")
+    display = str(value)
+    if value is None or not display.strip() or isinstance(value, bool):
+        raise DataContractError(
+            f"invalid_{field}", f"Invalid {field} value: {value!r}"
+        )
+    if not isinstance(configured_order, list) or any(
+        not isinstance(item, str) for item in configured_order
+    ):
+        raise DataContractError(
+            "invalid_semantics", f"{field}_order must be a list of strings"
+        )
+
+    category_ranks = {
+        label.casefold(): index for index, label in enumerate(configured_order)
+    }
+    if display.casefold() in category_ranks:
+        return display, category_ranks[display.casefold()], "categorical"
+
+    number: float | None = None
+    percent = False
+    multiplier = 1.0
+    if isinstance(value, Real):
+        number = float(value)
+    elif isinstance(value, str):
+        candidate = value.strip().replace(",", "").replace(" ", "")
+        match = _NUMERIC_VALUE_PATTERN.fullmatch(candidate)
+        if match:
+            sign, numeric_text, suffix, percent_mark = match.groups()
+            number = float(f"{sign}{numeric_text}")
+            percent = bool(percent_mark)
+            multiplier = {"k": 1_000.0, "m": 1_000_000.0, "b": 1_000_000_000.0}.get(
+                (suffix or "").casefold(), 1.0
+            )
+    if number is None or not math.isfinite(number):
+        raise DataContractError(
+            f"invalid_{field}", f"Invalid {field} value: {value!r}"
+        )
+    rank = number * multiplier
+    if field == "probability" and not percent and 0 <= rank <= 1:
+        rank *= 100
+    return display, rank, "numeric"
+
+
+def _stage_direction(previous: str, current: str, semantics: dict[str, object]) -> str:
+    previous_folded = previous.casefold()
+    current_folded = current.casefold()
+    if previous_folded == current_folded:
+        return "neutral"
+
+    explicit = {
+        (str(start).casefold(), str(end).casefold())
+        for start, end in semantics["positive_transitions"]
+    }
+    if (previous_folded, current_folded) in explicit:
+        return "positive"
+
+    directions: set[str] = set()
+    for path in semantics["stage_paths"]:
+        folded_path = [str(stage).casefold() for stage in path]
+        if previous_folded in folded_path and current_folded in folded_path:
+            directions.add(
+                "positive"
+                if folded_path.index(current_folded) > folded_path.index(previous_folded)
+                else "negative"
+            )
+    if len(directions) > 1:
+        raise DataContractError(
+            "conflicting_stage_order", "Stage paths assign contradictory ranks"
+        )
+    return next(iter(directions), "unknown")
+
+
+def classify_transition(
+    previous: dict[str, object],
+    current: dict[str, object],
+    semantics: dict[str, object],
+) -> str:
+    """Classify a stage transition using terminal, stage, and probability signals."""
+
+    validated = validate_semantics(semantics)
+    current_stage = str(current.get("stage", ""))
+    previous_stage = str(previous.get("stage", ""))
+    current_folded = current_stage.casefold()
+    if current_folded in {
+        str(stage).casefold() for stage in validated["positive_terminals"]
+    }:
+        return "won"
+    if current_folded in {
+        str(stage).casefold() for stage in validated["negative_terminals"]
+    }:
+        return "lost"
+
+    stage_signal = _stage_direction(previous_stage, current_stage, validated)
+    probability_signal = "absent"
+    previous_probability = previous.get("probability_sort")
+    current_probability = current.get("probability_sort")
+    if isinstance(previous_probability, Real) and isinstance(current_probability, Real):
+        if current_probability > previous_probability:
+            probability_signal = "positive"
+        elif current_probability < previous_probability:
+            probability_signal = "negative"
+        else:
+            probability_signal = "neutral"
+
+    directional = {"positive", "negative"}
+    if stage_signal in directional and probability_signal in directional:
+        return "mixed" if stage_signal != probability_signal else stage_signal
+    if stage_signal in directional:
+        return stage_signal
+    if probability_signal in directional:
+        return probability_signal
+    if stage_signal == "unknown":
+        return "unknown"
+    return "neutral"
+
+
+def _minimal_reason(
+    record: dict[str, object], code: str, message: str
+) -> dict[str, object]:
+    return {
+        "id": record["id"],
+        "source_row": record["source_row"],
+        "code": code,
+        "message": message,
+    }
+
+
+def _row_id(row: dict[str, object], source_row: int) -> str:
+    for header in ("ID", "Id"):
+        if header in row and str(row[header]).strip():
+            return str(row[header])
+    return f"ROW-{source_row:04d}"
+
+
+def _terminal_kind(stage: str, semantics: dict[str, object]) -> str | None:
+    folded = stage.casefold()
+    if folded in {str(value).casefold() for value in semantics["positive_terminals"]}:
+        return "positive"
+    if folded in {str(value).casefold() for value in semantics["negative_terminals"]}:
+        return "negative"
+    return None
+
+
+def normalize_rows(
+    rows: list[dict[str, object]],
+    mapping: dict[str, object],
+    semantics: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Normalize display-safe rows and return row-local contract exclusions."""
+
+    validated = validate_semantics(semantics)
+    records: list[dict[str, object]] = []
+    exclusions: list[dict[str, object]] = []
+    rank_kinds: dict[str, set[str]] = {"tcv": set(), "probability": set()}
+
+    for source_index, row in enumerate(rows):
+        source_row = source_index + 2
+        row_id = _row_id(row, source_row)
+        reason_stub = {"id": row_id, "source_row": source_row}
+        missing_field = next(
+            (
+                field
+                for field in ("area", "sub_area", "opportunity_name")
+                if row.get(str(mapping[field])) is None
+                or not str(row[str(mapping[field])]).strip()
+            ),
+            None,
+        )
+        if missing_field:
+            exclusions.append(
+                {
+                    **reason_stub,
+                    "code": "missing_required_value",
+                    "message": f"Missing required value: {missing_field}",
+                }
+            )
+            continue
+
+        try:
+            tcv_display, tcv_rank, tcv_kind = normalize_rank(
+                row.get(str(mapping["tcv"])), validated["tcv_order"], "tcv"
+            )
+            probability_display, probability_rank, probability_kind = normalize_rank(
+                row.get(str(mapping["probability"])),
+                validated["probability_order"],
+                "probability",
+            )
+        except DataContractError as error:
+            exclusions.append(
+                {
+                    **reason_stub,
+                    "code": error.code,
+                    "message": str(error),
+                }
+            )
+            continue
+
+        normalized_months: list[dict[str, object]] = []
+        warnings: list[dict[str, object]] = []
+        previous_populated: dict[str, object] | None = None
+        blank_labels: list[str] = []
+        terminal: dict[str, object] | None = None
+        month_error: DataContractError | None = None
+
+        for month in mapping["months"]:
+            stage_value = row.get(str(month["stage"]))
+            stage = "" if stage_value is None else str(stage_value)
+            normalized_month: dict[str, object] = {
+                "key": str(month["key"]),
+                "label": str(month["label"]),
+                "stage": stage,
+                "classification": "empty",
+                "skipped_months": [],
+            }
+            probability_header = month.get("probability")
+            if probability_header is not None:
+                month_probability = row.get(str(probability_header))
+                if month_probability is not None and str(month_probability).strip():
+                    try:
+                        display, rank, _ = normalize_rank(
+                            month_probability,
+                            validated["probability_order"],
+                            "probability",
+                        )
+                    except DataContractError as error:
+                        month_error = error
+                        break
+                    normalized_month["probability_display"] = display
+                    normalized_month["probability_sort"] = rank
+
+            if not stage.strip():
+                blank_labels.append(str(month["label"]))
+                normalized_months.append(normalized_month)
+                continue
+
+            terminal_kind = _terminal_kind(stage, validated)
+            if previous_populated is None:
+                classification = (
+                    "won"
+                    if terminal_kind == "positive"
+                    else "lost" if terminal_kind == "negative" else "initial"
+                )
+            else:
+                classification = classify_transition(
+                    previous_populated, normalized_month, validated
+                )
+            normalized_month["classification"] = classification
+            if blank_labels and previous_populated is not None:
+                normalized_month["skipped_months"] = list(blank_labels)
+                warnings.append(
+                    {
+                        "code": "skipped_blank_months",
+                        "message": "Transition skips blank months",
+                        "month": normalized_month["key"],
+                        "skipped_months": list(blank_labels),
+                    }
+                )
+            blank_labels.clear()
+            if classification == "mixed":
+                warnings.append(
+                    {
+                        "code": "mixed_signals",
+                        "message": "Stage and probability signals conflict",
+                        "month": normalized_month["key"],
+                    }
+                )
+            elif classification == "unknown":
+                warnings.append(
+                    {
+                        "code": "unknown_transition",
+                        "message": "Transition stage order is unknown",
+                        "month": normalized_month["key"],
+                    }
+                )
+            normalized_months.append(normalized_month)
+            previous_populated = normalized_month
+            if terminal_kind is not None:
+                terminal = {
+                    "kind": terminal_kind,
+                    "month": normalized_month["key"],
+                    "index": len(normalized_months) - 1,
+                }
+                break
+
+        if month_error is not None:
+            exclusions.append(
+                {
+                    **reason_stub,
+                    "code": month_error.code,
+                    "message": str(month_error),
+                }
+            )
+            continue
+
+        populated_count = sum(bool(str(month["stage"]).strip()) for month in normalized_months)
+        if populated_count < 2:
+            exclusions.append(
+                {
+                    **reason_stub,
+                    "code": "insufficient_stages",
+                    "message": "At least two populated stages are required",
+                }
+            )
+            continue
+
+        rank_kinds["tcv"].add(tcv_kind)
+        rank_kinds["probability"].add(probability_kind)
+        records.append(
+            {
+                "id": row_id,
+                "source_row": source_row,
+                "area": str(row[str(mapping["area"])]),
+                "sub_area": str(row[str(mapping["sub_area"])]),
+                "opportunity_name": str(row[str(mapping["opportunity_name"])]),
+                "tcv": {"display": tcv_display, "sort": tcv_rank, "kind": tcv_kind},
+                "probability": {
+                    "display": probability_display,
+                    "sort": probability_rank,
+                    "kind": probability_kind,
+                },
+                "months": normalized_months,
+                "terminal": terminal,
+                "warnings": warnings,
+            }
+        )
+
+    for field, kinds in rank_kinds.items():
+        if len(kinds) > 1:
+            raise DataContractError(
+                f"mixed_{field}_types",
+                f"{field.upper() if field == 'tcv' else field.capitalize()} values mix numeric and categorical ranks",
+            )
+    return records, exclusions
+
+
+def _validate_filters(filters: dict[str, object] | None) -> dict[str, object]:
+    if filters is None:
+        return {}
+    if not isinstance(filters, dict):
+        raise DataContractError("invalid_filters", "Filters must be an object")
+    unknown = sorted(set(filters) - _FILTER_KEYS)
+    if unknown:
+        raise DataContractError(
+            "invalid_filters", "Unknown filter keys", {"keys": unknown}
+        )
+    for key in ("areas", "sub_areas"):
+        value = filters.get(key)
+        if value not in (None, []) and (
+            not isinstance(value, list) or any(not isinstance(item, str) for item in value)
+        ):
+            raise DataContractError("invalid_filters", f"{key} must be a list of strings")
+    contains = filters.get("opportunity_contains")
+    if contains is not None and not isinstance(contains, str):
+        raise DataContractError(
+            "invalid_filters", "opportunity_contains must be a string"
+        )
+    for prefix in ("tcv", "probability"):
+        minimum = filters.get(f"{prefix}_min")
+        maximum = filters.get(f"{prefix}_max")
+        if minimum is not None and not isinstance(minimum, Real):
+            raise DataContractError("invalid_filters", f"{prefix}_min must be numeric")
+        if maximum is not None and not isinstance(maximum, Real):
+            raise DataContractError("invalid_filters", f"{prefix}_max must be numeric")
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise DataContractError(
+                "invalid_filters", f"{prefix}_min must not exceed {prefix}_max"
+            )
+    return dict(filters)
+
+
+def apply_filters(
+    records: list[dict[str, object]], filters: dict[str, object] | None
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Apply deterministic fixed-field filters without leaking excluded row data."""
+
+    validated = _validate_filters(filters)
+    areas = {value.casefold() for value in validated.get("areas", [])}
+    sub_areas = {value.casefold() for value in validated.get("sub_areas", [])}
+    contains = str(validated.get("opportunity_contains", "")).casefold()
+    included: list[dict[str, object]] = []
+    excluded: list[dict[str, object]] = []
+
+    for record in records:
+        matches = (
+            (not areas or str(record["area"]).casefold() in areas)
+            and (not sub_areas or str(record["sub_area"]).casefold() in sub_areas)
+            and (not contains or contains in str(record["opportunity_name"]).casefold())
+        )
+        for field in ("tcv", "probability"):
+            rank = record[field]["sort"]
+            minimum = validated.get(f"{field}_min")
+            maximum = validated.get(f"{field}_max")
+            matches = matches and (minimum is None or rank >= minimum)
+            matches = matches and (maximum is None or rank <= maximum)
+        if matches:
+            included.append(record)
+        else:
+            excluded.append(
+                _minimal_reason(record, "filter_not_matched", "Row does not match filters")
+            )
+    return included, excluded
+
+
+def populated_stage_count(record: dict[str, object]) -> int:
+    return sum(bool(str(month["stage"]).strip()) for month in record["months"])
+
+
+def _record_sort_key(record: dict[str, object]) -> tuple[object, ...]:
+    return (
+        str(record["area"]).casefold(),
+        str(record["sub_area"]).casefold(),
+        -float(record["tcv"]["sort"]),
+        -float(record["probability"]["sort"]),
+        str(record["opportunity_name"]).casefold(),
+        int(record["source_row"]),
+    )
+
+
+def select_records(
+    records: list[dict[str, object]], view: str
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Select a canonical view and sort included records deterministically."""
+
+    predicates = {
+        "wins": lambda record: record["terminal"] is not None
+        and record["terminal"]["kind"] == "positive",
+        "losses": lambda record: record["terminal"] is not None
+        and record["terminal"]["kind"] == "negative",
+        "all-progression": lambda record: populated_stage_count(record) >= 2,
+        "positive-progression": lambda record: any(
+            month["classification"] in {"positive", "won"}
+            for month in record["months"]
+        ),
+    }
+    if view not in predicates:
+        raise DataContractError("unsupported_view", f"Unsupported view: {view}")
+    included = [record for record in records if predicates[view](record)]
+    excluded = [
+        _minimal_reason(record, "view_not_matched", f"Row does not match view: {view}")
+        for record in records
+        if not predicates[view](record)
+    ]
+    included.sort(key=_record_sort_key)
+    return included, excluded

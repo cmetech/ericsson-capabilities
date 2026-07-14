@@ -23,6 +23,7 @@ from opportunity_data import (  # noqa: E402
     resolve_mapping,
     select_records,
 )
+import prepare_opportunities  # noqa: E402
 from prepare_opportunities import prepare  # noqa: E402
 
 
@@ -856,3 +857,91 @@ def test_inspect_cli_returns_safe_structured_error_for_missing_source(tmp_path):
             "details": {"source": "missing.json"},
         },
     }
+
+
+def test_prepare_cli_rejects_existing_file_destination_without_overwrite(
+    tmp_path, csv_source, semantics
+):
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    output_file = tmp_path / "existing-output"
+    output_file.write_text("DO NOT OVERWRITE", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "prepare_opportunities.py"),
+            "prepare",
+            str(csv_source),
+            "--view",
+            "wins",
+            "--semantics",
+            str(semantics_path),
+            "--output-dir",
+            str(output_file),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "error": {
+            "code": "output_exists",
+            "message": "Output destination already exists",
+            "details": {},
+        },
+    }
+    assert output_file.read_text(encoding="utf-8") == "DO NOT OVERWRITE"
+    assert str(output_file) not in result.stdout
+
+
+def test_prepare_cli_reports_atomic_write_failure_without_partial_artifacts(
+    tmp_path, csv_source, semantics, monkeypatch, capsys
+):
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    output_dir = tmp_path / "prepared"
+    original_replace = Path.replace
+    replace_calls = 0
+
+    def fail_replace(self, target):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError("sensitive raw path /private/secret")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    result = prepare_opportunities.main(
+        [
+            "prepare",
+            str(csv_source),
+            "--view",
+            "wins",
+            "--semantics",
+            str(semantics_path),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "error": {
+            "code": "output_unwritable",
+            "message": "Unable to write output artifacts",
+            "details": {},
+        },
+    }
+    assert "/private/secret" not in captured.out
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []

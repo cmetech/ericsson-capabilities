@@ -123,6 +123,53 @@ def _atomic_json(path: Path, value: object) -> None:
             temporary.unlink()
 
 
+def _validate_output_destination(output_dir: Path) -> bool:
+    """Return whether the destination must be created, rejecting unsafe reuse."""
+
+    try:
+        if output_dir.is_symlink() or output_dir.exists():
+            if not output_dir.is_dir() or any(output_dir.iterdir()):
+                raise DataContractError(
+                    "output_exists", "Output destination already exists"
+                )
+            return False
+    except DataContractError:
+        raise
+    except OSError:
+        raise DataContractError(
+            "output_exists", "Output destination already exists"
+        ) from None
+    return True
+
+
+def _write_artifacts(
+    output_dir: Path,
+    artifacts: list[tuple[str, object]],
+    create_output_dir: bool,
+) -> None:
+    written: list[Path] = []
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for name, value in artifacts:
+            path = output_dir / name
+            _atomic_json(path, value)
+            written.append(path)
+    except OSError:
+        for path in written:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if create_output_dir:
+            try:
+                output_dir.rmdir()
+            except OSError:
+                pass
+        raise DataContractError(
+            "output_unwritable", "Unable to write output artifacts"
+        ) from None
+
+
 def prepare(
     source: Path,
     view: str,
@@ -138,10 +185,7 @@ def prepare(
 
     source = Path(source)
     output_dir = Path(output_dir)
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise DataContractError(
-            "output_exists", "Output directory exists and is not empty"
-        )
+    create_output_dir = _validate_output_destination(output_dir)
 
     semantics_path = Path(semantics_path)
     semantics = validate_semantics(_load_json_object(semantics_path, "semantics"))
@@ -242,10 +286,15 @@ def prepare(
         "counts": counts,
     }
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_json(output_dir / "source-summary.json", source_summary)
-    _atomic_json(output_dir / "normalized-data.json", normalized_data)
-    _atomic_json(output_dir / "exclusions.json", {"exclusions": exclusions})
+    _write_artifacts(
+        output_dir,
+        [
+            ("source-summary.json", source_summary),
+            ("normalized-data.json", normalized_data),
+            ("exclusions.json", {"exclusions": exclusions}),
+        ],
+        create_output_dir,
+    )
     return {
         "output_dir": str(output_dir),
         "artifacts": [

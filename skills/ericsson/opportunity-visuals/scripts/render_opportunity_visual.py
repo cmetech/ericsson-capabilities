@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from numbers import Real
@@ -103,6 +104,7 @@ class PagePlan:
 class _OwnedPublication:
     path: Path
     owner_path: Path
+    expected_sha256: str
     cleanup_dir: Path | None = None
 
 
@@ -1001,19 +1003,22 @@ def _probe_chromium() -> dict[str, str]:
     return _capability("available")
 
 
-def _probe_output_directory(output_dir: Path) -> dict[str, str]:
+def _probe_output_directory_checked(output_dir: Path) -> dict[str, str]:
     output_dir = Path(output_dir)
-    if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
-        return _capability("unavailable", "Output directory is not writable")
     missing_depth = 0
     probe_parent = output_dir
-    while not probe_parent.exists():
-        if probe_parent.is_symlink() or probe_parent.parent == probe_parent:
+    while True:
+        try:
+            mode = probe_parent.lstat().st_mode
+        except FileNotFoundError:
+            if probe_parent.parent == probe_parent:
+                return _capability("unavailable", "Output directory is not writable")
+            missing_depth += 1
+            probe_parent = probe_parent.parent
+            continue
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             return _capability("unavailable", "Output directory is not writable")
-        missing_depth += 1
-        probe_parent = probe_parent.parent
-    if not probe_parent.is_dir():
-        return _capability("unavailable", "Output directory is not writable")
+        break
 
     private_root: Path | None = None
     probe: Path | None = None
@@ -1053,9 +1058,26 @@ def _probe_output_directory(output_dir: Path) -> dict[str, str]:
                 private_root.rmdir()
             except OSError:
                 cleanup_ok = False
-    if not cleanup_ok or (private_root is not None and private_root.exists()):
+    private_root_remains = False
+    if private_root is not None:
+        try:
+            private_root.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            private_root_remains = True
+    if not cleanup_ok or private_root_remains:
         return _capability("unavailable", "Output directory probe could not be removed")
     return _capability("available")
+
+
+def _probe_output_directory(output_dir: Path) -> dict[str, str]:
+    """Probe a destination without leaking exceptional filesystem details."""
+
+    try:
+        return _probe_output_directory_checked(Path(output_dir))
+    except OSError:
+        return _capability("unavailable", "Output directory is not writable")
 
 
 def preflight(output_dir: Path) -> dict[str, object]:
@@ -1083,12 +1105,14 @@ def _publish_owned_text(path: Path, text: str) -> _OwnedPublication:
     """Publish without clobbering and retain a hard-link identity for rollback."""
     path = Path(path)
     temporary = path.with_name(f".{path.name}.tmp")
+    encoded = text.encode("utf-8")
+    expected_sha256 = hashlib.sha256(encoded).hexdigest()
     if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
         raise RenderError("output_exists", "Output artifact already exists")
     try:
         try:
-            with temporary.open("x", encoding="utf-8") as handle:
-                handle.write(text)
+            with temporary.open("xb") as handle:
+                handle.write(encoded)
         except FileExistsError:
             raise RenderError("output_exists", "Output artifact already exists") from None
         try:
@@ -1102,7 +1126,11 @@ def _publish_owned_text(path: Path, text: str) -> _OwnedPublication:
             except OSError:
                 pass
         raise
-    return _OwnedPublication(path=path, owner_path=temporary)
+    return _OwnedPublication(
+        path=path,
+        owner_path=temporary,
+        expected_sha256=expected_sha256,
+    )
 
 
 def _release_owner(publication: _OwnedPublication) -> None:
@@ -1129,6 +1157,10 @@ def _publish_owned_file(
     target = Path(target)
     if source.is_symlink() or not source.is_file():
         raise RenderError("output_unwritable", "Unable to write render artifacts")
+    try:
+        expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError:
+        raise RenderError("output_unwritable", "Unable to write render artifacts") from None
     if target.exists() or target.is_symlink():
         raise RenderError("output_exists", "Output artifact already exists")
     try:
@@ -1138,12 +1170,13 @@ def _publish_owned_file(
     return _OwnedPublication(
         path=target,
         owner_path=source,
+        expected_sha256=expected_sha256,
         cleanup_dir=cleanup_dir,
     )
 
 
 def _verify_publications(publications: list[_OwnedPublication]) -> None:
-    """Require every visible artifact to retain this transaction's inode."""
+    """Require every artifact to retain this transaction's inode and bytes."""
 
     for publication in publications:
         try:
@@ -1154,6 +1187,18 @@ def _verify_publications(publications: list[_OwnedPublication]) -> None:
                 "output_changed", "A rendered artifact changed before commit"
             ) from None
         if not os.path.samestat(owner_stat, visible_stat):
+            raise RenderError(
+                "output_changed", "A rendered artifact changed before commit"
+            )
+        try:
+            actual_sha256 = hashlib.sha256(
+                publication.owner_path.read_bytes()
+            ).hexdigest()
+        except OSError:
+            raise RenderError(
+                "output_changed", "A rendered artifact changed before commit"
+            ) from None
+        if actual_sha256 != publication.expected_sha256:
             raise RenderError(
                 "output_changed", "A rendered artifact changed before commit"
             )
@@ -1343,14 +1388,11 @@ def _manifest_payload(
             raise RenderError("invalid_artifact", "Render artifacts do not match page plans")
         svg_path = Path(artifact["svg"])
         html_path = Path(artifact["html"])
-        svg_hash_path = Path(artifact.get("svg_owner", svg_path))
-        html_hash_path = Path(artifact.get("html_owner", html_path))
+        svg_expected = artifact.get("svg_sha256")
+        html_expected = artifact.get("html_sha256")
         png_value = artifact.get("png")
         png_path = Path(png_value) if png_value is not None else None
-        png_owner_value = artifact.get("png_owner", png_path)
-        png_hash_path = (
-            Path(png_owner_value) if png_owner_value is not None else None
-        )
+        png_expected = artifact.get("png_sha256")
         page_entries.append(
             {
                 "number": page.number,
@@ -1363,11 +1405,21 @@ def _manifest_payload(
                     "png": png_path.name if png_path is not None else None,
                 },
                 "sha256": {
-                    "svg": _sha256_file(svg_hash_path, manifest_path),
-                    "html": _sha256_file(html_hash_path, manifest_path),
+                    "svg": (
+                        svg_expected
+                        if isinstance(svg_expected, str)
+                        else _sha256_file(svg_path, manifest_path)
+                    ),
+                    "html": (
+                        html_expected
+                        if isinstance(html_expected, str)
+                        else _sha256_file(html_path, manifest_path)
+                    ),
                     "png": (
-                        _sha256_file(png_hash_path, manifest_path)
-                        if png_hash_path is not None
+                        png_expected
+                        if isinstance(png_expected, str)
+                        else _sha256_file(png_path, manifest_path)
+                        if png_path is not None
                         else None
                     ),
                 },
@@ -1580,12 +1632,14 @@ def render_document(
             publication = _publish_owned_text(svg_path, svg_text)
             publications.append(publication)
             artifact["svg_owner"] = publication.owner_path
+            artifact["svg_sha256"] = publication.expected_sha256
         for artifact, html_path, html_text in zip(
             artifacts, html_paths, html_texts, strict=True
         ):
             publication = _publish_owned_text(html_path, html_text)
             publications.append(publication)
             artifact["html_owner"] = publication.owner_path
+            artifact["html_sha256"] = publication.expected_sha256
 
         if png_mode == "never":
             png_status = {"status": "disabled", "reason": "PNG output disabled"}
@@ -1621,12 +1675,14 @@ def render_document(
                     png_publications.append(publication)
                     artifact["png"] = png_path
                     artifact["png_owner"] = publication.owner_path
+                    artifact["png_sha256"] = publication.expected_sha256
             except RasterUnavailable:
                 for publication in reversed(png_publications):
                     _rollback_owned(publication)
                 for artifact in artifacts:
                     artifact["png"] = None
                     artifact.pop("png_owner", None)
+                    artifact.pop("png_sha256", None)
                 if png_mode == "required":
                     raise RenderError(
                         "png_unavailable",

@@ -756,6 +756,84 @@ def test_preflight_cleans_probe_if_descriptor_close_reports_failure(
     assert set(tmp_path.iterdir()) == before
 
 
+def test_preflight_handles_real_name_too_long_with_complete_safe_statuses(tmp_path):
+    output_dir = tmp_path / ("x" * 5000)
+    expected_keys = {
+        "csv_json",
+        "xlsx",
+        "svg_html",
+        "png_package",
+        "chromium",
+        "output_directory",
+    }
+    before = set(tmp_path.iterdir())
+
+    direct = preflight(output_dir)
+    command = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "render_opportunity_visual.py"),
+            "--preflight",
+            "--output-dir",
+            str(output_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert set(direct) == expected_keys
+    assert direct["output_directory"] == {
+        "status": "unavailable",
+        "reason": "Output directory is not writable",
+    }
+    assert command.returncode == 0
+    assert command.stderr == ""
+    assert command.stdout.count("\n") == 1
+    payload = json.loads(command.stdout)
+    assert payload["ok"] is True
+    assert set(payload["preflight"]) == expected_keys
+    assert payload["preflight"]["output_directory"] == direct["output_directory"]
+    assert str(output_dir) not in command.stdout
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_preflight_handles_permission_denied_path_metadata_without_raising(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "denied" / "rendered"
+    real_lstat = Path.lstat
+
+    def permission_denied_stat(path):
+        if path == output_dir:
+            raise PermissionError("secret /private/denied")
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", permission_denied_stat)
+    monkeypatch.setattr(renderer, "_module_available", lambda name: False)
+    monkeypatch.setattr(
+        renderer,
+        "_probe_chromium",
+        lambda: {"status": "unavailable", "reason": "Chromium is unavailable"},
+    )
+
+    result = preflight(output_dir)
+
+    assert set(result) == {
+        "csv_json",
+        "xlsx",
+        "svg_html",
+        "png_package",
+        "chromium",
+        "output_directory",
+    }
+    assert result["output_directory"] == {
+        "status": "unavailable",
+        "reason": "Output directory is not writable",
+    }
+    assert not (tmp_path / "denied").is_dir()
+
+
 def _write_normalized(tmp_path, document):
     normalized_path = tmp_path / "normalized-data.json"
     normalized_path.write_text(json.dumps(document), encoding="utf-8")
@@ -1113,6 +1191,60 @@ def test_success_path_detects_artifact_replaced_between_hash_and_manifest_publis
     assert staged_manifest and competitor_hash not in staged_manifest[0]
     assert not (output_dir / "render-manifest.json").exists()
     assert not list(output_dir.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("kind", ["svg", "html", "png"])
+@pytest.mark.parametrize("moment", ["before_first_verification", "before_manifest_publish"])
+def test_transaction_detects_same_inode_content_mutation(
+    tmp_path, normalized_document, monkeypatch, kind, moment
+):
+    normalized_path = _write_normalized(tmp_path, normalized_document)
+    output_dir = tmp_path / "rendered"
+    if kind == "png":
+        def fake_rasterize(html_path, png_path, width, height, playwright_factory=None):
+            Path(png_path).write_bytes(b"renderer-png")
+
+        monkeypatch.setattr(renderer, "rasterize_html", fake_rasterize)
+        png_mode = "required"
+    else:
+        png_mode = "never"
+    victim = output_dir / f"opportunity-visual-p01.{kind}"
+    corrupt = b"same-inode-corrupt-content /private/source"
+    corrupt_hash = hashlib.sha256(corrupt).hexdigest()
+    staged_manifest = []
+
+    if moment == "before_first_verification":
+        real_verify = renderer._verify_publications
+        calls = 0
+
+        def mutate_then_verify(publications):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                victim.write_bytes(corrupt)
+            return real_verify(publications)
+
+        monkeypatch.setattr(renderer, "_verify_publications", mutate_then_verify)
+    else:
+        real_link = os.link
+
+        def mutate_before_manifest_link(source, target, **kwargs):
+            target = Path(target)
+            if target.name == "render-manifest.json":
+                staged_manifest.append(Path(source).read_text(encoding="utf-8"))
+                victim.write_bytes(corrupt)
+            return real_link(source, target, **kwargs)
+
+        monkeypatch.setattr(os, "link", mutate_before_manifest_link)
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, output_dir, png_mode=png_mode)
+
+    assert caught.value.code == "output_changed"
+    assert "/private/source" not in str(caught.value)
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+    if staged_manifest:
+        assert corrupt_hash not in staged_manifest[0]
 
 
 @pytest.mark.parametrize(

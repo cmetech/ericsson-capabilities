@@ -612,6 +612,96 @@ def test_cli_rolls_back_only_its_pages_when_competitor_wins_later_page(
     assert sorted(path.name for path in output_dir.iterdir()) == [competitor.name]
 
 
+def test_cli_rollback_preserves_competitors_that_replace_owned_and_later_pages(
+    tmp_path, normalized_document, monkeypatch, capsys
+):
+    document = expanded_document(normalized_document, record_count=4, month_count=10)
+    normalized_path = tmp_path / "normalized-data.json"
+    normalized_path.write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "rendered"
+    real_link = os.link
+    calls = 0
+
+    def competitors_replace_first_and_claim_second(source, target, **kwargs):
+        nonlocal calls
+        calls += 1
+        target = Path(target)
+        if calls == 2:
+            first = output_dir / "opportunity-visual-p01.svg"
+            first.unlink()
+            first.write_text("competitor-first\n", encoding="utf-8")
+            target.write_text("competitor-second\n", encoding="utf-8")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", competitors_replace_first_and_claim_second)
+    result = renderer.main(
+        [str(normalized_path), "--output-dir", str(output_dir), "--width", "960", "--height", "540"]
+    )
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.err == ""
+    assert json.loads(captured.out)["error"]["code"] == "output_exists"
+    assert (output_dir / "opportunity-visual-p01.svg").read_text(encoding="utf-8") == (
+        "competitor-first\n"
+    )
+    assert (output_dir / "opportunity-visual-p02.svg").read_text(encoding="utf-8") == (
+        "competitor-second\n"
+    )
+    assert sorted(path.name for path in output_dir.iterdir()) == [
+        "opportunity-visual-p01.svg",
+        "opportunity-visual-p02.svg",
+    ]
+
+
+def test_cli_rollback_retains_recovery_if_restored_competitor_is_replaced_again(
+    tmp_path, normalized_document, monkeypatch, capsys
+):
+    document = expanded_document(normalized_document, record_count=4, month_count=10)
+    normalized_path = tmp_path / "normalized-data.json"
+    normalized_path.write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "rendered"
+    real_link = os.link
+    calls = 0
+
+    def three_competitors(source, target, **kwargs):
+        nonlocal calls
+        calls += 1
+        target = Path(target)
+        if calls == 2:
+            first = output_dir / "opportunity-visual-p01.svg"
+            first.unlink()
+            first.write_text("competitor-first\n", encoding="utf-8")
+            target.write_text("competitor-second\n", encoding="utf-8")
+        result = real_link(source, target, **kwargs)
+        if calls == 3:
+            target.unlink()
+            target.write_text("competitor-third\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(os, "link", three_competitors)
+    result = renderer.main(
+        [str(normalized_path), "--output-dir", str(output_dir), "--width", "960", "--height", "540"]
+    )
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.err == ""
+    assert json.loads(captured.out)["error"]["code"] == "output_exists"
+    assert (output_dir / "opportunity-visual-p01.svg").read_text(encoding="utf-8") == (
+        "competitor-third\n"
+    )
+    assert (output_dir / "opportunity-visual-p02.svg").read_text(encoding="utf-8") == (
+        "competitor-second\n"
+    )
+    recovery_dirs = list(output_dir.glob(".opportunity-visual-p01.svg.rollback-*"))
+    assert len(recovery_dirs) == 1
+    assert (recovery_dirs[0] / "candidate").read_text(encoding="utf-8") == (
+        "competitor-first\n"
+    )
+    assert not list(output_dir.glob("*.tmp"))
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -639,3 +729,39 @@ def test_cli_argument_errors_are_one_safe_json_object(arguments):
             "details": {},
         },
     }
+
+
+@pytest.mark.parametrize("dimension", ["--width", "--height"])
+def test_cli_rejects_huge_dimensions_before_float_conversion(
+    tmp_path, normalized_document, dimension
+):
+    normalized_path = tmp_path / "normalized-data.json"
+    normalized_path.write_text(json.dumps(normalized_document), encoding="utf-8")
+    output_dir = tmp_path / "rendered"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "render_opportunity_visual.py"),
+            str(normalized_path),
+            "--output-dir",
+            str(output_dir),
+            dimension,
+            "9" * 400,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "error": {
+            "code": "invalid_dimensions",
+            "message": "Width and height must be between 1 and 16384 pixels",
+            "details": {},
+        },
+    }
+    assert not output_dir.exists()

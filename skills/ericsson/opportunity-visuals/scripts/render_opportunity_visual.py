@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import tempfile
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
@@ -27,6 +28,7 @@ FIXED_COLUMNS = (
     ("probability", 150),
 )
 MIN_MONTH_WIDTH = 116
+MAX_DIMENSION = 16384
 
 STAGE_COLORS = {
     "initial": "#A6A6A6",
@@ -87,6 +89,12 @@ class PagePlan:
     height: int = 1080
 
 
+@dataclass(frozen=True)
+class _OwnedPublication:
+    path: Path
+    owner_path: Path
+
+
 def _number(value: float | int) -> str:
     number = float(value)
     if number.is_integer():
@@ -106,8 +114,13 @@ def _require_dimensions(width: object, height: object) -> tuple[int, int]:
         or not isinstance(height, int)
         or width <= 0
         or height <= 0
+        or width > MAX_DIMENSION
+        or height > MAX_DIMENSION
     ):
-        raise RenderError("invalid_dimensions", "Width and height must be positive integers")
+        raise RenderError(
+            "invalid_dimensions",
+            f"Width and height must be between 1 and {MAX_DIMENSION} pixels",
+        )
     return width, height
 
 
@@ -695,9 +708,8 @@ def render_svg_page(
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + serialized + "\n"
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    """Write through a sibling temporary file without replacing existing output."""
-
+def _publish_owned_text(path: Path, text: str) -> _OwnedPublication:
+    """Publish without clobbering and retain a hard-link identity for rollback."""
     path = Path(path)
     temporary = path.with_name(f".{path.name}.tmp")
     if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
@@ -712,12 +724,84 @@ def atomic_write_text(path: Path, text: str) -> None:
             os.link(temporary, path)
         except FileExistsError:
             raise RenderError("output_exists", "Output artifact already exists") from None
-    finally:
+    except BaseException:
         if temporary.exists() or temporary.is_symlink():
             try:
                 temporary.unlink()
             except OSError:
                 pass
+        raise
+    return _OwnedPublication(path=path, owner_path=temporary)
+
+
+def _release_owner(publication: _OwnedPublication) -> None:
+    try:
+        publication.owner_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _rollback_owned(publication: _OwnedPublication) -> None:
+    """Remove our visible inode, restoring a replaced competitor without clobbering.
+
+    The private owner hard link supplies durable identity. Moving the visible name
+    into a same-directory quarantine atomically captures whichever inode owns that
+    name at rollback time. Non-owned content is restored through a no-clobber hard
+    link. If another writer wins the restore name, quarantine is deliberately left
+    in place rather than deleting either competitor.
+    """
+
+    quarantine_dir: Path | None = None
+    candidate: Path | None = None
+    try:
+        try:
+            owner_stat = publication.owner_path.lstat()
+        except FileNotFoundError:
+            return
+        try:
+            quarantine_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{publication.path.name}.rollback-",
+                    dir=publication.path.parent,
+                )
+            )
+            candidate = quarantine_dir / "candidate"
+            os.rename(publication.path, candidate)
+        except FileNotFoundError:
+            return
+        except OSError:
+            return
+
+        candidate_stat = candidate.lstat()
+        if os.path.samestat(owner_stat, candidate_stat):
+            candidate.unlink()
+            return
+
+        try:
+            os.link(candidate, publication.path, follow_symlinks=False)
+        except FileExistsError:
+            return
+        try:
+            restored_stat = publication.path.lstat()
+        except FileNotFoundError:
+            return
+        if not os.path.samestat(candidate_stat, restored_stat):
+            return
+        candidate.unlink()
+    finally:
+        _release_owner(publication)
+        if quarantine_dir is not None:
+            try:
+                quarantine_dir.rmdir()
+            except OSError:
+                pass
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Atomically publish text without replacing an existing output."""
+
+    publication = _publish_owned_text(path, text)
+    _release_owner(publication)
 
 
 def _load_document(path: Path) -> dict[str, object]:
@@ -754,19 +838,15 @@ def _write_svg_pages(
 
     svg_pages = [render_svg_page(document, page, template_path) for page in pages]
     created_directory = not output_dir.exists()
-    written: list[Path] = []
+    publications: list[_OwnedPublication] = []
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         for name, svg in zip(names, svg_pages, strict=True):
             target = output_dir / name
-            atomic_write_text(target, svg)
-            written.append(target)
+            publications.append(_publish_owned_text(target, svg))
     except RenderError:
-        for target in written:
-            try:
-                target.unlink()
-            except OSError:
-                pass
+        for publication in reversed(publications):
+            _rollback_owned(publication)
         if created_directory:
             try:
                 output_dir.rmdir()
@@ -774,11 +854,8 @@ def _write_svg_pages(
                 pass
         raise
     except OSError:
-        for target in written:
-            try:
-                target.unlink()
-            except OSError:
-                pass
+        for publication in reversed(publications):
+            _rollback_owned(publication)
         for target in (output_dir / name for name in names):
             temporary = target.with_name(f".{target.name}.tmp")
             try:
@@ -792,6 +869,8 @@ def _write_svg_pages(
             except OSError:
                 pass
         raise RenderError("output_unwritable", "Unable to write SVG artifacts") from None
+    for publication in publications:
+        _release_owner(publication)
     return names
 
 

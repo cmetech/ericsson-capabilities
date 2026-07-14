@@ -66,9 +66,12 @@ it can still change the exclusion audit. Blank and known stages are ignored.
 The scan stops immediately after each row's first confirmed terminal and never
 groups or discloses a later stage. An uncached stage formula before that cutoff
 returns `formula_cache_missing`; formulas after that cutoff are ignored.
-Because the confirmed terminal excludes the row before normalization, selected
-formulas on that range-excluded row are also ignored. Selected formulas on
-other rows keep the existing safety rules. Formulas are never executed.
+After recording safe cell metadata for a pre-range formula, the scan continues
+only to detect a later confirmed terminal; it does not group later labels or
+record later formulas. Because the confirmed terminal excludes the row before
+normalization, fixed mapped and selected formulas on that range-excluded row
+are also ignored. Formulas on other rows keep the existing safety rules.
+Formulas are never executed.
 
 Each grouped transition contains the exact display `from_stage` and
 `to_stage`, stable `code`, `occurrences`, `terminal_status_resolved`,

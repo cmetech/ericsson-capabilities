@@ -193,10 +193,10 @@ def _selected_formula_errors(
     return [
         item
         for item in metadata.get("uncached_formulas", [])
-        if item["header"] in fixed_headers
-        or (
-            item["header"] in selected_headers
-            and int(item["row"]) not in excluded_source_rows
+        if int(item["row"]) not in excluded_source_rows
+        and (
+            item["header"] in fixed_headers
+            or item["header"] in selected_headers
         )
     ]
 
@@ -217,19 +217,23 @@ def _scan_pre_range_stages(
     terminal_source_rows: set[int] = set()
     formula_errors: list[dict[str, object]] = []
     for source_row, row in enumerate(rows, start=2):
+        control_only = False
         for month in pre_range_months:
             header = str(month["stage"])
             formula_error = formula_cells.get((source_row, header))
             if formula_error is not None:
-                formula_errors.append(formula_error)
-                break
+                if not control_only:
+                    formula_errors.append(formula_error)
+                control_only = True
+                continue
             stage = str(row.get(header, ""))
             if not stage.strip():
                 continue
-            observed_stages.append(stage)
             if stage.casefold() in positive | negative:
                 terminal_source_rows.add(source_row)
                 break
+            if not control_only:
+                observed_stages.append(stage)
     return observed_stages, terminal_source_rows, formula_errors
 
 

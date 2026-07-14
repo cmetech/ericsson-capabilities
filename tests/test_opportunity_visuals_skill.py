@@ -140,9 +140,10 @@ def test_opportunity_visuals_interview_documents_read_only_analysis():
     )
     assert "formulas after that cutoff are ignored" in normalized_contract
     assert (
-        "selected formulas on that range-excluded row are also ignored"
+        "fixed mapped and selected formulas on that range-excluded row are also ignored"
         in normalized_contract
     )
+    assert "continues only to detect a later confirmed terminal" in normalized_contract
     assert "mixed_transitions" in contract
     assert "add it to `non_terminal_stages`" in interview
     assert "terminal status" in interview

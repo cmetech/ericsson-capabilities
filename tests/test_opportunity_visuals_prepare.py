@@ -1665,3 +1665,189 @@ def test_selected_formula_after_pre_range_terminal_does_not_block(
     normalized = json.loads((output_dir / "normalized-data.json").read_text())
     assert normalized["records"] == []
     assert normalized["exclusions"][0]["code"] == "terminal_before_range"
+
+
+def test_formula_before_terminal_suppresses_only_later_row_formulas(
+    tmp_path, semantics
+):
+    source = tmp_path / "formula-before-terminal.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append([*HEADERS, "Jun '26"])
+    sheet.append(
+        [
+            "North",
+            "Cloud",
+            "Private Formula Order",
+            "Large",
+            "High",
+            '=IF(1=1,"Deferred","")',
+            "Lost",
+            '=IF(1=1,"Proposal","")',
+            "Won",
+        ]
+    )
+    workbook.save(source)
+    workbook.close()
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    with pytest.raises(DataContractError) as error:
+        analyze(
+            source,
+            "wins",
+            semantics_path,
+            sheet="Pipeline",
+            months=["May '26", "Jun '26"],
+        )
+
+    assert error.value.code == "formula_cache_missing"
+    assert error.value.details == {"cells": [{"row": 2, "header": "Mar '26"}]}
+
+
+def test_fixed_formulas_on_pre_range_excluded_row_do_not_block(tmp_path, semantics):
+    source = tmp_path / "fixed-formulas-after-terminal.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append([*HEADERS, "Jun '26"])
+    sheet.append(
+        [
+            "North",
+            "Cloud",
+            '="Private Fixed Formula"',
+            '=1+1',
+            "High",
+            "Lost",
+            "Deferred",
+            "Proposal",
+            "Won",
+        ]
+    )
+    workbook.save(source)
+    workbook.close()
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    report = analyze(
+        source,
+        "wins",
+        semantics_path,
+        sheet="Pipeline",
+        months=["May '26", "Jun '26"],
+    )
+    assert report["unresolved_terminal_stages"] == []
+
+    output_dir = tmp_path / "wins"
+    prepare(
+        source,
+        "wins",
+        semantics_path,
+        output_dir,
+        sheet="Pipeline",
+        months=["May '26", "Jun '26"],
+    )
+    normalized = json.loads((output_dir / "normalized-data.json").read_text())
+    assert normalized["records"] == []
+    assert normalized["exclusions"] == [
+        {
+            "id": "ROW-0002",
+            "source_row": 2,
+            "code": "terminal_before_range",
+            "message": "Row reached a terminal before the selected range",
+        }
+    ]
+
+
+def test_formula_without_later_terminal_keeps_fixed_and_selected_errors(
+    tmp_path, semantics
+):
+    source = tmp_path / "formula-without-terminal.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append([*HEADERS, "Jun '26"])
+    sheet.append(
+        [
+            "North",
+            "Cloud",
+            '="Private Active Formula"',
+            '=1+1',
+            "High",
+            '=IF(1=1,"Deferred","")',
+            "Discovery",
+            '=IF(1=1,"Proposal","")',
+            "Won",
+        ]
+    )
+    workbook.save(source)
+    workbook.close()
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    with pytest.raises(DataContractError) as error:
+        analyze(
+            source,
+            "wins",
+            semantics_path,
+            sheet="Pipeline",
+            months=["May '26", "Jun '26"],
+        )
+
+    assert error.value.code == "formula_cache_missing"
+    assert {(cell["row"], cell["header"]) for cell in error.value.details["cells"]} == {
+        (2, "Opportunity Name"),
+        (2, "TCV"),
+        (2, "Mar '26"),
+        (2, "May '26"),
+    }
+
+
+@pytest.mark.parametrize(
+    "view", ["wins", "losses", "all-progression", "positive-progression"]
+)
+def test_post_formula_control_scan_hides_intervening_unknown_stage(
+    tmp_path, semantics, view
+):
+    source = tmp_path / "private-control-scan.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    sheet.append([*HEADERS, "Jun '26", "Jul '26"])
+    sheet.append(
+        [
+            "North",
+            "Cloud",
+            "Private Control Scan",
+            "Large",
+            "High",
+            '=IF(1=1,"Maybe Terminal","")',
+            "Secret Deferred",
+            "Lost",
+            "Proposal",
+            "Won",
+        ]
+    )
+    workbook.save(source)
+    workbook.close()
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    before_bytes = source.read_bytes()
+    before_names = sorted(path.name for path in tmp_path.iterdir())
+
+    with pytest.raises(DataContractError) as error:
+        analyze(
+            source,
+            view,
+            semantics_path,
+            sheet="Pipeline",
+            months=["Jun '26", "Jul '26"],
+        )
+
+    assert error.value.details == {"cells": [{"row": 2, "header": "Mar '26"}]}
+    serialized = json.dumps(error.value.details)
+    for private_value in ("Secret Deferred", "Private Control Scan", "Maybe Terminal"):
+        assert private_value not in serialized
+    assert source.read_bytes() == before_bytes
+    assert sorted(path.name for path in tmp_path.iterdir()) == before_names

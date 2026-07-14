@@ -721,6 +721,56 @@ def test_preflight_accepts_nested_nonexistent_destination_without_residue(tmp_pa
     assert set(tmp_path.iterdir()) == before
 
 
+def test_preflight_follows_directory_symlink_ancestor_without_residue(tmp_path):
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    output_dir = linked_parent / "nested" / "rendered"
+    before = set(real_parent.iterdir())
+
+    result = preflight(output_dir)
+
+    assert result["output_directory"] == {"status": "available", "reason": ""}
+    assert not output_dir.exists()
+    assert set(real_parent.iterdir()) == before
+
+
+def test_preflight_rejects_requested_output_path_symlink(tmp_path):
+    real_output = tmp_path / "real-output"
+    real_output.mkdir()
+    output_dir = tmp_path / "rendered"
+    output_dir.symlink_to(real_output, target_is_directory=True)
+
+    result = preflight(output_dir)
+
+    assert result["output_directory"] == {
+        "status": "unavailable",
+        "reason": "Output directory is not writable",
+    }
+    assert list(real_output.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", ["broken", "loop"])
+def test_preflight_rejects_unusable_symlink_ancestor_without_residue(tmp_path, kind):
+    linked_parent = tmp_path / "linked-parent"
+    if kind == "broken":
+        linked_parent.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+    else:
+        other = tmp_path / "other-link"
+        linked_parent.symlink_to(other, target_is_directory=True)
+        other.symlink_to(linked_parent, target_is_directory=True)
+    before = set(tmp_path.iterdir())
+
+    result = preflight(linked_parent / "nested" / "rendered")
+
+    assert result["output_directory"] == {
+        "status": "unavailable",
+        "reason": "Output directory is not writable",
+    }
+    assert set(tmp_path.iterdir()) == before
+
+
 def test_preflight_unwritable_probe_failure_leaves_no_residue(tmp_path, monkeypatch):
     monkeypatch.setattr(
         renderer.tempfile,
@@ -1100,6 +1150,46 @@ def test_write_render_manifest_refuses_to_hash_or_overwrite_itself(
             1080,
             png_status,
         )
+
+
+def test_write_render_manifest_ignores_caller_supplied_digest_keys(
+    tmp_path, normalized_document
+):
+    page = paginate(normalized_document, 1920, 1080)[0]
+    svg = tmp_path / "opportunity-visual-p01.svg"
+    html = tmp_path / "opportunity-visual-p01.html"
+    png = tmp_path / "opportunity-visual-p01.png"
+    svg.write_bytes(b"actual-svg")
+    html.write_bytes(b"actual-html")
+    png.write_bytes(b"actual-png")
+    artifacts = [
+        {
+            "page": 1,
+            "svg": svg,
+            "html": html,
+            "png": png,
+            "svg_sha256": "0" * 64,
+            "html_sha256": "1" * 64,
+            "png_sha256": "0" * 64,
+        }
+    ]
+
+    manifest_path = write_render_manifest(
+        normalized_document,
+        [page],
+        artifacts,
+        tmp_path,
+        1920,
+        1080,
+        {"status": "available", "reason": ""},
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["pages"][0]["sha256"] == {
+        "svg": hashlib.sha256(svg.read_bytes()).hexdigest(),
+        "html": hashlib.sha256(html.read_bytes()).hexdigest(),
+        "png": hashlib.sha256(png.read_bytes()).hexdigest(),
+    }
 
 
 def test_render_document_refuses_any_planned_artifact_without_writing_others(

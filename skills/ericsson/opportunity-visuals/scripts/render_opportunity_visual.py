@@ -108,6 +108,13 @@ class _OwnedPublication:
     cleanup_dir: Path | None = None
 
 
+@dataclass(frozen=True)
+class _VerifiedArtifactDigests:
+    svg: str
+    html: str
+    png: str | None
+
+
 def _number(value: float | int) -> str:
     number = float(value)
     if number.is_integer():
@@ -1005,18 +1012,33 @@ def _probe_chromium() -> dict[str, str]:
 
 def _probe_output_directory_checked(output_dir: Path) -> dict[str, str]:
     output_dir = Path(output_dir)
+    try:
+        requested_mode = output_dir.lstat().st_mode
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(requested_mode) or not stat.S_ISDIR(requested_mode):
+            return _capability("unavailable", "Output directory is not writable")
+
     missing_depth = 0
     probe_parent = output_dir
     while True:
         try:
-            mode = probe_parent.lstat().st_mode
+            mode = probe_parent.stat().st_mode
         except FileNotFoundError:
+            try:
+                probe_parent.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                # A broken symlink or a metadata race is not a usable ancestor.
+                return _capability("unavailable", "Output directory is not writable")
             if probe_parent.parent == probe_parent:
                 return _capability("unavailable", "Output directory is not writable")
             missing_depth += 1
             probe_parent = probe_parent.parent
             continue
-        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        if not stat.S_ISDIR(mode):
             return _capability("unavailable", "Output directory is not writable")
         break
 
@@ -1362,12 +1384,16 @@ def _manifest_payload(
     width: int,
     height: int,
     png_status: dict[str, str],
+    *,
+    _verified_digests: list[_VerifiedArtifactDigests] | None = None,
 ) -> dict[str, object]:
     document = _validate_structure(document, validate_render_values=True)
     width, height = _require_dimensions(width, height)
     output_dir = Path(output_dir)
     manifest_path = output_dir / "render-manifest.json"
     if len(pages) != len(artifacts):
+        raise RenderError("invalid_artifact", "Render artifacts do not match page plans")
+    if _verified_digests is not None and len(_verified_digests) != len(artifacts):
         raise RenderError("invalid_artifact", "Render artifacts do not match page plans")
     if (
         not isinstance(png_status, dict)
@@ -1383,16 +1409,16 @@ def _manifest_payload(
         raise RenderError("invalid_document", "Normalized semantics are invalid") from None
     selected_months = document["selected_months"]
     page_entries: list[dict[str, object]] = []
-    for page, artifact in zip(pages, artifacts, strict=True):
+    for index, (page, artifact) in enumerate(zip(pages, artifacts, strict=True)):
         if not isinstance(artifact, dict) or artifact.get("page") != page.number:
             raise RenderError("invalid_artifact", "Render artifacts do not match page plans")
         svg_path = Path(artifact["svg"])
         html_path = Path(artifact["html"])
-        svg_expected = artifact.get("svg_sha256")
-        html_expected = artifact.get("html_sha256")
         png_value = artifact.get("png")
         png_path = Path(png_value) if png_value is not None else None
-        png_expected = artifact.get("png_sha256")
+        verified = (
+            _verified_digests[index] if _verified_digests is not None else None
+        )
         page_entries.append(
             {
                 "number": page.number,
@@ -1406,18 +1432,18 @@ def _manifest_payload(
                 },
                 "sha256": {
                     "svg": (
-                        svg_expected
-                        if isinstance(svg_expected, str)
+                        verified.svg
+                        if verified is not None
                         else _sha256_file(svg_path, manifest_path)
                     ),
                     "html": (
-                        html_expected
-                        if isinstance(html_expected, str)
+                        verified.html
+                        if verified is not None
                         else _sha256_file(html_path, manifest_path)
                     ),
                     "png": (
-                        png_expected
-                        if isinstance(png_expected, str)
+                        verified.png
+                        if verified is not None
                         else _sha256_file(png_path, manifest_path)
                         if png_path is not None
                         else None
@@ -1459,9 +1485,18 @@ def _manifest_text(
     width: int,
     height: int,
     png_status: dict[str, str],
+    *,
+    _verified_digests: list[_VerifiedArtifactDigests] | None = None,
 ) -> str:
     payload = _manifest_payload(
-        document, pages, artifacts, output_dir, width, height, png_status
+        document,
+        pages,
+        artifacts,
+        output_dir,
+        width,
+        height,
+        png_status,
+        _verified_digests=_verified_digests,
     )
     try:
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -1624,30 +1659,27 @@ def render_document(
             pages, svg_paths, html_paths, strict=True
         )
     ]
+    svg_digests: list[str] = []
+    html_digests: list[str] = []
+    png_digests: list[str | None] = [None] * len(artifacts)
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
-        for artifact, svg_path, svg_text in zip(
-            artifacts, svg_paths, svg_texts, strict=True
-        ):
+        for svg_path, svg_text in zip(svg_paths, svg_texts, strict=True):
             publication = _publish_owned_text(svg_path, svg_text)
             publications.append(publication)
-            artifact["svg_owner"] = publication.owner_path
-            artifact["svg_sha256"] = publication.expected_sha256
-        for artifact, html_path, html_text in zip(
-            artifacts, html_paths, html_texts, strict=True
-        ):
+            svg_digests.append(publication.expected_sha256)
+        for html_path, html_text in zip(html_paths, html_texts, strict=True):
             publication = _publish_owned_text(html_path, html_text)
             publications.append(publication)
-            artifact["html_owner"] = publication.owner_path
-            artifact["html_sha256"] = publication.expected_sha256
+            html_digests.append(publication.expected_sha256)
 
         if png_mode == "never":
             png_status = {"status": "disabled", "reason": "PNG output disabled"}
         else:
             png_publications: list[_OwnedPublication] = []
             try:
-                for artifact, html_path, png_path in zip(
-                    artifacts, html_paths, png_paths, strict=True
+                for index, (artifact, html_path, png_path) in enumerate(
+                    zip(artifacts, html_paths, png_paths, strict=True)
                 ):
                     capture_dir: Path | None = None
                     capture_path: Path | None = None
@@ -1674,15 +1706,13 @@ def render_document(
                         raise
                     png_publications.append(publication)
                     artifact["png"] = png_path
-                    artifact["png_owner"] = publication.owner_path
-                    artifact["png_sha256"] = publication.expected_sha256
+                    png_digests[index] = publication.expected_sha256
             except RasterUnavailable:
                 for publication in reversed(png_publications):
                     _rollback_owned(publication)
                 for artifact in artifacts:
                     artifact["png"] = None
-                    artifact.pop("png_owner", None)
-                    artifact.pop("png_sha256", None)
+                png_digests = [None] * len(artifacts)
                 if png_mode == "required":
                     raise RenderError(
                         "png_unavailable",
@@ -1701,6 +1731,12 @@ def render_document(
                 png_status = {"status": "available", "reason": ""}
 
         _verify_publications(publications)
+        verified_digests = [
+            _VerifiedArtifactDigests(svg=svg, html=html, png=png)
+            for svg, html, png in zip(
+                svg_digests, html_digests, png_digests, strict=True
+            )
+        ]
         manifest_text = _manifest_text(
             document,
             pages,
@@ -1709,6 +1745,7 @@ def render_document(
             width,
             height,
             png_status,
+            _verified_digests=verified_digests,
         )
         publications.append(_publish_owned_text(manifest_path, manifest_text))
         _verify_publications(publications)

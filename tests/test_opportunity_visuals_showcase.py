@@ -37,6 +37,7 @@ REQUIRED_FIXTURES = (
     "expected-losses.json",
     "expected-all-progression.json",
     "expected-positive-progression.json",
+    "expected-run-summary.json",
 )
 REQUIRED_GOLDENS = (
     "wins-p01.svg",
@@ -214,6 +215,7 @@ def test_showcase_formats_normalize_equivalently_with_exact_provenance(tmp_path)
 def test_showcase_expected_normalization_is_independent_and_exact(tmp_path):
     document = prepare_source(SHOWCASE_CSV, tmp_path / "normalized")
     expected = load_json(FIXTURES / "expected-normalized.json")
+    expected_summary = load_json(FIXTURES / "expected-run-summary.json")
     actual_records = {record["id"]: record for record in document["records"]}
 
     assert expected["source_ids"] == [f"OV-{number:03d}" for number in range(1, 13)]
@@ -240,7 +242,7 @@ def test_showcase_expected_normalization_is_independent_and_exact(tmp_path):
     assert len(actual_records["OV-009"]["months"]) == 2
     assert [
         {"id": item["id"], "code": item["code"]} for item in document["warnings"]
-    ] == EXPECTED_WARNINGS
+    ] == expected_summary["warnings"] == EXPECTED_WARNINGS
 
 
 @pytest.mark.parametrize(
@@ -269,12 +271,21 @@ def test_showcase_view_end_to_end(tmp_path, view, expected_name, golden_name):
         prepared,
     )
     expected = load_json(FIXTURES / expected_name)
+    expected_summary = load_json(FIXTURES / "expected-run-summary.json")["views"][view]
     assert set(expected) == {"included_ids", "excluded", "transitions", "terminals"}
     assert project_view(prepared) == expected
     document = load_json(prepared / "normalized-data.json")
     assert [
         {"id": item["id"], "code": item["code"]} for item in document["warnings"]
-    ] == EXPECTED_WARNINGS
+    ] == load_json(FIXTURES / "expected-run-summary.json")["warnings"]
+    assert {
+        "included_rows": document["counts"]["included_rows"],
+        "excluded_rows": document["counts"]["excluded_rows"],
+        "warnings": document["counts"]["warnings"],
+    } == {
+        key: expected_summary[key]
+        for key in ("included_rows", "excluded_rows", "warnings")
+    }
 
     rendered = render_document(
         prepared / "normalized-data.json",
@@ -286,6 +297,12 @@ def test_showcase_view_end_to_end(tmp_path, view, expected_name, golden_name):
         GOLDEN / golden_name
     )
     assert rendered["png"]["status"] == "disabled"
+    manifest = load_json(Path(rendered["manifest"]))
+    assert len(manifest["pages"]) == expected_summary["pages"]
+    assert [
+        {"number": page["number"], "row_ids": page["row_ids"]}
+        for page in manifest["pages"]
+    ] == expected_summary["page_assignments"]
 
     html = Path(rendered["pages"][0]["html"]).read_text(encoding="utf-8")
     assert "https://" not in html.casefold()

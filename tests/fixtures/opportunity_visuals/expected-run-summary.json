@@ -1,0 +1,91 @@
+{
+  "views": {
+    "all-progression": {
+      "excluded_rows": 1,
+      "included_rows": 11,
+      "page_assignments": [
+        {
+          "number": 1,
+          "row_ids": [
+            "OV-003",
+            "OV-004",
+            "OV-002",
+            "OV-006",
+            "OV-001",
+            "OV-010",
+            "OV-009",
+            "OV-011",
+            "OV-008",
+            "OV-007",
+            "OV-012"
+          ]
+        }
+      ],
+      "pages": 1,
+      "warnings": 3
+    },
+    "losses": {
+      "excluded_rows": 10,
+      "included_rows": 2,
+      "page_assignments": [
+        {
+          "number": 1,
+          "row_ids": [
+            "OV-003",
+            "OV-009"
+          ]
+        }
+      ],
+      "pages": 1,
+      "warnings": 3
+    },
+    "positive-progression": {
+      "excluded_rows": 6,
+      "included_rows": 6,
+      "page_assignments": [
+        {
+          "number": 1,
+          "row_ids": [
+            "OV-002",
+            "OV-006",
+            "OV-001",
+            "OV-010",
+            "OV-008",
+            "OV-012"
+          ]
+        }
+      ],
+      "pages": 1,
+      "warnings": 3
+    },
+    "wins": {
+      "excluded_rows": 10,
+      "included_rows": 2,
+      "page_assignments": [
+        {
+          "number": 1,
+          "row_ids": [
+            "OV-001",
+            "OV-010"
+          ]
+        }
+      ],
+      "pages": 1,
+      "warnings": 3
+    }
+  },
+  "warnings": [
+    {
+      "code": "skipped_blank_months",
+      "id": "OV-006"
+    },
+    {
+      "code": "mixed_signals",
+      "id": "OV-007"
+    },
+    {
+      "code": "unknown_transition",
+      "id": "OV-011"
+    }
+  ]
+}

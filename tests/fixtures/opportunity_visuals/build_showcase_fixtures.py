@@ -292,6 +292,77 @@ EXPECTED_VIEWS = {
     },
 }
 
+EXPECTED_RUN_SUMMARY = {
+    "warnings": [
+        {"id": "OV-006", "code": "skipped_blank_months"},
+        {"id": "OV-007", "code": "mixed_signals"},
+        {"id": "OV-011", "code": "unknown_transition"},
+    ],
+    "views": {
+        "wins": {
+            "included_rows": 2,
+            "excluded_rows": 10,
+            "warnings": 3,
+            "pages": 1,
+            "page_assignments": [
+                {"number": 1, "row_ids": ["OV-001", "OV-010"]}
+            ],
+        },
+        "losses": {
+            "included_rows": 2,
+            "excluded_rows": 10,
+            "warnings": 3,
+            "pages": 1,
+            "page_assignments": [
+                {"number": 1, "row_ids": ["OV-003", "OV-009"]}
+            ],
+        },
+        "all-progression": {
+            "included_rows": 11,
+            "excluded_rows": 1,
+            "warnings": 3,
+            "pages": 1,
+            "page_assignments": [
+                {
+                    "number": 1,
+                    "row_ids": [
+                        "OV-003",
+                        "OV-004",
+                        "OV-002",
+                        "OV-006",
+                        "OV-001",
+                        "OV-010",
+                        "OV-009",
+                        "OV-011",
+                        "OV-008",
+                        "OV-007",
+                        "OV-012",
+                    ],
+                }
+            ],
+        },
+        "positive-progression": {
+            "included_rows": 6,
+            "excluded_rows": 6,
+            "warnings": 3,
+            "pages": 1,
+            "page_assignments": [
+                {
+                    "number": 1,
+                    "row_ids": [
+                        "OV-002",
+                        "OV-006",
+                        "OV-001",
+                        "OV-010",
+                        "OV-008",
+                        "OV-012",
+                    ],
+                }
+            ],
+        },
+    },
+}
+
 
 def _rows() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
@@ -387,6 +458,7 @@ def build(output_dir: Path) -> None:
     )
     _write_json(output_dir / "stage-semantics.json", SEMANTICS)
     _write_json(output_dir / "expected-normalized.json", EXPECTED_NORMALIZED)
+    _write_json(output_dir / "expected-run-summary.json", EXPECTED_RUN_SUMMARY)
     for view, expected in EXPECTED_VIEWS.items():
         _write_json(output_dir / f"expected-{view}.json", expected)
 

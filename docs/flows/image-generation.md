@@ -40,12 +40,16 @@ missing PNG support is an explicit fallback, not failure of SVG/HTML. See
 
 ## Failure, safety, and privacy behavior
 
-The port does not accept generated or user-authored HTML. It escapes input into
-reviewed SVG/HTML, embeds no remote resources, and denies external requests
-during local PNG capture. Source files are read-only. Ambiguous mappings or
-stage semantics require clarification one question at a time; exclusions and
-warnings remain auditable. Confidential outputs go only to a user-approved
-local destination, and repository screenshots must use synthetic data.
+The port does not accept generated or user-authored HTML. Its local helpers
+escape input into reviewed SVG/HTML, embed no remote resources, deny external
+requests during local PNG capture, and make no model/network calls. Source
+files are read-only. The model-backed coworker may receive source metadata and
+minimal stage labels and diagnostics needed for the interview; users must not
+paste confidential rows unless their configured model and privacy policy
+permit it. Ambiguous mappings or stage semantics require clarification one
+question at a time; exclusions and warnings remain auditable. Confidential
+outputs go only to a user-approved local destination, and repository
+screenshots must use synthetic data.
 
 ## Hermes port status and target shape
 
@@ -65,8 +69,9 @@ records why the intent port deliberately differs from the Langflow graph.
 ## How Hermes should explain and configure it
 
 Inspect the request and source metadata, ask only for missing decisions one at
-a time, then play back the source, view, range, semantics, filters, formats,
-dimensions, and destination before writing. Explain that rendering is local,
-deterministic, and no-key. Validate with synthetic data; review labels,
-clipping, colors, blank months, terminal cutoffs, warnings, hashes, and any PNG
-fallback against `render-manifest.json`.
+a time, run read-only semantics analysis, resolve inclusion-affecting unknowns,
+and rerun analysis. Then play back the source, view, range, semantics, filters,
+formats, dimensions, and destination before writing. Explain the distinction
+between local helpers and model-backed chat. Validate with synthetic data;
+review labels, clipping, colors, blank months, terminal cutoffs, warnings,
+hashes, and any PNG fallback against `render-manifest.json`.

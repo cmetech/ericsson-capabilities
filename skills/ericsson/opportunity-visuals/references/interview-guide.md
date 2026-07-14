@@ -21,15 +21,21 @@ Ask for missing decisions in this exact order:
    positive transitions needed by this dataset.
 6. **Filters:** Accept optional Area, Sub-area, TCV, probability, or opportunity
    filters.
-7. **Output:** Default to 1920×1080 SVG, HTML, and PNG pages. Ask only when the
+7. **Analysis:** Run the read-only `analyze` command with the proposed choices.
+   Resolve each inclusion-affecting unknown one question at a time, update the
+   semantics, and rerun analysis before preparing artifacts.
+8. **Output:** Default to 1920×1080 SVG, HTML, and PNG pages. Ask only when the
    user needs a different size, format, or destination.
-8. **Confidentiality:** If the data appears sensitive, state that parsing and
-   rendering remain local and confirm the output destination before writing.
+9. **Confidentiality:** If the data appears sensitive, state that file helpers
+   remain local, while minimal stage labels and diagnostics used for the
+   interview may enter the model-backed chat. Confirm the output destination
+   before writing. Never request pasted confidential rows unless the configured
+   model and privacy policy permit them.
 
-Inspection can reveal another missing decision. Ask the next unresolved item
-in this order, then rerun inspection as needed. When multiple XLSX sheets,
-ambiguous columns or months, or unknown transitions affect inclusion, resolve
-only one ambiguity per question.
+Inspection or analysis can reveal another missing decision. Ask the next
+unresolved item in this order, then rerun the applicable read-only command.
+When multiple XLSX sheets, ambiguous columns or months, or unknown transitions
+affect inclusion, resolve only one ambiguity per question.
 
 ## Question patterns
 
@@ -39,12 +45,19 @@ only one ambiguity per question.
 - Range: “I found monthly stages from March through May. Use all three months?”
 - Mapping: “Should `Deal Value` map to TCV?”
 - Semantics: “Should Deferred be a negative terminal or a non-terminal stage?”
+- Direction: “For progression, is Discovery → Deferred forward, backward, or neutral?”
 - Filters: “Should I limit this to any Area, Sub-area, TCV, probability, or
   opportunity?”
 - Output: “Use 1920×1080 SVG, HTML, and PNG pages in the default timestamped
   output directory?”
-- Confidentiality: “Rendering stays local. May I write the artifacts to this
+- Confidentiality: “The file helpers stay local; these minimal stage labels may
+  enter this chat. May I use them for the interview and write artifacts to this
   destination?”
+
+When an unknown stage has more than one unresolved property, separate them.
+First confirm whether it is terminal. On the next turn ask whether the exact
+transition is forward, backward, or neutral. Update the confirmed stage path or
+edge, rerun `analyze`, and only then play back the execution summary.
 
 ## Playback and confirmation
 
@@ -53,6 +66,9 @@ the source and selected rows, view, range, stage rules, filters, output formats,
 dimensions, and destination. Ask the user to confirm. Do not normalize into a
 run directory or render until confirmation. If the user corrects an item,
 return to that decision, update the playback, and ask for confirmation again.
+The analyze step must finish before preparing artifacts. A mixed transition is
+reported for review, but an inclusion-affecting unknown must be resolved and
+analysis rerun before playback and confirmation.
 
 ## Positive triggers
 

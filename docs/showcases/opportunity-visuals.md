@@ -8,20 +8,26 @@ confirmation before writing.
 
 This is a deterministic data renderer, not a generative image model. It keeps
 opportunity names, values, stages, blank months, and row selection auditable.
-It never sends sales data to `image_generate`, a hosted model, web search, or a
-remote renderer. Generic image generation is a non-trigger and belongs with
-the ordinary image capability.
+The local inspect, analyze, prepare, and render helpers make no model, network,
+web-search, `image_generate`, or remote-renderer calls. The coworker that
+orchestrates them is model-backed: source metadata may enter chat, as may
+minimal stage labels and diagnostics selected for the interview. Generic image
+generation is a non-trigger and belongs with the ordinary image capability.
 
 ## Synthetic showcase data
 
-Run this showcase from the repository root after `./bootstrap.sh` has created
-the supported Python 3.11+ environment at `.venv`. Use only the committed
-synthetic pack:
+Run this showcase from the repository root with Python 3.11+ already selected.
+`bootstrap.sh` does not enforce the Python version; it uses `python3`. Check
+that interpreter before the script creates `.venv`:
 
-The commands below use the POSIX venv executable. On Windows, use the same
-arguments with `.venv\Scripts\python.exe`; if `bootstrap.sh` is unavailable,
-create a Python 3.11+ venv and install the repository development requirements
-first.
+```bash
+python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+./bootstrap.sh
+```
+
+The main command blocks below are POSIX shell commands. Native Windows users
+should use the complete PowerShell path later in this guide. Use only the
+committed synthetic pack:
 
 - CSV: `tests/fixtures/opportunity_visuals/showcase-opportunities.csv`
 - JSON: `tests/fixtures/opportunity_visuals/showcase-opportunities.json`
@@ -29,6 +35,8 @@ first.
   (worksheet `Pipeline`)
 - stage rules: `tests/fixtures/opportunity_visuals/stage-semantics.json`
 - independent expected results: `tests/fixtures/opportunity_visuals/expected-*.json`
+- independent run counts, warnings, and page assignments:
+  `tests/fixtures/opportunity_visuals/expected-run-summary.json`
 - reviewed SVG references: `tests/golden/opportunity_visuals/*.svg`
 
 The CSV, JSON, and XLSX files contain the same twelve invented records. They
@@ -101,37 +109,54 @@ range, semantics, and destination into one question.
 
 ### 3. Unknown stage
 
-> **Coworker:** Inspection found the transition Discovery → Deferred. Should
-> Deferred be a negative terminal or a non-terminal stage?
+> **Coworker:** Read-only analysis found Discovery → Deferred and reports that
+> its unknown direction affects positive-progression inclusion. Should Deferred
+> be a negative terminal or a non-terminal stage?
 >
 > **User:** Non-terminal.
 >
-> **Coworker:** I’ll keep Deferred non-terminal and report any transition whose
-> direction remains unknown. Proceed with positive progression?
+> **Coworker:** For progression, is Discovery → Deferred forward, backward, or
+> neutral?
+>
+> **User:** Backward.
+>
+> **Coworker:** I updated the confirmed stage path with Deferred before
+> Discovery and reran `analyze`; no unresolved transitions remain. I’ll create
+> positive progression for March through June with Deferred non-terminal and
+> Discovery → Deferred backward, writing the confirmed formats to the approved
+> destination. Proceed?
 
-The coworker never guesses an unknown stage order. If the transition does not
-affect inclusion, it may render it neutral and retain an
-`unknown_transition` warning.
+Terminal status and movement direction are separate questions on separate
+turns. The coworker never guesses an unknown stage order and does not prepare
+positive-progression artifacts while analysis still reports an
+inclusion-affecting unknown.
 
 ### 4. Confidential destination
 
 > **User:** This pipeline is confidential. Create the losses visual.
 >
-> **Coworker:** Parsing and rendering stay local; no opportunity data is sent
-> to a hosted model or remote renderer. May I write the artifacts to your
-> private local directory `/secure/team-a/losses-run`?
+> **Coworker:** The file helpers read and render locally without model or
+> network calls. Minimal source metadata and stage labels used to resolve
+> semantics may enter this model-backed chat. Do not paste confidential rows
+> unless your configured model and privacy policy permit it. May I use only the
+> helper's minimal diagnostics here and write artifacts to your private local
+> directory `/secure/team-a/losses-run`?
 
 The user must approve the local destination before confidential artifacts are
 written. A shared or repository path is not assumed.
 
 ### 5. PNG fallback
 
+> **User:** Create SVG and HTML, plus PNG if available.
+>
 > **Coworker:** SVG and HTML were created successfully. PNG is unavailable
 > because local Playwright or Chromium is missing. The manifest records this
 > fallback; would you like the user-approved setup commands for local PNG?
 
 Missing PNG support does not turn the SVG/HTML run into a failure. Playwright
-and Chromium are not installed automatically.
+and Chromium are not installed automatically. If the user requires PNG, use
+`--png required` and report `png_unavailable`; do not silently weaken required
+output to best-effort `auto`.
 
 ### 6. Generic-image non-trigger
 
@@ -150,6 +175,23 @@ First inspect the CSV without creating output artifacts:
 .venv/bin/python skills/ericsson/opportunity-visuals/scripts/prepare_opportunities.py inspect \
   tests/fixtures/opportunity_visuals/showcase-opportunities.csv
 ```
+
+Then run the read-only semantics analysis for the proposed view. It has no
+`--output-dir` and creates no artifacts:
+
+```bash
+.venv/bin/python skills/ericsson/opportunity-visuals/scripts/prepare_opportunities.py analyze \
+  tests/fixtures/opportunity_visuals/showcase-opportunities.csv \
+  --view positive-progression \
+  --semantics tests/fixtures/opportunity_visuals/stage-semantics.json
+```
+
+This test fixture intentionally reports Discovery → Deferred as unresolved so
+the regression pack can prove `unknown_transition` behavior. A real coworker
+interview must resolve an inclusion-affecting transition, update the confirmed
+semantics, rerun analyze, and receive confirmation before `prepare` writes.
+The commands below reproduce the committed regression oracle as-is; they are
+not an example of bypassing that interview rule for real data.
 
 Choose a fresh output root. Preparation refuses to reuse a non-empty run
 directory.
@@ -207,8 +249,10 @@ Render deterministic SVG/HTML without requiring Playwright:
   --png never
 ```
 
-Expected counts come from the committed independent expected JSON, while the
-three warnings come from `expected-normalized.json` and the showcase contract:
+Expected counts, the three exact warning ID/code entries, and page assignments
+come from the literal, builder-owned
+`tests/fixtures/opportunity_visuals/expected-run-summary.json`. The existing
+per-view expected JSON files retain their exact four-key selection contract:
 
 | View | Included | Excluded | Warnings | Expected pages at 1920×1080 |
 |---|---:|---:|---:|---:|
@@ -254,6 +298,39 @@ The four JSON artifacts have separate jobs:
 SVG is the canonical output. HTML is a self-contained local preview with no
 scripts or remote resources. PNG is an optional local rasterization of that
 HTML, not a generated interpretation of the data.
+
+## Native Windows PowerShell
+
+Select Python 3.11+ before creating the venv. These are native PowerShell
+commands; they do not use POSIX continuations or environment syntax:
+
+```powershell
+$SystemPython = (Get-Command python -ErrorAction Stop).Source
+& $SystemPython -c "import sys; assert sys.version_info >= (3, 11), sys.version"
+& $SystemPython -m venv .venv
+$Python = (Resolve-Path ".venv\Scripts\python.exe").Path
+& $Python -m pip install -r requirements-dev.txt
+
+$Prepare = "skills/ericsson/opportunity-visuals/scripts/prepare_opportunities.py"
+$Render = "skills/ericsson/opportunity-visuals/scripts/render_opportunity_visual.py"
+$Source = "tests/fixtures/opportunity_visuals/showcase-opportunities.csv"
+$Semantics = "tests/fixtures/opportunity_visuals/stage-semantics.json"
+$RunRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("opportunity-visuals-" + [guid]::NewGuid().ToString("N"))
+
+& $Python $Prepare inspect $Source
+& $Python $Prepare analyze $Source --view positive-progression --semantics $Semantics
+
+$Views = @("wins", "losses", "all-progression", "positive-progression")
+foreach ($View in $Views) {
+    $Output = Join-Path $RunRoot $View
+    & $Python $Prepare prepare $Source --view $View --semantics $Semantics --output-dir $Output
+    & $Python $Render (Join-Path $Output "normalized-data.json") --output-dir $Output --width 1920 --height 1080 --png never
+}
+```
+
+For a single view, set `$Views = @("wins")`. The analysis command intentionally
+has no output directory. As in the POSIX regression commands, resolve any
+inclusion-affecting unknown before using the preparation loop with real data.
 
 ## Real-Playwright PNG demonstration
 
@@ -309,7 +386,10 @@ Never commit screenshots, PNGs, HTML, SVG, manifests, or transcripts made from
 real sales, customer, account, opportunity, or financial data to this
 repository. Repository demonstrations must use the committed synthetic
 fixtures. Production inputs and outputs stay in a user-approved local
-destination, and no sales data goes to a hosted model.
+destination. The local helpers do not call a model or network service, but the
+model-backed coworker may receive source metadata and minimal stage labels and
+diagnostics used for the interview. Do not paste confidential rows into chat unless
+the configured model and organizational privacy policy permit it.
 
 For dependency and failure guidance, see the [configuration
 guide](../configuration.md#opportunity-visuals). For the port relationship to

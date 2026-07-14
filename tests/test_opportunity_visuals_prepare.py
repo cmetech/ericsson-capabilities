@@ -24,7 +24,7 @@ from opportunity_data import (  # noqa: E402
     select_records,
 )
 import prepare_opportunities  # noqa: E402
-from prepare_opportunities import prepare  # noqa: E402
+from prepare_opportunities import analyze, prepare  # noqa: E402
 
 
 HEADERS = [
@@ -990,3 +990,231 @@ def test_prepare_cli_rejects_symlink_destination_without_touching_target(
     assert output_link.is_symlink()
     assert list(target_dir.iterdir()) == []
     assert str(output_link) not in result.stdout
+
+
+def _write_showcase_csv(path: Path) -> None:
+    rows = _showcase_rows()
+    headers = list(rows[0])
+    path.write_text(
+        ",".join(headers)
+        + "\n"
+        + "\n".join(
+            ",".join(str(row[header]) for header in headers) for row in rows
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_analyze_groups_safe_transitions_and_marks_positive_inclusion(
+    tmp_path, semantics
+):
+    source = tmp_path / "pipeline.csv"
+    _write_showcase_csv(source)
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    before_bytes = source.read_bytes()
+    before_names = sorted(path.name for path in tmp_path.iterdir())
+
+    positive = analyze(source, "positive-progression", semantics_path)
+    all_progression = analyze(source, "all-progression", semantics_path)
+
+    assert positive["unresolved_transitions"] == [
+        {
+            "from_stage": "Discovery",
+            "to_stage": "Deferred",
+            "code": "unknown_transition",
+            "occurrences": 1,
+            "affects_inclusion": True,
+        }
+    ]
+    assert all_progression["unresolved_transitions"] == [
+        {
+            "from_stage": "Discovery",
+            "to_stage": "Deferred",
+            "code": "unknown_transition",
+            "occurrences": 1,
+            "affects_inclusion": False,
+        }
+    ]
+    assert positive["mixed_transitions"] == [
+        {
+            "from_stage": "Solution",
+            "to_stage": "Proposal",
+            "code": "mixed_signals",
+            "occurrences": 1,
+            "affects_inclusion": False,
+        }
+    ]
+    assert positive["source"] == {
+        "basename": "pipeline.csv",
+        "format": "csv",
+        "json_key": None,
+        "sha256": positive["source"]["sha256"],
+        "sheet": None,
+    }
+    assert len(positive["source"]["sha256"]) == 64
+    assert positive["counts"] == {
+        "source_rows": 12,
+        "normalized_rows": 11,
+        "filtered_rows": 11,
+        "excluded_rows": 1,
+        "warnings": 3,
+        "unresolved_transition_groups": 1,
+        "unresolved_transition_occurrences": 1,
+        "mixed_transition_groups": 1,
+        "mixed_transition_occurrences": 1,
+    }
+    serialized = json.dumps(positive)
+    assert "Kite Discovery" not in serialized
+    assert "OV-011" not in serialized
+    assert source.read_bytes() == before_bytes
+    assert sorted(path.name for path in tmp_path.iterdir()) == before_names
+
+
+def test_analyze_rerun_resolves_unknown_with_confirmed_direction(tmp_path, semantics):
+    source = tmp_path / "pipeline.csv"
+    _write_showcase_csv(source)
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    assert analyze(source, "positive-progression", semantics_path)[
+        "unresolved_transitions"
+    ]
+
+    resolved = dict(semantics)
+    resolved["stage_paths"] = [*semantics["stage_paths"], ["Deferred", "Discovery"]]
+    semantics_path.write_text(json.dumps(resolved), encoding="utf-8")
+
+    report = analyze(source, "positive-progression", semantics_path)
+    assert report["unresolved_transitions"] == []
+    assert report["counts"]["unresolved_transition_occurrences"] == 0
+
+
+def test_analyze_uses_previous_populated_stage_groups_and_filters(
+    tmp_path, semantics
+):
+    source = tmp_path / "pipeline.csv"
+    source.write_text(
+        "ID,Area,Sub-area,Opportunity Name,TCV,Probability,Mar '26,Apr '26,May '26\n"
+        "OV-A,North,One,Hidden Name A,Large,High,Alpha,,Beta\n"
+        "OV-B,South,Two,Hidden Name B,Medium,Medium,Alpha,,Beta\n",
+        encoding="utf-8",
+    )
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    filters_path = tmp_path / "filters.json"
+    filters_path.write_text(json.dumps({"areas": ["north"]}), encoding="utf-8")
+
+    grouped = analyze(source, "positive-progression", semantics_path)
+    filtered = analyze(
+        source,
+        "positive-progression",
+        semantics_path,
+        filters_path=filters_path,
+    )
+
+    assert grouped["unresolved_transitions"] == [
+        {
+            "from_stage": "Alpha",
+            "to_stage": "Beta",
+            "code": "unknown_transition",
+            "occurrences": 2,
+            "affects_inclusion": True,
+        }
+    ]
+    assert filtered["unresolved_transitions"][0]["occurrences"] == 1
+    assert filtered["counts"]["filtered_rows"] == 1
+    assert filtered["filter_keys"] == ["areas"]
+    assert "Hidden Name" not in json.dumps(filtered)
+
+
+def test_analyze_cli_prints_one_json_object_without_artifacts(tmp_path, semantics):
+    source = tmp_path / "pipeline.csv"
+    _write_showcase_csv(source)
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+    before = sorted(path.name for path in tmp_path.iterdir())
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "prepare_opportunities.py"),
+            "analyze",
+            str(source),
+            "--view",
+            "positive-progression",
+            "--semantics",
+            str(semantics_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["unresolved_transitions"][0]["from_stage"] == "Discovery"
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+
+
+def test_analyze_cli_returns_safe_structured_error_without_traceback(
+    tmp_path, semantics
+):
+    semantics_path = tmp_path / "semantics.json"
+    semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "prepare_opportunities.py"),
+            "analyze",
+            str(tmp_path / "missing.csv"),
+            "--view",
+            "positive-progression",
+            "--semantics",
+            str(semantics_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout)["error"] == {
+        "code": "source_not_found",
+        "message": "Source file not found",
+        "details": {"source": "missing.csv"},
+    }
+
+
+def test_analyze_cli_returns_structured_json_for_invalid_arguments(tmp_path):
+    source = tmp_path / "pipeline.csv"
+    source.write_text("Area\nNorth\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "prepare_opportunities.py"),
+            "analyze",
+            str(source),
+            "--view",
+            "positive-progression",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert result.stdout.count("\n") == 1
+    assert json.loads(result.stdout)["error"] == {
+        "code": "invalid_arguments",
+        "message": "Invalid command arguments",
+        "details": {},
+    }

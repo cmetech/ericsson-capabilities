@@ -12,8 +12,8 @@ metadata:
 # Opportunity Visuals
 
 Turn opportunity pipeline history into exact Ericsson-branded progression
-tables. This skill is local and deterministic; it is not a general image
-generator.
+tables. Its file helpers are local and deterministic; it is not a general
+image generator.
 
 ## When to Use
 
@@ -37,13 +37,18 @@ Chromium. Missing PNG support does not block SVG/HTML.
    `references/interview-guide.md`.
 3. Read `references/data-contract.md`; confirm ambiguous columns, months, and
    stage semantics without changing display labels.
-4. Play back source, view, range, rules, filters, formats, and destination.
+4. Run `scripts/prepare_opportunities.py inspect` as needed, then run
+   `scripts/prepare_opportunities.py analyze` with the proposed view, mapping,
+   months, semantics, and filters. Analysis is read-only and creates no output
+   artifacts.
+5. Ask about each inclusion-affecting unresolved transition one question at a
+   time. Update the confirmed semantics and rerun analyze until resolved.
+6. Play back source, view, range, rules, filters, formats, and destination.
    Wait for the user to confirm before writing.
-5. Run `scripts/prepare_opportunities.py inspect` as needed, then
-   `scripts/prepare_opportunities.py prepare` into a new timestamped output
-   directory.
-6. Run `scripts/render_opportunity_visual.py` using `normalized-data.json`.
-7. Read `exclusions.json` and `render-manifest.json`; report included,
+7. Run `scripts/prepare_opportunities.py prepare` into a new timestamped output
+   directory, then run `scripts/render_opportunity_visual.py` using
+   `normalized-data.json`.
+8. Read `exclusions.json` and `render-manifest.json`; report included,
    excluded, warning, page, and PNG fallback counts with artifact paths.
 
 ## Quick Reference
@@ -51,16 +56,20 @@ Chromium. Missing PNG support does not block SVG/HTML.
 - Views: wins, losses, all-stage progression, positive progression.
 - Default size: 1920×1080.
 - Canonical output: SVG; preview: HTML; optional raster: PNG.
-- No API key and no remote renderer.
+- No helper-specific API key and no remote renderer in the file helpers.
 - Source files are read-only and blank months remain blank.
 
 ## Procedure
 
 Use the exact CLI forms documented in `references/data-contract.md`. If
-inspection reports more than one sheet, ambiguous columns/months, or unknown
-transitions that affect inclusion, ask one resolving question and rerun. For
-confidential data, say rendering stays local and confirm the output directory.
-Always play back the execution summary before writing. Never overwrite an
+inspection reports more than one sheet or ambiguous columns/months, ask one
+resolving question and rerun. Use analyze to find unknown transitions before
+preparing artifacts; confirm terminal status and direction separately, then
+rerun analysis. For confidential data, explain that file helpers remain local
+but minimal metadata and stage labels used for the interview may enter the
+model-backed chat. Do not ask the user to paste confidential rows unless their
+configured model and privacy policy permit it. Confirm the output directory,
+then play back the execution summary before writing. Never overwrite an
 existing run directory by default.
 
 ## Pitfalls

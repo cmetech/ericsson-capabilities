@@ -174,6 +174,170 @@ def _write_artifacts(
         ) from None
 
 
+def _selected_formula_errors(
+    metadata: dict[str, object],
+    mapping: dict[str, object],
+    selected_mapping: dict[str, object],
+) -> list[dict[str, object]]:
+    selected_headers = {
+        str(mapping[field])
+        for field in ("area", "sub_area", "opportunity_name", "tcv", "probability")
+    }
+    for month in selected_mapping["months"]:
+        selected_headers.add(str(month["stage"]))
+        if "probability" in month:
+            selected_headers.add(str(month["probability"]))
+    return [
+        item
+        for item in metadata.get("uncached_formulas", [])
+        if item["header"] in selected_headers
+    ]
+
+
+def _group_transitions(
+    records: list[dict[str, object]],
+    view: str,
+    classification: str,
+    code: str,
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], dict[str, object]] = {}
+    for record in records:
+        has_positive = any(
+            month["classification"] in {"positive", "won"}
+            for month in record["months"]
+        )
+        previous_stage: str | None = None
+        for month in record["months"]:
+            stage = str(month["stage"])
+            if not stage.strip():
+                continue
+            if previous_stage is not None and month["classification"] == classification:
+                key = (previous_stage, stage)
+                entry = grouped.setdefault(
+                    key,
+                    {
+                        "from_stage": previous_stage,
+                        "to_stage": stage,
+                        "code": code,
+                        "occurrences": 0,
+                        "affects_inclusion": False,
+                    },
+                )
+                entry["occurrences"] = int(entry["occurrences"]) + 1
+                if (
+                    classification == "unknown"
+                    and view == "positive-progression"
+                    and not has_positive
+                ):
+                    entry["affects_inclusion"] = True
+            previous_stage = stage
+    return [
+        grouped[key]
+        for key in sorted(
+            grouped,
+            key=lambda pair: (
+                pair[0].casefold(),
+                pair[0],
+                pair[1].casefold(),
+                pair[1],
+            ),
+        )
+    ]
+
+
+def analyze(
+    source: Path,
+    view: str,
+    semantics_path: Path,
+    mapping_path: Path | None = None,
+    sheet: str | None = None,
+    json_key: str | None = None,
+    months: list[str] | None = None,
+    filters_path: Path | None = None,
+) -> dict[str, object]:
+    """Analyze transition semantics without writing artifacts or exposing rows."""
+
+    source = Path(source)
+    semantics_path = Path(semantics_path)
+    semantics = validate_semantics(_load_json_object(semantics_path, "semantics"))
+    filters = _load_json_object(filters_path, "filters") if filters_path else {}
+    rows, metadata = load_source(source, sheet, json_key)
+    explicit_mapping = (
+        _load_json_object(mapping_path, "mapping") if mapping_path is not None else None
+    )
+    mapping = resolve_mapping(list(rows[0]), explicit_mapping)
+    selected_mapping, selected_months, first_selected_index = _selected_mapping(
+        mapping, months
+    )
+    intersecting_formulas = _selected_formula_errors(
+        metadata, mapping, selected_mapping
+    )
+    if intersecting_formulas:
+        raise DataContractError(
+            "formula_cache_missing",
+            "A selected formula cell has no cached value",
+            {"cells": intersecting_formulas},
+        )
+
+    range_exclusions = _terminal_before_range_exclusions(
+        rows, list(mapping["months"]), first_selected_index, semantics
+    )
+    records, invalid_exclusions = normalize_rows(rows, selected_mapping, semantics)
+    range_excluded_rows = {
+        (item["id"], item["source_row"]) for item in range_exclusions
+    }
+    records = [
+        record
+        for record in records
+        if (record["id"], record["source_row"]) not in range_excluded_rows
+    ]
+    invalid_exclusions = [
+        item
+        for item in invalid_exclusions
+        if (item["id"], item["source_row"]) not in range_excluded_rows
+    ]
+    filtered_records, filter_exclusions = apply_filters(records, filters)
+    select_records(filtered_records, view)
+    unresolved = _group_transitions(
+        filtered_records, view, "unknown", "unknown_transition"
+    )
+    mixed = _group_transitions(filtered_records, view, "mixed", "mixed_signals")
+    warning_count = sum(len(record["warnings"]) for record in filtered_records)
+
+    return {
+        "source": {
+            "basename": metadata["source"],
+            "sha256": metadata["sha256"],
+            "format": metadata["format"],
+            "sheet": metadata.get("sheet"),
+            "json_key": metadata.get("json_key"),
+        },
+        "view": view,
+        "mapping": selected_mapping,
+        "selected_months": selected_months,
+        "filter_keys": sorted(filters),
+        "counts": {
+            "source_rows": len(rows),
+            "normalized_rows": len(records),
+            "filtered_rows": len(filtered_records),
+            "excluded_rows": len(range_exclusions)
+            + len(invalid_exclusions)
+            + len(filter_exclusions),
+            "warnings": warning_count,
+            "unresolved_transition_groups": len(unresolved),
+            "unresolved_transition_occurrences": sum(
+                int(item["occurrences"]) for item in unresolved
+            ),
+            "mixed_transition_groups": len(mixed),
+            "mixed_transition_occurrences": sum(
+                int(item["occurrences"]) for item in mixed
+            ),
+        },
+        "unresolved_transitions": unresolved,
+        "mixed_transitions": mixed,
+    }
+
+
 def prepare(
     source: Path,
     view: str,
@@ -204,19 +368,9 @@ def prepare(
         mapping, months
     )
 
-    selected_headers = {
-        str(mapping[field])
-        for field in ("area", "sub_area", "opportunity_name", "tcv", "probability")
-    }
-    for month in selected_mapping["months"]:
-        selected_headers.add(str(month["stage"]))
-        if "probability" in month:
-            selected_headers.add(str(month["probability"]))
-    intersecting_formulas = [
-        item
-        for item in metadata.get("uncached_formulas", [])
-        if item["header"] in selected_headers
-    ]
+    intersecting_formulas = _selected_formula_errors(
+        metadata, mapping, selected_mapping
+    )
     if intersecting_formulas:
         raise DataContractError(
             "formula_cache_missing",
@@ -314,13 +468,27 @@ def prepare(
     }
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise DataContractError("invalid_arguments", "Invalid command arguments")
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="prepare_opportunities.py")
+    parser = _SafeArgumentParser(prog="prepare_opportunities.py")
     subcommands = parser.add_subparsers(dest="command", required=True)
     inspect_parser = subcommands.add_parser("inspect")
     inspect_parser.add_argument("source", type=Path)
     inspect_parser.add_argument("--sheet")
     inspect_parser.add_argument("--json-key")
+    analyze_parser = subcommands.add_parser("analyze")
+    analyze_parser.add_argument("source", type=Path)
+    analyze_parser.add_argument("--view", required=True)
+    analyze_parser.add_argument("--semantics", required=True, type=Path)
+    analyze_parser.add_argument("--mapping", type=Path)
+    analyze_parser.add_argument("--sheet")
+    analyze_parser.add_argument("--json-key")
+    analyze_parser.add_argument("--months", action="append")
+    analyze_parser.add_argument("--filters", type=Path)
     prepare_parser = subcommands.add_parser("prepare")
     prepare_parser.add_argument("source", type=Path)
     prepare_parser.add_argument("--view", required=True)
@@ -335,10 +503,23 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
     try:
+        args = _parser().parse_args(argv)
         if args.command == "inspect":
             report = inspect_source(args.source, args.sheet, args.json_key)
+            print(json.dumps({"ok": True, **report}, separators=(",", ":")))
+            return 0
+        if args.command == "analyze":
+            report = analyze(
+                args.source,
+                args.view,
+                args.semantics,
+                mapping_path=args.mapping,
+                sheet=args.sheet,
+                json_key=args.json_key,
+                months=args.months,
+                filters_path=args.filters,
+            )
             print(json.dumps({"ok": True, **report}, separators=(",", ":")))
             return 0
         if args.command == "prepare":

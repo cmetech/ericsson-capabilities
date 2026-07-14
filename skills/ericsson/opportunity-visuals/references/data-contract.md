@@ -1,8 +1,10 @@
 # Data Contract
 
-The preparer treats source files as read-only data. Parsing and rendering are
-local and deterministic; neither helper calls a model, `image_generate`, web
-search, or a remote renderer.
+The inspect, analyze, prepare, and render helpers treat source files as
+read-only data. They are local and deterministic; none calls a model,
+`image_generate`, web search, the network, or a remote renderer. The coworker
+that invokes them is model-backed: helper stdout selected for the interview,
+including source metadata and minimal stage labels, may enter chat.
 
 ## Command-line interface
 
@@ -10,6 +12,9 @@ Use these forms exactly:
 
 ```text
 python3 scripts/prepare_opportunities.py inspect SOURCE [--sheet SHEET] [--json-key KEY]
+python3 scripts/prepare_opportunities.py analyze SOURCE --view VIEW \
+  --semantics SEMANTICS.json [--mapping MAPPING.json] \
+  [--sheet SHEET] [--json-key KEY] [--months LABEL] [--filters FILTERS.json]
 python3 scripts/prepare_opportunities.py prepare SOURCE --view VIEW \
   --semantics SEMANTICS.json [--mapping MAPPING.json] \
   --output-dir DIRECTORY [--sheet SHEET] [--json-key KEY] \
@@ -32,8 +37,30 @@ The normalized `view` key stores the bare identifier without the `--view` option
 Human-facing “all-stage progression” maps to `all-progression`, and human-facing
 “positive progression” maps to `positive-progression`. Inspection reports
 candidate sheets, JSON arrays, mappings, months, and ambiguities without
-creating render artifacts. Preparation writes to a new output directory and
-never overwrites an existing run by default.
+creating render artifacts. Analysis applies the proposed mapping, selected
+months, semantics, and filters without an output directory. Preparation writes
+to a new output directory and never overwrites an existing run by default.
+
+## Read-only semantics analysis
+
+Run `analyze` after initial inspection and proposed semantics, and before
+playback or preparation. It returns one structured JSON object containing safe
+source metadata, the selected mapping/months, filter key names, counts,
+`unresolved_transitions`, and `mixed_transitions`. It never creates an output
+directory or artifact and never exposes opportunity names, IDs, or raw rows.
+
+Each grouped transition contains the exact display `from_stage` and
+`to_stage`, stable `code`, `occurrences`, and `affects_inclusion`. Blank months
+remain blank; the transition uses the previous populated stage. For
+`positive-progression`, an unknown transition affects inclusion only when its
+filtered record has no other `positive` or `won` transition. Unknowns do not
+affect selection for the other views. Ask one semantics question at a time,
+update the semantics JSON, and rerun analyze before preparing artifacts.
+
+Only the local helpers are guaranteed not to call a model or network service.
+Do not paste confidential rows into chat unless the configured model and the
+user's privacy policy permit it. Minimal stage labels and diagnostics shared
+for the semantics interview may enter the model-backed chat.
 
 ## Accepted sources
 

@@ -90,10 +90,36 @@ def test_opportunity_visuals_docs_match_the_live_port():
         "one question at a time",
         "render-manifest.json",
         "visual verification",
+        "expected-run-summary.json",
+        "analyze",
+        "PNG if available",
+        "$Python =",
+        "$RunRoot =",
+        "Python 3.11+",
+        "bootstrap.sh` does not enforce",
+        "minimal stage labels and diagnostics",
     ):
         assert phrase in showcase
+    assert "Do not paste confidential rows into chat unless" in showcase
+    assert "no opportunity data is sent to a hosted model" not in showcase
     assert "No API key is required" in config
     assert "openpyxl>=3.1.5" in config
     assert "playwright>=1.52" in config
     assert "status: intent-ported" in flow
     assert "opportunity-visuals" in flow
+    assert "model-backed coworker" in config
+    assert "local helpers" in config
+
+
+def test_opportunity_visuals_interview_documents_read_only_analysis():
+    skill = (SKILL_DIR / "SKILL.md").read_text()
+    contract = (SKILL_DIR / "references/data-contract.md").read_text()
+    interview = (SKILL_DIR / "references/interview-guide.md").read_text()
+
+    assert "prepare_opportunities.py analyze" in skill
+    assert "prepare_opportunities.py analyze SOURCE --view VIEW" in contract
+    assert "unresolved_transitions" in contract
+    assert "mixed_transitions" in contract
+    assert "rerun" in interview
+    assert "before preparing artifacts" in interview
+    assert "forward, backward, or neutral" in interview

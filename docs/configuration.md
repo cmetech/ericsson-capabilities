@@ -115,13 +115,28 @@ access provide CSV/JSON plus SVG/HTML. XLSX requires `openpyxl>=3.1.5`. PNG
 requires `playwright>=1.52` and a locally installed Chromium browser; when
 unavailable, the skill succeeds with SVG/HTML and reports PNG as unavailable.
 
-The renderer is local-only and deterministic. It does not send opportunity
-data to the active Hermes model, `image_generate`, web search, a remote
-renderer, or another hosted service. Its HTML is generated from escaped data,
-contains no scripts or remote resources, and the PNG path denies external
-requests. The source CSV/JSON/XLSX remains unchanged.
+The local helpers (`inspect`, `analyze`, `prepare`, and `render`) are
+deterministic and make no model, network, `image_generate`, web-search, or
+remote-renderer calls. Their HTML is generated from escaped data, contains no
+scripts or remote resources, and the PNG path denies external requests. The
+source CSV/JSON/XLSX remains unchanged.
+
+The model-backed coworker that orchestrates those helpers may receive source
+metadata, mapping labels, and minimal stage labels and diagnostics selected
+from analyze output. Do not paste confidential rows into chat unless the
+configured model and organizational privacy policy permit it. A local helper
+guarantee is not a guarantee that pasted or chat-visible content avoids a
+hosted model.
 
 ### Preflight
+
+Select Python 3.11+ before creating the repository venv. `bootstrap.sh` uses
+`python3` and does not enforce its version:
+
+```bash
+python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+./bootstrap.sh
+```
 
 Run preflight with the intended destination before preparing data:
 
@@ -157,7 +172,10 @@ Playwright package; it does not by itself guarantee a Chromium binary. The
 third installs Chromium for that Python environment. Re-run preflight after
 each relevant change. Enterprise-managed or offline machines should use their
 approved package/browser distribution instead of these public installers.
-On Windows, use `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
+For native Windows, use the complete PowerShell venv, `$Python`, `$RunRoot`,
+analyze, and render sequence in the [reproducible
+showcase](showcases/opportunity-visuals.md#native-windows-powershell). Do not
+paste POSIX continuations or `RUN_ROOT=...` syntax into PowerShell.
 
 ### Independent failure guidance
 

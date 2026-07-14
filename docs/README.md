@@ -4,7 +4,7 @@ This handbook explains the Loop24 Langflow automations that are being translated
 
 ## Source and translation rule
 
-- Source repository: `/Users/coreyellis/code/gitlab.rosetta.ericssondevops.com/loop_24`
+- Source checkout: Loop24 repository `loop_24` (location varies by environment)
 - Git remote: `git@git.rosetta.ericssondevops.com:sd-americas-css/sd-americas-ai/loop_24.git`
 - Inventory snapshot: commit `3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e`
 - Source areas: `flows/`, `custom_components/`, `mcp/`, and supporting scripts under `utils/`

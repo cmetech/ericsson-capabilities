@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -112,6 +113,22 @@ def test_opportunity_visuals_docs_match_the_live_port():
     assert "opportunity-visuals" in flow
     assert "model-backed coworker" in config
     assert "local helpers" in config
+
+
+def test_shipped_docs_do_not_embed_developer_home_paths():
+    developer_home = re.compile(
+        r"(?:/Users/|/home/[^/\s]+/|[A-Za-z]:[\\/]+Users[\\/]+)",
+        re.IGNORECASE,
+    )
+    docs = [REPO / "README.md", *(REPO / "docs").rglob("*.md")]
+
+    findings = [
+        str(path.relative_to(REPO))
+        for path in docs
+        if developer_home.search(path.read_text(encoding="utf-8"))
+    ]
+
+    assert findings == []
 
 
 def test_opportunity_visuals_interview_documents_read_only_analysis():

@@ -3,9 +3,11 @@
 Shared Ericsson coworker capabilities for **OTTO** and **LOOP24** — standard
 Hermes artifacts bundled as the `ericsson` capability set and staged into
 each brand's build by the hermes-agent capability-staging seam.
-**Public repo** — content is not proprietary; Ericsson-only behavior is enforced at runtime by the `ERICSSON_ENV` gate (and the set manifest's `requiresEnv`), not by repo access.
+**Public repo** — never commit credentials, internal content, or values copied from a local environment.
 
 Spec: otto_hermes workspace `docs/superpowers/specs/2026-07-13-ericsson-capabilities-design.md`.
+
+Flow handbook: [`docs/README.md`](docs/README.md). It inventories every Loop24 Langflow source flow, explains how each works, records port status, and provides the configuration and future interactive-skill design context.
 
 ## Contents
 
@@ -22,8 +24,7 @@ Spec: otto_hermes workspace `docs/superpowers/specs/2026-07-13-ericsson-capabili
 
 ## Gating
 
-Everything is gated on `ERICSSON_ENV=1` (plugin `check_fn`s; skills via
-`requires_toolsets` cascade). Only COM-bound pieces are Windows-only.
+The intended baked-in model has no Ericsson runtime toggle: Jira dispatch is gated by its credentials, Teams guides device-code sign-in, and only COM-bound pieces are Windows-only. Some manifest/plugin/workflow metadata still contains legacy `ERICSSON_ENV` and disabled-by-default declarations; this known inconsistency is documented in `docs/configuration.md` and must be removed consistently before relying on the no-toggle contract in workflows.
 
 ## Staging semantics (consumed by the seam)
 

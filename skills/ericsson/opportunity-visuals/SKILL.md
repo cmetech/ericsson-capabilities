@@ -1,0 +1,79 @@
+---
+name: opportunity-visuals
+description: Create Ericsson opportunity progression visuals.
+version: 1.0.0
+author: Ericsson (cmetech)
+platforms: [macos, linux, windows]
+metadata:
+  hermes:
+    tags: [Ericsson, Opportunities, Visualization, Sales]
+---
+
+# Opportunity Visuals
+
+Turn opportunity pipeline history into exact Ericsson-branded progression
+tables. This skill is local and deterministic; it is not a general image
+generator.
+
+## When to Use
+
+Use for natural-language requests that combine opportunity/deal data with
+wins, losses, all-stage progression, positive progression, a Loop24
+opportunity image, or an Ericsson slide-ready progression visual. Do not use
+for a generic image, photo edit, unrelated chart, or a request that merely
+contains the word opportunity. Route those generic image requests to the
+ordinary image capability. Never send opportunity data to `image_generate`.
+
+## Prerequisites
+
+Python and local file access provide CSV/JSON plus SVG/HTML. XLSX requires
+`openpyxl>=3.1.5`. PNG additionally requires `playwright>=1.52` and local
+Chromium. Missing PNG support does not block SVG/HTML.
+
+## How to Run
+
+1. Inspect the request and source metadata before asking anything.
+2. Ask only for missing decisions, one question at a time, following
+   `references/interview-guide.md`.
+3. Read `references/data-contract.md`; confirm ambiguous columns, months, and
+   stage semantics without changing display labels.
+4. Play back source, view, range, rules, filters, formats, and destination.
+   Wait for the user to confirm before writing.
+5. Run `scripts/prepare_opportunities.py inspect` as needed, then
+   `scripts/prepare_opportunities.py prepare` into a new timestamped output
+   directory.
+6. Run `scripts/render_opportunity_visual.py` using `normalized-data.json`.
+7. Read `exclusions.json` and `render-manifest.json`; report included,
+   excluded, warning, page, and PNG fallback counts with artifact paths.
+
+## Quick Reference
+
+- Views: wins, losses, all-stage progression, positive progression.
+- Default size: 1920×1080.
+- Canonical output: SVG; preview: HTML; optional raster: PNG.
+- No API key and no remote renderer.
+- Source files are read-only and blank months remain blank.
+
+## Procedure
+
+Use the exact CLI forms documented in `references/data-contract.md`. If
+inspection reports more than one sheet, ambiguous columns/months, or unknown
+transitions that affect inclusion, ask one resolving question and rerun. For
+confidential data, say rendering stays local and confirm the output directory.
+Always play back the execution summary before writing. Never overwrite an
+existing run directory by default.
+
+## Pitfalls
+
+- Do not invent, rename, carry forward, or backfill stages.
+- Do not infer monthly probability movement from one current Probability field.
+- Do not classify an unknown stage order as forward or backward.
+- Do not render user values as HTML or SVG markup.
+- Do not claim PNG failure means the SVG/HTML run failed.
+- Do not use this skill for generic image generation.
+
+## Verification
+
+Confirm artifact hashes and counts in `render-manifest.json`, review every
+warning/exclusion, and apply `references/visual-rules.md`. For a showcase,
+use only the repository-owned synthetic fixture pack when it is available.

@@ -19,6 +19,8 @@ def test_manifest_content():
     assert doc["name"] == "ericsson"
     assert "skills/ericsson/workflow-orchestrator" in doc["skills"]
     assert "skills/ericsson/workflow-builder" in doc["skills"]
+    assert "skills/ericsson/opportunity-visuals" in doc["skills"]
+    assert doc["skills"].count("skills/ericsson/opportunity-visuals") == 1
     assert set(doc["plugins"]) == {"plugins/ericsson-jira", "plugins/ericsson-teams"}
     assert doc["mcpServers"] == "mcp/mcp-servers.yaml"
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]
@@ -30,7 +32,7 @@ def test_manifest_content():
             "GLEAN_MCP_URL", "GLEAN_API_TOKEN"} <= keys
     assert {e["category"] for e in doc["env"]} == {"tool"}
     assert "ERICSSON_ENV" not in {e["key"] for e in doc["env"]}
-    assert doc["version"] == "0.2.0"
+    assert doc["version"] == "0.3.0"
     assert doc["requiresEnv"] == {"ERICSSON_ENV": "1"}
     assert doc["disabledByDefault"] == {
         "skills": ["workflow-orchestrator", "workflow-builder"],

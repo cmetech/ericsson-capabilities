@@ -1,6 +1,6 @@
 {
   "name": "ericsson",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared Ericsson coworker capabilities (OTTO + LOOP24)",
   "requiresEnv": {"ERICSSON_ENV": "1"},
   "disabledByDefault": {
@@ -9,7 +9,8 @@
   },
   "skills": [
     "skills/ericsson/workflow-orchestrator",
-    "skills/ericsson/workflow-builder"
+    "skills/ericsson/workflow-builder",
+    "skills/ericsson/opportunity-visuals"
   ],
   "plugins": [
     "plugins/ericsson-jira",

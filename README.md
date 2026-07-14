@@ -16,11 +16,16 @@ Flow handbook: [`docs/README.md`](docs/README.md). It inventories every Loop24 L
 | `sets/ericsson.json` | the set manifest (the staging-seam contract) |
 | `skills/ericsson/workflow-orchestrator/` | deterministic workflow runner (YAML + `workflow_ctl.py` state machine) |
 | `skills/ericsson/workflow-builder/` | interview skill that authors new workflow YAMLs |
+| `skills/ericsson/opportunity-visuals/` | no-key, local opportunity progression renderer (SVG/HTML; optional PNG) |
 | `plugins/ericsson-jira/` | Jira tools (`jira_my_tickets`, `jira_get_issue`, `jira_add_comment`) |
 | `plugins/ericsson-teams/` | Teams tools via Graph/MSAL device-code (`teams_auth`, list/read/send/reply) |
 | `mcp/outlook-mcp/` | stdio MCP server: Outlook email+calendar via PowerShell→COM (Windows) |
 | `mcp/mcp-servers.yaml` | `mcp_servers` config fragment (outlook + glean template) |
 | `workflows/` | reference workflows (`my-tickets-summary`, `inbox-digest`) |
+
+The [Opportunity Visuals showcase](docs/showcases/opportunity-visuals.md)
+demonstrates its four supported views with synthetic data and documents local
+configuration, audit artifacts, PNG fallback, and visual verification.
 
 ## Gating
 

@@ -75,3 +75,25 @@ def test_data_contract_requires_transition_warnings_in_both_manifests():
     assert "Every `unknown` transition emits an `unknown_transition` warning." in text
     assert "Both warnings are retained in `normalized-data.json`" in text
     assert "and carried into `render-manifest.json`" in text
+
+
+def test_opportunity_visuals_docs_match_the_live_port():
+    showcase = (REPO / "docs/showcases/opportunity-visuals.md").read_text()
+    config = (REPO / "docs/configuration.md").read_text()
+    flow = (REPO / "docs/flows/image-generation.md").read_text()
+    for phrase in (
+        "showcase-opportunities.csv",
+        "wins",
+        "losses",
+        "all-progression",
+        "positive-progression",
+        "one question at a time",
+        "render-manifest.json",
+        "visual verification",
+    ):
+        assert phrase in showcase
+    assert "No API key is required" in config
+    assert "openpyxl>=3.1.5" in config
+    assert "playwright>=1.52" in config
+    assert "status: intent-ported" in flow
+    assert "opportunity-visuals" in flow

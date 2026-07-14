@@ -20,7 +20,7 @@ This is the configuration source of truth for the documented flows and for a fut
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
 | GitLab | Source flow uses a PAT; Hermes key names are not yet implemented | PAT with `api` scope; optional mTLS | CI audit; Jira→GitLab; defect loop |
 | Document parsing/export | Local Python packages | No key | TOL generation; 3PP tracker |
-| Branded visual rendering | Playwright/Chromium; active Hermes model | No flow-specific key | Image Generation |
+| Opportunity Visuals | Python/local files; optional openpyxl and Playwright/Chromium | No API key | Image Generation |
 | Privacy vault | Local NLP models and protected mapping database | No key | Pseudonymization and re-identification |
 | Windows diagnostics | PowerShell and reviewed local script | No key; elevation only when justified | Windows Laptop Diagnostic |
 | Workflow engine | Baked skills/workflows under the active `HERMES_HOME` | No key | All deterministic workflow ports |
@@ -108,11 +108,75 @@ TOL Generation and the 3PP tracker require local file access and artifact-writin
 
 Before porting, decide whether these packages ship in the main Hermes environment or in an isolated helper/plugin. Validate with synthetic documents that contain no Ericsson data, confirm output paths remain under approved artifact directories, and cap file size/record count.
 
-## Branded visual rendering
+## Opportunity Visuals
 
-The source Image Generation flow has the active LLM produce HTML and uses Playwright with headless Chromium to screenshot it as PNG/JPEG. Requirements are `playwright` plus `playwright install chromium`, writable temporary/output directories, and a trusted HTML-rendering boundary.
+No API key is required for Opportunity Visuals. Python 3.11+ and local file
+access provide CSV/JSON plus SVG/HTML. XLSX requires `openpyxl>=3.1.5`. PNG
+requires `playwright>=1.52` and a locally installed Chromium browser; when
+unavailable, the skill succeeds with SVG/HTML and reports PNG as unavailable.
 
-The port must decide whether the requested result is a data-driven branded infographic (HTML renderer remains relevant) or an illustrative image (Hermes native image generation may be a better fit). Do not render untrusted HTML with network/file access enabled without sandboxing.
+The renderer is local-only and deterministic. It does not send opportunity
+data to the active Hermes model, `image_generate`, web search, a remote
+renderer, or another hosted service. Its HTML is generated from escaped data,
+contains no scripts or remote resources, and the PNG path denies external
+requests. The source CSV/JSON/XLSX remains unchanged.
+
+### Preflight
+
+Run preflight with the intended destination before preparing data:
+
+```bash
+.venv/bin/python skills/ericsson/opportunity-visuals/scripts/render_opportunity_visual.py \
+  --preflight --output-dir /path/to/new-run
+```
+
+The JSON result reports `csv_json`, `xlsx`, `svg_html`, `png_package`,
+`chromium`, and `output_directory` independently. A missing optional component
+must not be described as failure of another component.
+
+The destination or its nearest existing parent must be writable. Choose a new,
+user-approved local directory, especially for confidential data. Preparation
+will not overwrite a non-empty run directory, and the renderer will not
+overwrite an existing target artifact. If preflight reports `Output directory
+is not writable`, ask for another destination or have the user correct its
+permissions; do not silently redirect output.
+
+### User-approved installation
+
+Neither the skill nor its renderer installs packages or browsers. After the
+user approves local installation, install only the missing capability:
+
+```bash
+.venv/bin/python -m pip install 'openpyxl>=3.1.5'
+.venv/bin/python -m pip install 'playwright>=1.52'
+.venv/bin/python -m playwright install chromium
+```
+
+The first command enables XLSX parsing. The second installs the Python
+Playwright package; it does not by itself guarantee a Chromium binary. The
+third installs Chromium for that Python environment. Re-run preflight after
+each relevant change. Enterprise-managed or offline machines should use their
+approved package/browser distribution instead of these public installers.
+On Windows, use `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
+
+### Independent failure guidance
+
+- `openpyxl is unavailable`: CSV/JSON and SVG/HTML still work. Install
+  `openpyxl>=3.1.5` with approval or provide CSV/JSON instead of XLSX.
+- `Playwright package is unavailable`: SVG/HTML still work and `--png auto`
+  reports PNG unavailable. Install `playwright>=1.52` with approval if PNG is
+  needed.
+- `Chromium is unavailable`: Playwright is importable but cannot launch its
+  local Chromium. Use the approved `.venv/bin/python -m playwright install chromium`
+  path or the organization's managed browser setup, then rerun preflight.
+- `Output directory is not writable`: choose a writable, approved local
+  destination or correct permissions. Do not retry in a shared directory.
+
+With `--png auto`, either Playwright or Chromium failure preserves successful
+SVG/HTML and records the reason in `render-manifest.json`. With `--png
+required`, the same condition returns `png_unavailable`. See the
+[reproducible showcase](showcases/opportunity-visuals.md) for commands and
+visual verification.
 
 ## Privacy vault
 

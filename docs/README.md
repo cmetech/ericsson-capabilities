@@ -24,7 +24,7 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 | [CI File Auditor](flows/ci-file-auditor.md) | Not ported | GitLab tools plus audit workflow |
 | [Search and Read E-Mails](flows/search-and-read-emails.md) | Intent ported | Outlook MCP plus `inbox-digest` workflow |
 | [TOL Generation](flows/tol-generation.md) | Not ported | Document parser, prompt workflow, spreadsheet artifact |
-| [Image Generation](flows/image-generation.md) | Not ported | Branded-visual skill/tool; evaluate native image generation |
+| [Image Generation](flows/image-generation.md) | Intent ported | [`opportunity-visuals` skill](../skills/ericsson/opportunity-visuals/SKILL.md); [reproducible showcase](showcases/opportunity-visuals.md) |
 | [Jira to GitLab](flows/jira-to-gitlab.md) | Partially ported | Jira tools exist; GitLab write path and workflow are missing |
 | [Jira Assigned Tickets Summary](flows/jira-assigned-tickets-summary.md) | Intent ported | Jira tools plus `my-tickets-summary` workflow |
 | [Jira Defect Loop](flows/jira-defect-loop.md) | Partially ported | Jira tools exist; triage, GitLab tools, loop, reviews, and summary remain |
@@ -41,6 +41,7 @@ Supporting foundations already exist independently of a complete flow port: Jira
 - [Skill design context](skill-design-context.md) defines how a future Hermes skill should explain flows, assess readiness, guide configuration, validate safely, and troubleshoot.
 - [Flow template](flows/_template.md) is the required structure for documenting future source flows.
 - [Ericsson Opportunity Visuals skill design](superpowers/specs/2026-07-14-ericsson-opportunity-visuals-design.md) specifies the approved deterministic port of the Loop24 Image Generation flow, including natural-language triggers, coworker interview behavior, and synthetic showcase/test artifacts.
+- [Opportunity Visuals showcase](showcases/opportunity-visuals.md) provides cold-start prompts, exact synthetic commands, expected counts, artifact interpretation, PNG setup, troubleshooting, and visual verification.
 
 ## Status vocabulary
 

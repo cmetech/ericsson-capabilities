@@ -2,14 +2,14 @@
 name: opportunity-visuals
 description: Create Ericsson opportunity progression visuals.
 version: 1.0.0
-author: Ericsson (cmetech)
+author: Corey Ellis (@cmetech)
 platforms: [macos, linux, windows]
 metadata:
   hermes:
     tags: [Ericsson, Opportunities, Visualization, Sales]
 ---
 
-# Opportunity Visuals
+# Opportunity Visuals Skill
 
 Turn opportunity pipeline history into exact Ericsson-branded progression
 tables. Its file helpers are local and deterministic; it is not a general

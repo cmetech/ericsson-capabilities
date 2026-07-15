@@ -12,9 +12,13 @@ def test_opportunity_visuals_frontmatter_contract():
     fm = yaml.safe_load(text.split("---\n", 2)[1])
     assert fm["name"] == "opportunity-visuals"
     assert fm["description"] == "Create Ericsson opportunity progression visuals."
+    assert fm["author"] == "Corey Ellis (@cmetech)"
     assert len(fm["description"]) <= 60
     assert fm["platforms"] == ["macos", "linux", "windows"]
     assert "Ericsson" in fm["metadata"]["hermes"]["tags"]
+    assert text.split("---\n", 2)[2].lstrip().splitlines()[0] == (
+        "# Opportunity Visuals Skill"
+    )
 
 
 def test_opportunity_visuals_interview_and_trigger_contract():
@@ -47,8 +51,11 @@ def test_opportunity_visuals_references_and_requirements_exist():
     ):
         assert (SKILL_DIR / rel).is_file()
     requirements = (SKILL_DIR / "requirements.txt").read_text().splitlines()
-    assert "openpyxl>=3.1.5" in requirements
-    assert "playwright>=1.52" in requirements
+    assert requirements == ["openpyxl>=3.1.5,<4", "playwright>=1.52,<2"]
+    dev_requirements = (REPO / "requirements-dev.txt").read_text().splitlines()
+    assert [line for line in dev_requirements if line.startswith("openpyxl")] == [
+        "openpyxl>=3.1.5,<4"
+    ]
 
 
 def test_data_contract_uses_canonical_view_identifiers():

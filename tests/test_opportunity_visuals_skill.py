@@ -120,7 +120,22 @@ def test_shipped_docs_do_not_embed_developer_home_paths():
         r"(?:/Users/|/home/[^/\s]+/|[A-Za-z]:[\\/]+Users[\\/]+)",
         re.IGNORECASE,
     )
-    docs = [REPO / "README.md", *(REPO / "docs").rglob("*.md")]
+    excluded_parts = {
+        ".git",
+        ".pytest_cache",
+        ".superpowers",
+        ".venv",
+        ".worktrees",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+    }
+    docs = sorted(
+        path
+        for path in REPO.rglob("*.md")
+        if not excluded_parts.intersection(path.relative_to(REPO).parts)
+    )
 
     findings = [
         str(path.relative_to(REPO))

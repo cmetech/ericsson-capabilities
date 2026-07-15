@@ -50,7 +50,7 @@ box is the live end-to-end target (Outlook COM, Teams sign-in).
 
 ## Loop24 Langflow porting program
 
-The source material for future ports is the internal `loop_24` repository at `/Users/coreyellis/code/gitlab.rosetta.ericssondevops.com/loop_24` (remote `sd-americas-css/sd-americas-ai/loop_24`). The durable inventory and explanation layer lives in `docs/`; start with `docs/README.md`, use one page under `docs/flows/` per source JSON flow, and use `docs/configuration.md` for all keys, authentication, permissions, dependencies, and validation.
+The source material for future ports is the internal `loop_24` repository (authoritative remote `sd-americas-css/sd-americas-ai/loop_24`) at pinned snapshot `3f124f5`. Checkout locations vary by environment; locate the checkout by repository name or remote rather than assuming a home-directory path. The durable inventory and explanation layer lives in `docs/`; start with `docs/README.md`, use one page under `docs/flows/` per source JSON flow, and use `docs/configuration.md` for all keys, authentication, permissions, dependencies, and validation.
 
 At source snapshot `3f124f5`, there are 11 JSON flows. Two have intent-level Hermes ports: Jira Assigned Tickets Summary → `my-tickets-summary`, and Search and Read E-Mails → `inbox-digest`. Jira to GitLab and Jira Defect Loop are partial because Jira tools exist but the GitLab tool/write path and end-to-end workflows do not. The other seven are not ported. Supporting foundations already ported independently are Jira, Teams, Outlook MCP, Glean MCP configuration, and the workflow orchestrator/builder.
 

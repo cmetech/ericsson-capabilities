@@ -189,7 +189,9 @@ def _atomic_json(path: Path, value: object) -> _OwnedPublication:
         owner_stat = os.fstat(handle.fileno())
         if not stat.S_ISREG(owner_stat.st_mode):
             raise OSError("Staging artifact is not a regular file")
-        expected_sha256 = _sha256_handle(handle)
+        expected_sha256 = hashlib.sha256(encoded).hexdigest()
+        if _sha256_handle(handle) != expected_sha256:
+            raise OSError("Staging artifact changed before publication")
         try:
             staged_stat = temporary.lstat()
         except OSError:

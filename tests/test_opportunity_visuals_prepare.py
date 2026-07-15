@@ -1137,6 +1137,36 @@ def test_atomic_json_rejects_stage_path_substitution_after_write_before_link(
     assert victim.read_text(encoding="utf-8") == "MUTATED EXTERNAL CONTENT\n"
 
 
+def test_atomic_json_rejects_same_inode_mutation_before_initial_fd_hash(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "prepared"
+    output_dir.mkdir()
+    temporary = output_dir / ".source-summary.json.tmp"
+    real_fstat = os.fstat
+    calls = 0
+
+    def mutate_then_fstat(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            temporary.write_text("CORRUPTED AFTER WRITE\n", encoding="utf-8")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", mutate_then_fstat)
+
+    with pytest.raises(DataContractError) as caught:
+        prepare_opportunities._write_artifacts(
+            output_dir,
+            [("source-summary.json", {"safe": True})],
+            create_output_dir=False,
+        )
+
+    assert caught.value.code == "output_unwritable"
+    assert not (output_dir / "source-summary.json").exists()
+    assert not temporary.exists()
+
+
 def test_preparation_rollback_preserves_competitors_for_all_artifact_names(
     tmp_path, monkeypatch
 ):

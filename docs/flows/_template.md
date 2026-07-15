@@ -40,4 +40,6 @@ Record what is current, what is partial, and the recommended workflow/skill/plug
 
 ## How Hermes should explain and configure it
 
-Provide example user requests, readiness questions, safe configuration sequence, validation checks, and actionable troubleshooting messages for the future interactive skill.
+Provide example user requests, readiness questions, safe configuration sequence,
+validation checks, and actionable troubleshooting messages for the implemented
+`onboard-ericsson-capabilities` router and its focused onboarding entry.

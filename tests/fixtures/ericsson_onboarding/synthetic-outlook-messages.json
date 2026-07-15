@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "fixture_id": "SYNTH-OUTLOOK-DIGEST-001",
+  "synthetic": true,
+  "mode": "offline",
+  "mailbox": "Example User",
+  "messages": [
+    {
+      "id": "SYNTH-MAIL-201",
+      "from_name": "Jordan Example",
+      "subject": "Northstar sandbox review",
+      "received_at": "2026-07-14T09:30:00Z",
+      "preview": "Please review the fictional checklist before Thursday."
+    },
+    {
+      "id": "SYNTH-MAIL-202",
+      "from_name": "Casey Sample",
+      "subject": "Mock launch practice",
+      "received_at": "2026-07-14T11:15:00Z",
+      "preview": "The synthetic rehearsal agenda is ready for comments."
+    }
+  ]
+}

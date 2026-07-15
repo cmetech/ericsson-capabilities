@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "SYNTH-RUNTIME-PLATFORM-001",
+  "synthetic": true,
+  "mode": "offline",
+  "platform": "macos",
+  "profile": "Northstar Sandbox",
+  "capabilities": {
+    "outlook-inbox-digest": {
+      "installed": true,
+      "discoverable": true,
+      "enabled": true,
+      "platformSupported": false,
+      "dependencyAvailable": false,
+      "authenticationValidated": null,
+      "permissionAdequate": null,
+      "safeProbeSucceeded": null,
+      "state": "unavailable-on-platform"
+    }
+  }
+}

@@ -16,9 +16,10 @@ nodes:
     message: Review the draft before it is sent.
   - id: send
     kind: tool
+    tools: [example_send]
     depends_on: [gate]
     side_effects: true
-    prompt: send it
+    prompt: send it with example_send
 """
 
 

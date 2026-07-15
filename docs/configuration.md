@@ -1,6 +1,6 @@
 # Supporting capability configuration
 
-This is the configuration source of truth for the documented flows and for a future Hermes setup-assistant skill. It covers static keys, interactive authentication, local software, permissions, and planned dependencies. It never contains secret values.
+This is the configuration source of truth for the documented flows and the implemented `onboard-ericsson-capabilities` router. It separates static secrets, static settings, interactive authentication, permissions, local software/platform requirements, and ordinary workflow inputs. It never contains secret values. See the [onboarding safety policy](onboarding/safety-and-demonstrations.md) for the shared readiness and demonstration rules.
 
 ## Safety rules
 
@@ -20,8 +20,9 @@ This is the configuration source of truth for the documented flows and for a fut
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
 | GitLab | Source flow uses a PAT; Hermes key names are not yet implemented | PAT with `api` scope; optional mTLS | CI audit; Jira→GitLab; defect loop |
 | Document parsing/export | Local Python packages | No key | TOL generation; 3PP tracker |
-| Opportunity Visuals | Python/local files; optional openpyxl and Playwright/Chromium | No API key | Image Generation |
-| Privacy vault | Local NLP models and protected mapping database | No key | Pseudonymization and re-identification |
+| Opportunity Visuals | Python/local files; optional openpyxl and Playwright/Chromium | No API key | Opportunity progression visual artifacts |
+| Pseudonymization | No configuration; explicitly unsupported | None | Historical questions only; no port roadmap |
+| Re-Identification | Required protected mapping capability is unavailable | None | Planned, not implemented; no runnable setup |
 | Windows diagnostics | PowerShell and reviewed local script | No key; elevation only when justified | Windows Laptop Diagnostic |
 | Workflow engine | Baked skills/workflows under the active `HERMES_HOME` | No key | All deterministic workflow ports |
 | Hermes model | Product-level provider/model configuration | Provider-specific, outside this capability set | All prompt nodes |
@@ -40,7 +41,7 @@ The current plugin exposes `jira_my_tickets`, `jira_get_issue`, and `jira_add_co
 1. Obtain a token through the organization's approved Jira token process. Do not reuse a browser cookie.
 2. Add the base URL and token through Keys.
 3. Validate with a read-only call such as `jira_my_tickets` with a small result limit.
-4. If write behavior is needed, confirm the target issue and use a harmless test issue or explicit approval before validating comments.
+4. If a real comment is later needed, preview the exact issue and text and obtain explicit approval. Never post a comment merely to validate configuration.
 
 Common errors: missing keys; `401` for an invalid/expired token; `403` for insufficient project permission; HTML/SSO responses when the base URL or token type is wrong; network/TLS restrictions on internal Jira.
 
@@ -53,7 +54,7 @@ Common errors: missing keys; `401` for an invalid/expired token; `403` for insuf
 
 The seeded `glean` entry remains inert until both placeholders resolve. There is no Glean server code in Loop24 or this repository; the capability is an external service configuration.
 
-Configure the values through Keys, then validate by connecting to the MCP server and listing tools before attempting a search. A future assistant should distinguish DNS/TLS/network failures, authentication failures, and a connected server that exposes no expected search tool. The endpoint and token acquisition process are organization-owned and must not be guessed.
+Configure the values through Keys, then validate by connecting to the MCP server and listing tools before attempting a search. The onboarding router distinguishes DNS/TLS/network failures, authentication failures, and a connected server that exposes no expected search tool. The endpoint and token acquisition process are organization-owned and must not be guessed.
 
 ## Teams and Microsoft Graph
 
@@ -95,7 +96,7 @@ Loop24 flows contain ACP/Ollama base URLs and sometimes expose `ANTHROPIC_API_KE
 
 The workflow orchestrator and builder require no API key. Baked startup seeding copies reference workflow YAML into the active brand's `$HERMES_HOME/workflows/`; run state and node artifacts live below that workflow area. `workflow_ctl.py` requires Python plus PyYAML and is the only supported writer of workflow run state.
 
-A setup assistant should resolve the active brand home instead of assuming `~/.hermes`, confirm the orchestrator skill and selected workflow are installed/enabled, run structural validation, and use a scratch/read-only lifecycle check before a real run. `report.kanban: auto` is optional and must degrade safely when the Kanban toolset is unavailable. Never edit `state.json` directly to “fix” a run.
+The onboarding router resolves the active brand home instead of assuming `~/.hermes`, confirms the orchestrator skill and selected workflow are installed, runs structural validation, and uses a scratch/read-only lifecycle check before a real run. `report.kanban: auto` is optional and must degrade safely when the Kanban toolset is unavailable. Never edit `state.json` directly to “fix” a run.
 
 ## Document parsing and spreadsheet output
 
@@ -203,11 +204,18 @@ required`, the same condition returns `png_unavailable`. See the
 [reproducible showcase](showcases/opportunity-visuals.md) for commands and
 visual verification.
 
-## Privacy vault
+## Pseudonymization and Re-Identification
 
-No API key is required. The source implementation uses Presidio, spaCy `en_core_web_lg`, optional `en_core_web_sm` plus `dslim/bert-base-NER`, SQLite, and document/PDF libraries. The transformer model may download from Hugging Face on first use; enterprise/offline packaging must account for that.
+Pseudonymization is `not-supported-no-port-planned`. It has no Co-Worker
+configuration, runnable implementation, demonstration, or setup recipe. The legacy
+dependency list is historical context only and must not be presented as an
+installation path.
 
-The mapping database contains the original sensitive values and is more sensitive than the anonymized output. The port must store it beneath a protected per-brand home, restrict permissions, avoid syncing it, define retention/deletion, and bind every mapping to a session key. Re-identification must fail closed when the mapping is missing or ambiguous. Use synthetic PII for validation.
+Re-Identification remains `planned-not-implemented` and non-runnable. It requires a
+protected token-to-original mapping produced by a corresponding pseudonymization
+implementation; that mapping dependency is unavailable. Do not request an
+anonymized file, session identifier, original values, or configuration. This fact
+does not create or imply a new roadmap decision.
 
 ## Windows diagnostics and PowerShell
 
@@ -225,8 +233,10 @@ Loop24 also contains SharePoint and Confluence utilities/components that are not
 
 Document these as their own flow/capability pages when a concrete port is selected. Do not imply they are installed merely because their source components exist.
 
-## Known configuration inconsistency
+## Delivery and readiness contract
 
-The approved delivery design says Ericsson content is baked into OTTO/LOOP24 with no `ERICSSON_ENV` toggle. Current Jira and Teams runtime checks follow that design, but the source/vendored manifest, plugin metadata, README, and both reference workflows still contain stale `ERICSSON_ENV` or disabled-by-default declarations. Baked seeding does not use the manifest gate, but workflow validation can still treat `ERICSSON_ENV` as required.
-
-Until corrected, a setup assistant must describe this as compatibility debt—not as the desired architecture. It may explain a temporary environment workaround when a shipped workflow is blocked, but the durable fix is to remove stale declarations, re-vendor, test, and release consistently.
+Ericsson capabilities are baked into every profile. There is no Ericsson-specific
+toggle or disabled-by-default delivery declaration. Readiness still depends on the
+selected capability's current platform, protected settings, authentication,
+permissions, dependencies, and safe probe. The router never treats a configured
+name as proof that its value is valid or authorized.

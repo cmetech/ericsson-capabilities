@@ -8,12 +8,12 @@ import respx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/ericsson-jira"))
 import jira_tools  # noqa: E402
 
+REPO = Path(__file__).resolve().parents[1]
 BASE = "https://jira.internal.ericsson.com"
 
 
 @pytest.fixture
 def jira_env(monkeypatch):
-    monkeypatch.setenv("ERICSSON_ENV", "1")
     monkeypatch.setenv("JIRA_BASE_URL", BASE)
     monkeypatch.setenv("JIRA_PAT", "tok")
 
@@ -22,9 +22,12 @@ def test_check_available(jira_env, monkeypatch):
     assert jira_tools.check_available() is True          # jira_env sets BASE_URL + PAT
     monkeypatch.delenv("JIRA_PAT")
     assert jira_tools.check_available() is False          # no PAT -> unavailable
-    monkeypatch.delenv("ERICSSON_ENV", raising=False)     # ERICSSON_ENV now irrelevant
-    monkeypatch.setenv("JIRA_PAT", "tok")
-    assert jira_tools.check_available() is True
+
+
+def test_plugins_do_not_declare_ericsson_toggle():
+    for name in ("ericsson-jira", "ericsson-teams"):
+        text = (REPO / "plugins" / name / "plugin.yaml").read_text()
+        assert "ERICSSON_ENV" not in text
 
 
 def test_missing_env_raises(monkeypatch):

@@ -8,7 +8,7 @@ supporting_capabilities: [python, openpyxl, playwright, chromium]
 platforms: [macos, linux, windows]
 ---
 
-# Image Generation
+# Image Generation (ported as Opportunity Visuals)
 
 ## What it does
 
@@ -53,7 +53,7 @@ screenshots must use synthetic data.
 
 ## Hermes port status and target shape
 
-Intent ported. The live
+Intent ported. **Opportunity Visuals is available.** The live
 [`opportunity-visuals`](../../skills/ericsson/opportunity-visuals/SKILL.md)
 skill preserves the source outcome for its four opportunity views while
 replacing LLM-generated HTML with deterministic normalization and SVG/HTML
@@ -66,7 +66,7 @@ four views, inspect expected counts and manifests, exercise PNG, and perform
 visual verification. The [approved design](../superpowers/specs/2026-07-14-ericsson-opportunity-visuals-design.md)
 records why the intent port deliberately differs from the Langflow graph.
 
-## How Hermes should explain and configure it
+## How Co-Worker should explain and configure it
 
 Inspect the request and source metadata, ask only for missing decisions one at
 a time, run read-only semantics analysis, resolve unknown terminal status,

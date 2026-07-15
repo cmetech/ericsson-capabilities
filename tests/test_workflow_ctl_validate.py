@@ -37,6 +37,24 @@ def test_duplicate_node_id_and_unknown_kind():
     assert any("kind" in e for e in errors)
 
 
+def test_tool_node_accepts_explicit_tool_references():
+    doc = _doc(VALID_WF)
+    for node in doc["nodes"]:
+        if node["kind"] == "tool":
+            node["tools"] = ["example_tool"]
+    errors, _ = wc.validate_workflow(doc)
+    assert not any("tools" in error for error in errors)
+
+
+def test_legacy_tool_node_without_tools_remains_valid():
+    doc = _doc(VALID_WF)
+    for node in doc["nodes"]:
+        if node["kind"] == "tool":
+            node.pop("tools")
+    errors, _ = wc.validate_workflow(doc)
+    assert not any("tools" in error for error in errors)
+
+
 def test_unknown_depends_on_and_cycle():
     doc = _doc(VALID_WF)
     doc["nodes"][0]["depends_on"] = ["send"]        # fetch -> send -> summarize -> fetch: cycle

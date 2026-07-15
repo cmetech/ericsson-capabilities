@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "fixture_id": "SYNTH-TEAMS-DIRECTORY-001",
+  "synthetic": true,
+  "mode": "offline",
+  "user": "Example User",
+  "teams": [
+    {
+      "id": "SYNTH-TEAM-301",
+      "display_name": "Northstar Sandbox",
+      "channels": [
+        {"id": "SYNTH-CHANNEL-311", "display_name": "General"},
+        {"id": "SYNTH-CHANNEL-312", "display_name": "Release Practice"}
+      ]
+    },
+    {
+      "id": "SYNTH-TEAM-302",
+      "display_name": "Atlas Lab",
+      "channels": [
+        {"id": "SYNTH-CHANNEL-321", "display_name": "Announcements"}
+      ]
+    }
+  ]
+}

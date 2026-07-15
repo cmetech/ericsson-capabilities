@@ -11,8 +11,9 @@ version: 1.0.0
 nodes:
   - id: send
     kind: tool
+    tools: [example_send]
     side_effects: true
-    prompt: send the thing
+    prompt: send the thing with example_send
   - id: log
     kind: prompt
     depends_on: [send]
@@ -175,7 +176,8 @@ inputs:
 nodes:
   - id: fetch
     kind: tool
-    prompt: fetch things
+    tools: [example_fetch]
+    prompt: fetch things with example_fetch
     output: things.json
   - id: summarize
     kind: prompt

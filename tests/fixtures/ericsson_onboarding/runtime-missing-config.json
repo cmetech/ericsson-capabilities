@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "SYNTH-RUNTIME-MISSING-001",
+  "synthetic": true,
+  "mode": "offline",
+  "platform": "macos",
+  "profile": "Northstar Sandbox",
+  "capabilities": {
+    "jira-assigned-ticket-summary": {
+      "installed": true,
+      "discoverable": true,
+      "enabled": true,
+      "platformSupported": true,
+      "configuredSettings": {
+        "JIRA_BASE_URL": false,
+        "JIRA_PAT": true
+      },
+      "dependencyAvailable": true,
+      "authenticationValidated": false,
+      "permissionAdequate": null,
+      "safeProbeSucceeded": null,
+      "state": "missing"
+    }
+  }
+}

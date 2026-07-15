@@ -1,80 +1,103 @@
-# Future explain-and-configure skill design context
+# Ericsson onboarding skill context
 
-This document is source material for a future Hermes skill that helps users discover, understand, configure, and validate Ericsson flows. It is not the skill implementation.
+The implemented `onboard-ericsson-capabilities` skill is the single Ericsson
+training and onboarding entry point. This page records its durable runtime and
+authoring context; the [onboarding documentation](onboarding/README.md) contains the
+operational procedures.
 
-## Outcomes
+## Outcome
 
-After the interaction, the user should know which flow fits their goal, what it will read or change, whether it is currently available, what configuration is missing, and the safest next action. When authorized, the skill should guide configuration and run non-destructive readiness checks.
+After an interaction, the user should know which capability fits their goal, its
+product maturity, what it reads or changes, the active profile's evidence-based
+readiness, and the safest next action. The router can guide protected configuration,
+non-destructive readiness checks, synthetic demonstrations, first-run preparation,
+artifact interpretation, troubleshooting, and consented resume.
 
-## Sources of truth
+It does not replace Jira, Teams, Outlook, Glean, Opportunity Visuals, or workflow
+domain behavior. A direct domain request can go to the domain capability; onboarding
+activates for learning, choosing, configuring, validating, demonstrating,
+interpreting, troubleshooting, or resuming.
 
-1. Use each page's frontmatter for source identity, port status, platform, target artifacts, and dependencies.
-2. Use the body for user outcome, execution sequence, safety, and failure behavior.
-3. Use `configuration.md` for keys, sign-in, permissions, machine prerequisites, and validation.
-4. Use the capability manifest and runtime registry to determine what is actually installed. Documentation marked planned must never be presented as available.
+## Sources and progressive disclosure
+
+1. Implementation and runtime registration determine whether executable behavior
+   exists.
+2. `sets/ericsson.json` determines what is packaged.
+3. Flow frontmatter determines source identity and product maturity.
+4. Focused capability entries determine user education and demonstration guidance.
+5. The generated compact catalog routes discovery and is never hand-edited.
+6. Current runtime state determines readiness and overrides saved readiness.
+
+Discovery loads the compact catalog. After selection, load one capability entry plus
+only the chosen workflow, policy, and template. A contradiction between sources is a
+validator failure, not permission to guess.
 
 ## Conversation routes
 
-### Explain a flow
+- **Discover/recommend:** start with role, goal, or outcome; ask one question; offer
+  at most two matches and prefer `available` capabilities.
+- **Explain:** describe the problem, example prompts, questions, reads, writes,
+  approvals, dependencies, outputs, artifact locations, and common recovery.
+- **Configure/readiness:** separate static secrets/settings, interactive sign-in,
+  permission, software/platform, and workflow input. Guide one missing item at a
+  time through protected interfaces.
+- **Demonstrate:** label synthetic, simulated, read-only live, or approved live;
+  preview expected output and a new destination, then compare actual with expected.
+- **First real run:** route execution to the underlying capability only after scope,
+  preview, and approval boundaries are clear.
+- **Artifacts/troubleshooting:** explain destination, inspection, exclusions,
+  warnings, and safe rerun; classify the failure before suggesting recovery.
+- **Resume/summarize:** with consent, persist only a sanitized per-profile handoff,
+  then recheck volatile facts on resume.
 
-Ask what outcome the user wants, select one or two candidates, explain the steps in plain language, name all reads/writes and approvals, report current port status, then offer readiness/configuration help. Do not begin with Langflow node names.
+## Maturity and readiness
 
-### Recommend a flow
+Product maturity is one of `available`, `partially-ported`,
+`planned-not-implemented`, or `not-supported-no-port-planned`. Only available
+entries receive runtime readiness checks. Readiness is `ready`, `missing`,
+`needs-user-action`, `unavailable-on-platform`, `planned-not-implemented`, or
+`unknown-needs-check`, supported by independent discovery, platform, dependency,
+protected-setting, authentication, permission, and safe-probe facts.
 
-Ask one question at a time about the source system, desired artifact/action, platform, frequency, and acceptable write authority. Prefer an already ported flow. If only an unported flow matches, explain that clearly and offer its manual/native Hermes alternative rather than pretending it can run.
+Do not infer `ready` from an environment-variable name. Pseudonymization is an
+unsupported historical tombstone with no port roadmap. Re-Identification is
+non-runnable because its protected mapping dependency is unavailable.
 
-### Configure a capability
-
-Build a readiness checklist from the selected flow. Separate static keys, interactive sign-in, software prerequisites, permissions, and workflow inputs. Guide one missing item at a time. Open or direct the user to the protected Keys surface for secrets; never request a token in normal chat.
-
-### Validate readiness
-
-Use a ladder from least to most consequential: installed/discovered; dependency import or server start; authentication; read-only list/get; draft/preview; approved write. Stop at the first failure and give a capability-specific explanation.
-
-### Troubleshoot
-
-Classify before suggesting fixes: missing configuration, expired/rejected auth, insufficient permission, network/TLS, missing local application/dependency, invalid input, source-system error, workflow-state error, or partial side effect. Preserve the exact safe error while redacting sensitive values.
-
-## Required response content
-
-For every flow explanation include:
-
-- current status: intent ported, partial, or not ported;
-- supported platforms and local-app requirements;
-- what data is read and where artifacts are stored;
-- every external write or irreversible action;
-- required keys/sign-in/permissions without exposing values;
-- expected duration or scale concern when known;
-- failure/recovery and approval points;
-- a concrete next step.
-
-## Configuration state model
-
-Report each requirement as one of: `ready`, `missing`, `needs-user-action`, `unavailable-on-platform`, `planned-not-implemented`, or `unknown-needs-check`. Do not infer `ready` merely because a key name exists; use an authorized validation. Never print a secret to prove it is present.
-
-## Flow selection cues
+## Selection cues
 
 | User language | Candidate |
 |---|---|
-| “summarize my tickets,” “what should I work on” | Jira Assigned Tickets Summary |
-| “read/digest my inbox” | Search and Read E-Mails / inbox digest |
-| “fix this Jira defect and open an MR” | Jira to GitLab or Jira Defect Loop (partial) |
-| “audit our GitLab CI” | CI File Auditor (not ported) |
-| “turn requirements into test cases” | TOL Generation (not ported) |
-| “check lifecycle/EOS dates in this tracker” | 3PP Support and LCM Tracker (not ported) |
-| “remove PII,” “restore pseudonyms” | Privacy-vault pair (not ported) |
-| “diagnose my Windows laptop” | Windows Laptop Diagnostic (not ported) |
-| “make a branded infographic from this data” | Image Generation (not ported) |
+| “summarize my tickets,” “what should I work on” | Jira Assigned-Ticket Summary (available) |
+| “read/digest my inbox” | Outlook inbox digest (available on Windows with classic Outlook) |
+| “make an Ericsson opportunity progression visual” | Opportunity Visuals (available) |
+| “show Teams and channels I can access” | Teams tools (available; device-code sign-in) |
+| “search internal knowledge for this product” | Glean search (available when configured) |
+| “build or run a repeatable workflow” | Workflow builder/orchestrator (available) |
+| “fix this Jira defect and open an MR” | Jira-to-GitLab / Jira Defect Loop (partial, not runnable end to end) |
+| “audit our GitLab CI” | CI File Auditor (planned, not implemented) |
+| “turn requirements into test cases” | TOL Generation (planned, not implemented) |
+| “remove PII with the old flow” | Pseudonymization (unsupported; no port planned) |
+
+The legacy Image Generation outcome is provided by **Opportunity Visuals
+(available)** for opportunity progression data. General illustrative image requests
+remain with the ordinary image capability.
 
 ## Safety invariants
 
-- Never accept, echo, log, or persist secret values in ordinary conversation.
-- Never send email, Teams messages, Jira comments, commits, branches, or merge requests merely to test configuration without explicit approval and a safe target.
-- Never describe an unported flow as executable.
-- Never re-run a possibly completed side effect after interruption without confirmation.
-- Keep privacy mappings local and protected; anonymized data is not proof that the mapping store is safe.
-- Generic shell/PowerShell execution is not an acceptable configuration shortcut.
+- Never accept, echo, print, fingerprint, log, or persist secret values in ordinary
+  conversation.
+- Never send email or Teams messages, add Jira comments, or create commits,
+  branches, or merge requests merely to test configuration.
+- Never describe partial, planned, or unsupported behavior as executable.
+- Never retry a possibly completed side effect before inspection and fresh approval.
+- Never use real confidential data in a showcase or overwrite an artifact without
+  confirmation.
 
-## Authoring the eventual skill
+## Authoring contract
 
-The skill should load only the selected flow page plus the relevant configuration sections, not all documents on every turn. It should use deterministic checklists for setup/readiness while letting the agent explain and troubleshoot in natural language. Tests should cover flow selection, status honesty, refusal to collect secrets in chat, platform gating, least-risk validation ordering, and partial-side-effect recovery.
+Every capability addition, removal, or material change follows the
+[authoring and catalog maintenance procedure](onboarding/authoring.md). Update the
+implementation, registration, user documentation, configuration, prompt examples,
+demonstrations/tests, onboarding entry, generated catalog, and vendored Hermes
+snapshot together. The catalog builder and validator are the primary enforcement
+mechanism.

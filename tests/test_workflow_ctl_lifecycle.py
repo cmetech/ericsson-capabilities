@@ -29,6 +29,24 @@ def test_start_creates_state(ctl, write_wf, home):
     assert out["report"]["kanban"] == "auto"
 
 
+def test_start_accepts_legacy_tool_node_without_tools(ctl, write_wf):
+    legacy = """\
+name: legacy-tool-workflow
+description: pre-tools-field workflow
+version: 1.0.0
+nodes:
+  - id: fetch
+    kind: tool
+    prompt: fetch things using the available integration
+"""
+    path = write_wf(legacy, name="legacy.yml")
+
+    code, out = ctl("start", str(path))
+
+    assert code == 0
+    assert out["run_id"]
+
+
 def test_start_rejects_invalid_workflow(ctl, write_wf):
     p = write_wf("name: demo\nnodes: []\n", name="bad.yml")
     code, out = ctl("start", str(p))
@@ -133,16 +151,19 @@ inputs:
 nodes:
   - id: a
     kind: tool
-    prompt: do a
+    tools: [example_a]
+    prompt: do a with example_a
     when: "$inputs.run_a == 'yes'"
   - id: c
     kind: tool
+    tools: [example_c]
     depends_on: [b]
-    prompt: do c
+    prompt: do c with example_c
   - id: b
     kind: tool
+    tools: [example_b]
     depends_on: [a]
-    prompt: do b
+    prompt: do b with example_b
 """
 
 

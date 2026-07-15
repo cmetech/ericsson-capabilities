@@ -20,6 +20,11 @@ def test_reference_workflows_validate_cleanly():
             assert "$inputs" not in n.get("prompt", ""), f"{p.name} node {n.get('id')}: prompt uses non-interpolated $inputs syntax"
 
 
+def test_reference_workflows_do_not_require_ericsson_toggle():
+    for path in (REPO / "workflows").glob("*.yml"):
+        assert "ERICSSON_ENV" not in path.read_text()
+
+
 def test_tickets_summary_has_approval_and_side_effect():
     doc = wc.load_workflow(REPO / "workflows/my-tickets-summary.yml")
     kinds = {n["id"]: n["kind"] for n in doc["nodes"]}

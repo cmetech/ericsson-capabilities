@@ -1,6 +1,6 @@
 # Ericsson capability and flow handbook
 
-This handbook explains the Loop24 Langflow automations that are being translated into native Hermes capabilities for OTTO and LOOP24. It is written for three readers: a user deciding which automation can help, a maintainer planning a port, and a future Hermes skill that explains and configures the capabilities interactively.
+This handbook explains the Loop24 Langflow automations translated into native Co-Worker capabilities for OTTO and LOOP24. It serves users choosing an outcome, maintainers implementing or changing a capability, and the implemented `onboard-ericsson-capabilities` router that explains and configures them interactively.
 
 ## Source and translation rule
 
@@ -29,20 +29,28 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 | [Jira Assigned Tickets Summary](flows/jira-assigned-tickets-summary.md) | Intent ported | Jira tools plus `my-tickets-summary` workflow |
 | [Jira Defect Loop](flows/jira-defect-loop.md) | Partially ported | Jira tools exist; triage, GitLab tools, loop, reviews, and summary remain |
 | [3PP Support and LCM Tracker](flows/third-party-support-lcm-tracker.md) | Not ported | Spreadsheet tools plus lifecycle-research workflow |
-| [Pseudonymization](flows/pseudonymization.md) | Not ported | Local privacy-vault plugin/skill |
-| [Re-Identification](flows/re-identification.md) | Not ported | Local privacy-vault plugin/skill |
+| [Pseudonymization](flows/pseudonymization.md) | Not supported; no port planned | Historical tombstone only |
+| [Re-Identification](flows/re-identification.md) | Planned, not implemented | No runnable mapping capability is available |
 | [Windows Laptop Diagnostic](flows/windows-laptop-diagnostic.md) | Not ported | Windows-only diagnostic skill with reviewed script |
 
 Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and the workflow orchestrator/builder.
 
-## Configuration and future skill context
+## Onboarding, configuration, and maintenance
 
 - [Configuration guide](configuration.md) explains every current, planned, and source-only credential or machine prerequisite.
-- [Skill design context](skill-design-context.md) defines how a future Hermes skill should explain flows, assess readiness, guide configuration, validate safely, and troubleshoot.
+- [Onboarding guide](onboarding/README.md) explains the implemented router, architecture, scope, resume status, and documentation map.
+- [Onboarding authoring contract](onboarding/authoring.md) gives the exact add/change/remove, catalog generation, validation, and source-first delivery procedure.
+- [Safety and demonstrations](onboarding/safety-and-demonstrations.md) defines configuration classes, secret handling, the readiness ladder, and synthetic showcase rules.
+- [Artifacts and troubleshooting](onboarding/artifacts-and-troubleshooting.md) defines artifact inspection, failure taxonomy, partial-effect recovery, and saved-state behavior.
+- [Mock sessions](onboarding/mock-sessions.md) provides cold-reader conversation examples.
+- [Test strategy and results](onboarding/test-strategy-and-results.md) separates deterministic evidence, model evidence, and limitations.
+- [Windows resume release validation](onboarding/windows-resume-release-validation.md) is the product-owner checklist for the pending native Windows acceptance run.
+- [Skill design context](skill-design-context.md) defines the implemented router's runtime and authoring contract.
 - [Flow template](flows/_template.md) is the required structure for documenting future source flows.
 - [Ericsson Opportunity Visuals skill design](superpowers/specs/2026-07-14-ericsson-opportunity-visuals-design.md) specifies the approved deterministic port of the Loop24 Image Generation flow, including natural-language triggers, coworker interview behavior, and synthetic showcase/test artifacts.
 - [Opportunity Visuals showcase](showcases/opportunity-visuals.md) provides cold-start prompts, exact synthetic commands, expected counts, artifact interpretation, PNG setup, troubleshooting, and visual verification.
 - [Opportunity Visuals explained](opportunity-visuals-explained.md) gives a non-technical overview of what was delivered, how the coworker uses it, what the generated files mean, why the implementation is substantial, and how the shared skill reaches both OTTO and LOOP24.
+- [Ericsson onboarding facilitator showcase](showcases/ericsson-capability-onboarding.md) demonstrates a fictional Jira journey, resume, Opportunity Visuals routing, and honest unsupported-platform handling.
 
 ## Status vocabulary
 
@@ -51,7 +59,8 @@ Supporting foundations already exist independently of a complete flow port: Jira
 - **Not ported:** no supported end-to-end Hermes counterpart exists.
 - **Planned:** a name or interface is proposed for port design and must not be presented to users as currently available.
 - **Source-only:** configuration belonged to Langflow and should not automatically be carried into Hermes.
+- **Not supported; no port planned:** retained only to answer historical requests accurately and never recommended as runnable.
 
 ## Documentation maintenance
 
-When the Loop24 source changes, re-inventory `flows/**/*.json`, review component code and README files, and update the affected page's source commit/hash and behavior. When a port lands, update its status, configuration, validation procedure, and manifest entry together. Never put tokens, passwords, cookies, certificate contents, or values copied from a local `.env` into this repository.
+When the Loop24 source changes, re-inventory `flows/**/*.json`, review component code and README files, and update the affected page's source commit/hash and behavior. When a capability is added, removed, or materially changed, follow the [complete maintenance checklist](onboarding/authoring.md): update implementation, registration, user guidance, configuration, natural-language examples, demonstrations/tests, onboarding entry, generated catalog, and the vendored Hermes snapshot together. Never put tokens, passwords, cookies, certificate contents, or values copied from a local `.env` into this repository.

@@ -35,7 +35,7 @@ The summary must not invent status or priority, omit tickets without saying so, 
 
 ## Hermes port status and target shape
 
-Intent is ported through the `ericsson-jira` plugin and `workflows/my-tickets-summary.yml`. The tool layer uses direct HTTP rather than the source's curl-based Langflow component; summarization belongs to the active agent. Known debt: the workflow still declares stale `ERICSSON_ENV` despite the intended no-toggle model.
+Intent is ported through the `ericsson-jira` plugin and `workflows/my-tickets-summary.yml`. The tool layer uses direct HTTP rather than the source's curl-based Langflow component; summarization belongs to the active agent. The capability is baked into every profile and readiness depends on Jira configuration and a safe read, not a capability-set toggle.
 
 ## How Hermes should explain and configure it
 

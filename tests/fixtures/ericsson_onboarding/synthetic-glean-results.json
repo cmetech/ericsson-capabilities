@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "fixture_id": "SYNTH-GLEAN-SEARCH-001",
+  "synthetic": true,
+  "mode": "offline",
+  "query": "Northstar sandbox release checklist",
+  "results": [
+    {
+      "source_id": "SYNTH-KNOWLEDGE-401",
+      "title": "Northstar rehearsal checklist",
+      "summary": "A fictional checklist for validating a sandbox release practice."
+    },
+    {
+      "source_id": "SYNTH-KNOWLEDGE-402",
+      "title": "Sample readiness glossary",
+      "summary": "Definitions used in the synthetic onboarding exercise."
+    }
+  ]
+}

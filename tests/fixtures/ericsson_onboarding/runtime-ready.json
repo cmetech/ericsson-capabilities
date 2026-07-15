@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "SYNTH-RUNTIME-READY-001",
+  "synthetic": true,
+  "mode": "offline",
+  "platform": "windows",
+  "profile": "Northstar Sandbox",
+  "capabilities": {
+    "jira-assigned-ticket-summary": {
+      "installed": true,
+      "discoverable": true,
+      "enabled": true,
+      "platformSupported": true,
+      "configuredSettings": {
+        "JIRA_BASE_URL": true,
+        "JIRA_PAT": true
+      },
+      "dependencyAvailable": true,
+      "authenticationValidated": true,
+      "permissionAdequate": true,
+      "safeProbeSucceeded": true,
+      "state": "ready"
+    }
+  }
+}

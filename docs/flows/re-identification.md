@@ -28,16 +28,24 @@ Inputs are anonymized file, protected mapping store, output directory (source de
 
 ## Supporting capabilities and configuration
 
-No API key is required, but the corresponding mapping is mandatory. It should share a local privacy-vault implementation with Pseudonymization. See [privacy-vault configuration](../configuration.md#privacy-vault).
+No runnable Co-Worker configuration exists. The corresponding protected
+token-to-original mapping is mandatory, but the Pseudonymization/mapping dependency
+that would create it is unavailable. Do not request a mapping, session key, file, or
+original value as a setup step.
 
 ## Failure, safety, and privacy behavior
 
 Fail closed when a mapping is missing, ambiguous, corrupt, or does not belong to the file. Never guess token values. Re-identification is a sensitive disclosure action: verify authorization and destination, avoid chat previews of restored content, and write to a protected artifact location. Preserve the source anonymized file.
 
-## Hermes port status and target shape
+## Co-Worker port status
 
-Not ported and should not be implemented separately from the mapping/storage design. A local plugin should provide session lookup and restore; a skill should enforce authorization, explain consequences, and guide secure cleanup.
+`planned-not-implemented`; there is no runnable port. Re-Identification cannot be
+executed independently of a reviewed protected mapping/storage implementation. This
+dependency statement records the present limitation and does not infer a new roadmap
+decision.
 
-## How Hermes should explain and configure it
+## How Co-Worker should explain it
 
-Ask which anonymized file/session, why restoration is needed, who may receive it, and where it may be written. Validate mapping existence without revealing originals. Require explicit confirmation immediately before restoration and report only counts/path unless the user asks to inspect the protected artifact.
+State that no runnable mapping capability is available and refuse execution. Do not
+solicit an anonymized file, session, destination, or sensitive content. Historical
+safety requirements may be explained without presenting setup steps.

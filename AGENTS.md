@@ -20,7 +20,7 @@ injector, and the startup seed ALL read it. Everything you add must be listed th
 | Plugin key | add to manifest `env[]` (key/description/prompt/url/password/category) | auto-registered on Keys page |
 | Local MCP server | drop `mcp/<name>/`; add to `mcpLocal[]` + an `mcp_servers.<name>` block in the file the manifest's `mcpServers` key points to (`mcp/mcp-servers.yaml`) | seeded into config on launch |
 | Remote MCP | add an `mcp_servers.<name>` (url/headers) block to that same `mcpServers` file; add keys to `env[]` | seeded + keys registered |
-| Workflow | drop `workflows/<name>.yml`; add to `workflows[]` | seeded to `$HERMES_HOME/workflows/` |
+| Workflow | drop `workflows/<name>.yml`; add to `workflows[]`; declare each tool node's exact `tools` and source them through `requires.toolsets`, `requires.mcp_servers`, or explicit `workflowCoreTools` | seeded to `$HERMES_HOME/workflows/` |
 
 Then, in `hermes-agent`: `node scripts/vendor-ericsson.mjs` → `git commit` on `base` → restamp
 otto/loop24 → release. Nothing in the vendor script or seed is hardcoded — they derive from the
@@ -41,6 +41,39 @@ branch is checked out, stop and reconcile that wording with this invariant befor
 - Credentials: a tool plugin's `check_available()` returns whether its creds exist (Jira), or
   `True` with the tool guiding sign-in (Teams via `teams_auth`). Tools are always visible; they
   only *fire* when configured.
+
+## Ericsson onboarding contract
+
+`skills/ericsson/onboard-ericsson-capabilities/` is the bundled, all-profile entry point for
+capability discovery, education, readiness, safe demonstrations, artifact interpretation,
+troubleshooting, and consented resume. It is a thin catalog-driven router; domain behavior stays
+in the selected skill/plugin/MCP/workflow. Its compact `references/catalog.json` is generated,
+never hand-edited. After entry changes run:
+
+```bash
+.venv/bin/python skills/ericsson/onboard-ericsson-capabilities/scripts/build_catalog.py
+.venv/bin/python skills/ericsson/onboard-ericsson-capabilities/scripts/build_catalog.py --check
+.venv/bin/python skills/ericsson/onboard-ericsson-capabilities/scripts/validate_catalog.py
+```
+
+Adding, removing, or materially changing a capability must update its implementation; manifest
+and runtime registration; user-facing capability/flow documentation; configuration,
+authentication, permissions, dependencies, and platforms; natural-language triggers; reads,
+writes, approvals, outputs, and artifact guidance; demo/test artifacts and troubleshooting where
+applicable; onboarding entry/generated catalog; and vendored Hermes snapshot. Prefer the
+validators over checklist memory.
+
+Ericsson has no capability-set toggle or disabled-by-default delivery declarations; keep generic
+staging infrastructure available for other sets. Pseudonymization is the recommendation-ineligible
+`not-supported-no-port-planned` historical tombstone and has no roadmap. Re-Identification is
+non-runnable because its protected mapping dependency is unavailable. Windows resume uses explicit
+OS dispatch to a native backend; portable tests pass off Windows, while the 11 native acceptance
+cases remain a Windows release gate documented in `docs/onboarding/windows-resume-release-validation.md`.
+
+Delivery remains source-first: verify/commit here, vendor the exact source revision on neutral
+Hermes `base`, discover every brand from `brands/*.json`, merge `base` into each, regenerate/check
+each overlay, verify shared bytes, and finish clean on `otto`. Never author shared onboarding
+content directly on a brand branch.
 
 ## Extension points (only when adding a NEW artifact TYPE)
 

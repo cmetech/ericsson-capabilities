@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1.0",
+  "catalogVersion": "0.4.0",
+  "selectedCapabilities": [
+    "jira-assigned-ticket-summary"
+  ],
+  "maturity": {
+    "jira-assigned-ticket-summary": "available"
+  },
+  "readinessFacts": {
+    "jira-assigned-ticket-summary": {
+      "state": "missing",
+      "discoverable": true,
+      "enabled": true,
+      "platformSupported": true,
+      "requiredSettingsConfigured": false,
+      "permissionAdequate": null,
+      "dependencyAvailable": true,
+      "authenticationValidated": false,
+      "safeProbeSucceeded": null
+    }
+  },
+  "completedSteps": [
+    "Selected Jira Assigned-Ticket Summary for Example User's catch-up goal.",
+    "Confirmed the capability is packaged and discoverable without reading protected values."
+  ],
+  "pendingActions": [
+    "Configure the Jira site URL in protected Tools & Keys, then validate authentication without printing protected values."
+  ],
+  "artifactPointers": [],
+  "nextPrompt": "Help me safely finish Jira configuration.",
+  "createdAt": "2026-07-15T13:00:00Z",
+  "updatedAt": "2026-07-15T13:05:00Z"
+}

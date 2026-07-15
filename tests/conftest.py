@@ -49,7 +49,8 @@ inputs:
 nodes:
   - id: fetch
     kind: tool
-    prompt: fetch things
+    tools: [example_fetch]
+    prompt: fetch things with example_fetch
     output: things.json
   - id: summarize
     kind: prompt
@@ -58,10 +59,11 @@ nodes:
     output: summary.md
   - id: send
     kind: tool
+    tools: [example_send]
     depends_on: [summarize]
     when: "$inputs.deliver_to == 'email'"
     side_effects: true
-    prompt: email summary.md
+    prompt: email summary.md with example_send
 report:
   kanban: auto
 """

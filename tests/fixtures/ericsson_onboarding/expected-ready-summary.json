@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "catalogVersion": "0.4.0",
+  "selectedCapabilities": [
+    "jira-assigned-ticket-summary"
+  ],
+  "maturity": {
+    "jira-assigned-ticket-summary": "available"
+  },
+  "readinessFacts": {
+    "jira-assigned-ticket-summary": {
+      "state": "ready",
+      "discoverable": true,
+      "enabled": true,
+      "platformSupported": true,
+      "requiredSettingsConfigured": true,
+      "permissionAdequate": true,
+      "dependencyAvailable": true,
+      "authenticationValidated": true,
+      "safeProbeSucceeded": true
+    }
+  },
+  "completedSteps": [
+    "Selected Jira Assigned-Ticket Summary for Example User's catch-up goal.",
+    "Reviewed maturity available and readiness ready using synthetic runtime facts.",
+    "Completed synthetic/offline demonstration SYNTH-JIRA-DIGEST-001.",
+    "Compared expected and actual Markdown and inspected the generated artifact."
+  ],
+  "pendingActions": [],
+  "artifactPointers": [
+    "onboarding/ericsson/demos/SYNTH-JIRA-DIGEST-001/summary.md"
+  ],
+  "nextPrompt": "Summarize the Jira tickets assigned to me.",
+  "createdAt": "2026-07-15T12:00:00Z",
+  "updatedAt": "2026-07-15T12:10:00Z"
+}

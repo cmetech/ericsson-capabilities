@@ -7,9 +7,11 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from opportunity_data import (
     DataContractError,
@@ -112,55 +114,141 @@ def _terminal_before_range_exclusions(
 @dataclass(frozen=True)
 class _OwnedPublication:
     path: Path
-    owner_path: Path
+    owner_handle: BinaryIO
+    owner_stat: os.stat_result
+    stage_path: Path
     expected_sha256: str
 
 
+def _sha256_handle(handle: BinaryIO) -> str:
+    handle.flush()
+    position = handle.tell()
+    handle.seek(0)
+    digest = hashlib.sha256()
+    while chunk := handle.read(1024 * 1024):
+        digest.update(chunk)
+    handle.seek(position)
+    return digest.hexdigest()
+
+
+def _remove_owned_name(path: Path, owner_stat: os.stat_result) -> None:
+    """Remove only a name for owner_stat, restoring captured competitors safely."""
+
+    quarantine_dir: Path | None = None
+    candidate: Path | None = None
+    try:
+        try:
+            quarantine_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{path.name}.rollback-",
+                    dir=path.parent,
+                )
+            )
+            candidate = quarantine_dir / "candidate"
+            os.rename(path, candidate)
+        except (FileNotFoundError, OSError):
+            return
+
+        candidate_stat = candidate.lstat()
+        if os.path.samestat(owner_stat, candidate_stat):
+            candidate.unlink()
+            return
+
+        try:
+            os.link(candidate, path, follow_symlinks=False)
+        except FileExistsError:
+            return
+        try:
+            restored_stat = path.lstat()
+        except FileNotFoundError:
+            return
+        if not os.path.samestat(candidate_stat, restored_stat):
+            return
+        candidate.unlink()
+    finally:
+        if quarantine_dir is not None:
+            try:
+                quarantine_dir.rmdir()
+            except OSError:
+                pass
+
+
 def _atomic_json(path: Path, value: object) -> _OwnedPublication:
-    """Publish JSON without clobbering and retain private ownership evidence."""
+    """Publish JSON while retaining the original open file as owner evidence."""
 
     path = Path(path)
     temporary = path.with_name(f".{path.name}.tmp")
     encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
         raise FileExistsError("Output artifact already exists")
+    handle: BinaryIO | None = None
     try:
-        with temporary.open("xb") as handle:
-            handle.write(encoded)
+        handle = temporary.open("x+b")
+        handle.write(encoded)
+        handle.flush()
+        owner_stat = os.fstat(handle.fileno())
+        if not stat.S_ISREG(owner_stat.st_mode):
+            raise OSError("Staging artifact is not a regular file")
+        expected_sha256 = _sha256_handle(handle)
+        try:
+            staged_stat = temporary.lstat()
+        except OSError:
+            raise OSError("Staging artifact changed before publication") from None
+        if not os.path.samestat(owner_stat, staged_stat):
+            raise OSError("Staging artifact changed before publication")
         os.link(temporary, path, follow_symlinks=False)
+        try:
+            visible_stat = path.lstat()
+            retained_stat = os.fstat(handle.fileno())
+        except OSError:
+            raise OSError("Output artifact changed during publication") from None
+        if (
+            not stat.S_ISREG(retained_stat.st_mode)
+            or not os.path.samestat(owner_stat, retained_stat)
+            or not os.path.samestat(retained_stat, visible_stat)
+            or _sha256_handle(handle) != expected_sha256
+        ):
+            raise OSError("Output artifact changed during publication")
+        _remove_owned_name(temporary, retained_stat)
     except BaseException:
-        if temporary.exists() and not temporary.is_symlink():
+        if handle is not None:
             try:
-                temporary.unlink()
+                owner_stat = os.fstat(handle.fileno())
             except OSError:
-                pass
+                owner_stat = None
+            if owner_stat is not None:
+                _remove_owned_name(path, owner_stat)
+                _remove_owned_name(temporary, owner_stat)
+            handle.close()
         raise
+    assert handle is not None
     return _OwnedPublication(
         path=path,
-        owner_path=temporary,
-        expected_sha256=hashlib.sha256(encoded).hexdigest(),
+        owner_handle=handle,
+        owner_stat=owner_stat,
+        stage_path=temporary,
+        expected_sha256=expected_sha256,
     )
 
 
 def _release_owner(publication: _OwnedPublication) -> None:
-    try:
-        publication.owner_path.unlink()
-    except FileNotFoundError:
-        pass
+    publication.owner_handle.close()
+    _remove_owned_name(publication.stage_path, publication.owner_stat)
 
 
 def _verify_publications(publications: list[_OwnedPublication]) -> None:
     for publication in publications:
         try:
-            owner_stat = publication.owner_path.lstat()
+            owner_stat = os.fstat(publication.owner_handle.fileno())
             visible_stat = publication.path.lstat()
-            actual_sha256 = hashlib.sha256(publication.owner_path.read_bytes()).hexdigest()
+            actual_sha256 = _sha256_handle(publication.owner_handle)
         except OSError:
             raise DataContractError(
                 "output_changed", "An output artifact changed before commit"
             ) from None
         if (
-            not os.path.samestat(owner_stat, visible_stat)
+            not stat.S_ISREG(owner_stat.st_mode)
+            or not os.path.samestat(owner_stat, visible_stat)
             or actual_sha256 != publication.expected_sha256
         ):
             raise DataContractError(
@@ -171,48 +259,14 @@ def _verify_publications(publications: list[_OwnedPublication]) -> None:
 def _rollback_owned(publication: _OwnedPublication) -> None:
     """Remove only this transaction's inode and preserve a competing replacement."""
 
-    quarantine_dir: Path | None = None
-    candidate: Path | None = None
     try:
         try:
-            owner_stat = publication.owner_path.lstat()
-        except FileNotFoundError:
+            owner_stat = os.fstat(publication.owner_handle.fileno())
+        except OSError:
             return
-        try:
-            quarantine_dir = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{publication.path.name}.rollback-",
-                    dir=publication.path.parent,
-                )
-            )
-            candidate = quarantine_dir / "candidate"
-            os.rename(publication.path, candidate)
-        except (FileNotFoundError, OSError):
-            return
-
-        candidate_stat = candidate.lstat()
-        if os.path.samestat(owner_stat, candidate_stat):
-            candidate.unlink()
-            return
-
-        try:
-            os.link(candidate, publication.path, follow_symlinks=False)
-        except FileExistsError:
-            return
-        try:
-            restored_stat = publication.path.lstat()
-        except FileNotFoundError:
-            return
-        if not os.path.samestat(candidate_stat, restored_stat):
-            return
-        candidate.unlink()
+        _remove_owned_name(publication.path, owner_stat)
     finally:
         _release_owner(publication)
-        if quarantine_dir is not None:
-            try:
-                quarantine_dir.rmdir()
-            except OSError:
-                pass
 
 
 def _validate_output_destination(output_dir: Path) -> bool:
@@ -258,6 +312,8 @@ def _write_artifacts(
                 output_dir.rmdir()
             except OSError:
                 pass
+        if not isinstance(error, Exception):
+            raise
         if isinstance(error, DataContractError):
             raise
         raise DataContractError(

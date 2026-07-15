@@ -1098,6 +1098,45 @@ def test_atomic_json_cannot_overwrite_target_created_during_publish(tmp_path, mo
     assert not (tmp_path / ".source-summary.json.tmp").exists()
 
 
+def test_atomic_json_rejects_stage_path_substitution_after_write_before_link(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "prepared"
+    output_dir.mkdir()
+    output = output_dir / "source-summary.json"
+    temporary = output_dir / ".source-summary.json.tmp"
+    expected = json.dumps({"safe": True}, indent=2, sort_keys=True) + "\n"
+    victim = tmp_path / "external-victim.json"
+    victim.write_text(expected, encoding="utf-8")
+    real_link = os.link
+    calls = 0
+
+    def substitute_stage_then_link(source, target, **kwargs):
+        nonlocal calls
+        calls += 1
+        source = Path(source)
+        if calls == 1:
+            source.unlink()
+            source.symlink_to(victim)
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", substitute_stage_then_link)
+
+    with pytest.raises(DataContractError) as caught:
+        prepare_opportunities._write_artifacts(
+            output_dir,
+            [("source-summary.json", {"safe": True})],
+            create_output_dir=False,
+        )
+
+    assert caught.value.code == "output_unwritable"
+    victim.write_text("MUTATED EXTERNAL CONTENT\n", encoding="utf-8")
+    assert output.is_symlink()
+    assert output.read_text(encoding="utf-8") == "MUTATED EXTERNAL CONTENT\n"
+    assert temporary.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "MUTATED EXTERNAL CONTENT\n"
+
+
 def test_preparation_rollback_preserves_competitors_for_all_artifact_names(
     tmp_path, monkeypatch
 ):
@@ -1139,6 +1178,37 @@ def test_preparation_rollback_preserves_competitors_for_all_artifact_names(
         assert os.path.samestat(path.lstat(), expected_stat)
         assert path.read_text(encoding="utf-8") == f"competitor-{name}\n"
     assert not list(output_dir.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt(), SystemExit(23)])
+def test_write_artifacts_reraises_process_control_exceptions(
+    tmp_path, monkeypatch, control
+):
+    output_dir = tmp_path / "prepared"
+    original_atomic_json = prepare_opportunities._atomic_json
+    calls = 0
+
+    def interrupt(path, value):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise control
+        return original_atomic_json(path, value)
+
+    monkeypatch.setattr(prepare_opportunities, "_atomic_json", interrupt)
+
+    with pytest.raises(type(control)) as caught:
+        prepare_opportunities._write_artifacts(
+            output_dir,
+            [
+                ("source-summary.json", {"safe": True}),
+                ("normalized-data.json", {"safe": True}),
+            ],
+            create_output_dir=True,
+        )
+
+    assert caught.value is control
+    assert not output_dir.exists()
 
 
 def test_prepare_cli_rejects_symlink_destination_without_touching_target(

@@ -681,6 +681,8 @@ def normalize_rank(
     if number is None or not math.isfinite(number):
         raise invalid_value()
     rank = number * multiplier
+    if not math.isfinite(rank):
+        raise invalid_value()
     if field == "probability" and not percent and 0 <= rank <= 1:
         rank *= 100
     if field == "probability" and not 0 <= rank <= 100:

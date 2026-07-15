@@ -489,6 +489,17 @@ def test_normalize_rank_rejects_oversized_numeric_conversions_stably(
     assert caught.value.code == f"invalid_{field}"
 
 
+@pytest.mark.parametrize("suffix", ["K", "M", "B"])
+def test_normalize_rank_rejects_magnitude_multiplication_overflow(suffix):
+    value = f"{'9' * 308}{suffix}"
+
+    with pytest.raises(DataContractError) as caught:
+        normalize_rank(value, [], "tcv")
+
+    assert caught.value.code == "invalid_tcv"
+    assert "Infinity" not in str(caught.value)
+
+
 def test_oversized_monthly_probability_is_a_row_local_exclusion(semantics):
     row = {
         "ID": "HUGE-MONTHLY",

@@ -42,6 +42,7 @@ Supporting foundations already exist independently of a complete flow port: Jira
 - [Flow template](flows/_template.md) is the required structure for documenting future source flows.
 - [Ericsson Opportunity Visuals skill design](superpowers/specs/2026-07-14-ericsson-opportunity-visuals-design.md) specifies the approved deterministic port of the Loop24 Image Generation flow, including natural-language triggers, coworker interview behavior, and synthetic showcase/test artifacts.
 - [Opportunity Visuals showcase](showcases/opportunity-visuals.md) provides cold-start prompts, exact synthetic commands, expected counts, artifact interpretation, PNG setup, troubleshooting, and visual verification.
+- [Opportunity Visuals explained](opportunity-visuals-explained.md) gives a non-technical overview of what was delivered, how the coworker uses it, what the generated files mean, why the implementation is substantial, and how the shared skill reaches both OTTO and LOOP24.
 
 ## Status vocabulary
 

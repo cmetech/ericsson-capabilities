@@ -26,6 +26,15 @@ Then, in `hermes-agent`: `node scripts/vendor-ericsson.mjs` → `git commit` on 
 otto/loop24 → release. Nothing in the vendor script or seed is hardcoded — they derive from the
 manifest, so those steps never change.
 
+**Branch-placement invariant:** every shared Ericsson skill, plugin, MCP definition, workflow,
+and capability-manifest update must first be vendored and committed on the neutral
+`hermes-agent/base` branch. Never commit shared vendored content directly to `otto`, `loop24`,
+or another brand branch, even when that brand branch is the current checkout. Merge `base` into
+every brand discovered from `brands/*.json`, run the brand generator's `--write` and `--check`
+gates, and finish on clean `otto`. Only generated branding overlays or explicitly brand-specific
+assets belong directly on a brand branch. If a request says "use this branch" while a brand
+branch is checked out, stop and reconcile that wording with this invariant before vendoring.
+
 ## Gating (no toggle)
 
 - OS: `platforms: [windows]` on any Outlook/COM skill (auto-hides elsewhere).

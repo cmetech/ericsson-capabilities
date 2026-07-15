@@ -478,6 +478,41 @@ def test_normalize_rank_rejects_numeric_probability_outside_percentage_range(val
     assert caught.value.code == "invalid_probability"
 
 
+@pytest.mark.parametrize("field", ["tcv", "probability"])
+@pytest.mark.parametrize("value", [10**1000, "9" * 1001])
+def test_normalize_rank_rejects_oversized_numeric_conversions_stably(
+    value, field
+):
+    with pytest.raises(DataContractError) as caught:
+        normalize_rank(value, [], field)
+
+    assert caught.value.code == f"invalid_{field}"
+
+
+def test_oversized_monthly_probability_is_a_row_local_exclusion(semantics):
+    row = {
+        "ID": "HUGE-MONTHLY",
+        "Area": "Core",
+        "Sub-area": "Cloud",
+        "Opportunity Name": "Oversized probability",
+        "TCV": "$1M",
+        "Probability": 50,
+        "Mar '26": "Solution",
+        "Mar '26 Probability": 50,
+        "Apr '26": "Proposal",
+        "Apr '26 Probability": 10**1000,
+        "May '26": "Proposal",
+        "May '26 Probability": 50,
+        "Jun '26": "Proposal",
+        "Jun '26 Probability": 50,
+    }
+
+    records, exclusions = normalize_rows([row], _showcase_mapping(), semantics)
+
+    assert records == []
+    assert exclusions[0]["code"] == "invalid_probability"
+
+
 def test_invalid_monthly_probability_is_excluded_before_it_can_change_classification(
     semantics,
 ):
@@ -739,6 +774,14 @@ def test_apply_filters_matches_case_insensitively_and_uses_rank_bounds(semantics
 def test_apply_filters_rejects_boolean_and_nonfinite_numeric_bounds(bound):
     with pytest.raises(DataContractError) as caught:
         apply_filters([], {"probability_min": bound})
+
+    assert caught.value.code == "invalid_filters"
+
+
+@pytest.mark.parametrize("prefix", ["tcv", "probability"])
+def test_apply_filters_rejects_oversized_integer_bounds_stably(prefix):
+    with pytest.raises(DataContractError) as caught:
+        apply_filters([], {f"{prefix}_min": 10**1000})
 
     assert caught.value.code == "invalid_filters"
 

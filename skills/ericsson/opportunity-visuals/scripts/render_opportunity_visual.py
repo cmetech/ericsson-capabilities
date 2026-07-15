@@ -15,6 +15,7 @@ import tempfile
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
+from typing import BinaryIO
 from xml.etree import ElementTree
 
 
@@ -103,7 +104,9 @@ class PagePlan:
 @dataclass(frozen=True)
 class _OwnedPublication:
     path: Path
-    owner_path: Path
+    owner_handle: BinaryIO
+    owner_stat: os.stat_result
+    stage_path: Path
     expected_sha256: str
     cleanup_dir: Path | None = None
 
@@ -375,9 +378,16 @@ def _probability_color(record: dict[str, object]) -> str:
     if not isinstance(display, str):
         raise RenderError("invalid_probability", "Normalized probability is invalid")
     if kind == "numeric":
-        if isinstance(rank, bool) or not isinstance(rank, Real) or not math.isfinite(float(rank)):
+        if isinstance(rank, bool) or not isinstance(rank, Real):
             raise RenderError("invalid_probability", "Normalized probability is invalid")
-        numeric = float(rank)
+        try:
+            numeric = float(rank)
+        except (TypeError, ValueError, OverflowError):
+            raise RenderError(
+                "invalid_probability", "Normalized probability is invalid"
+            ) from None
+        if not math.isfinite(numeric):
+            raise RenderError("invalid_probability", "Normalized probability is invalid")
         if not 0 <= numeric <= 100:
             raise RenderError(
                 "invalid_probability",
@@ -1123,43 +1133,160 @@ def preflight(output_dir: Path) -> dict[str, object]:
     }
 
 
+def _sha256_handle(handle: BinaryIO) -> str:
+    handle.flush()
+    position = handle.tell()
+    handle.seek(0)
+    digest = hashlib.sha256()
+    while chunk := handle.read(1024 * 1024):
+        digest.update(chunk)
+    handle.seek(position)
+    return digest.hexdigest()
+
+
+def _remove_owned_name(path: Path, owner_stat: os.stat_result) -> None:
+    """Remove only owner_stat's name, restoring a captured competitor safely."""
+
+    quarantine_dir: Path | None = None
+    candidate: Path | None = None
+    try:
+        try:
+            quarantine_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{path.name}.rollback-",
+                    dir=path.parent,
+                )
+            )
+            candidate = quarantine_dir / "candidate"
+            os.rename(path, candidate)
+        except OSError:
+            return
+
+        candidate_stat = candidate.lstat()
+        if os.path.samestat(owner_stat, candidate_stat):
+            candidate.unlink()
+            return
+        try:
+            os.link(candidate, path, follow_symlinks=False)
+        except FileExistsError:
+            return
+        try:
+            restored_stat = path.lstat()
+        except FileNotFoundError:
+            return
+        if not os.path.samestat(candidate_stat, restored_stat):
+            return
+        candidate.unlink()
+    finally:
+        if quarantine_dir is not None:
+            try:
+                quarantine_dir.rmdir()
+            except OSError:
+                pass
+
+
+def _publish_retained_handle(
+    handle: BinaryIO,
+    stage_path: Path,
+    target: Path,
+    expected_sha256: str,
+    *,
+    cleanup_dir: Path | None = None,
+) -> _OwnedPublication:
+    """Publish stage_path only when it still names the retained regular file."""
+
+    owner_stat = os.fstat(handle.fileno())
+    if (
+        not stat.S_ISREG(owner_stat.st_mode)
+        or _sha256_handle(handle) != expected_sha256
+    ):
+        raise RenderError("output_changed", "A rendered artifact changed during publication")
+    try:
+        stage_stat = stage_path.lstat()
+    except OSError:
+        raise RenderError(
+            "output_changed", "A rendered artifact changed during publication"
+        ) from None
+    if not os.path.samestat(owner_stat, stage_stat):
+        raise RenderError("output_changed", "A rendered artifact changed during publication")
+    published = False
+    try:
+        try:
+            os.link(stage_path, target)
+            published = True
+        except FileExistsError:
+            raise RenderError("output_exists", "Output artifact already exists") from None
+        try:
+            visible_stat = target.lstat()
+            retained_stat = os.fstat(handle.fileno())
+        except OSError:
+            raise RenderError(
+                "output_changed", "A rendered artifact changed during publication"
+            ) from None
+        if (
+            not stat.S_ISREG(retained_stat.st_mode)
+            or not os.path.samestat(owner_stat, retained_stat)
+            or not os.path.samestat(retained_stat, visible_stat)
+            or _sha256_handle(handle) != expected_sha256
+        ):
+            raise RenderError(
+                "output_changed", "A rendered artifact changed during publication"
+            )
+        _remove_owned_name(stage_path, retained_stat)
+    except BaseException:
+        if published:
+            _remove_owned_name(target, owner_stat)
+        raise
+    return _OwnedPublication(
+        path=target,
+        owner_handle=handle,
+        owner_stat=retained_stat,
+        stage_path=stage_path,
+        expected_sha256=expected_sha256,
+        cleanup_dir=cleanup_dir,
+    )
+
+
 def _publish_owned_text(path: Path, text: str) -> _OwnedPublication:
-    """Publish without clobbering and retain a hard-link identity for rollback."""
+    """Publish without clobbering while retaining the original open stage file."""
+
     path = Path(path)
     temporary = path.with_name(f".{path.name}.tmp")
     encoded = text.encode("utf-8")
     expected_sha256 = hashlib.sha256(encoded).hexdigest()
     if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
         raise RenderError("output_exists", "Output artifact already exists")
+    handle: BinaryIO | None = None
     try:
         try:
-            with temporary.open("xb") as handle:
-                handle.write(encoded)
+            handle = temporary.open("x+b")
         except FileExistsError:
             raise RenderError("output_exists", "Output artifact already exists") from None
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            raise RenderError("output_exists", "Output artifact already exists") from None
-    except BaseException:
-        if temporary.exists() or temporary.is_symlink():
+        handle.write(encoded)
+        handle.flush()
+        return _publish_retained_handle(
+            handle,
+            temporary,
+            path,
+            expected_sha256,
+        )
+    except BaseException as error:
+        if handle is not None:
             try:
-                temporary.unlink()
+                owner_stat = os.fstat(handle.fileno())
             except OSError:
-                pass
+                owner_stat = None
+            if owner_stat is not None:
+                _remove_owned_name(temporary, owner_stat)
+            handle.close()
+        if isinstance(error, OSError):
+            raise RenderError("output_unwritable", "Unable to write render artifacts") from None
         raise
-    return _OwnedPublication(
-        path=path,
-        owner_path=temporary,
-        expected_sha256=expected_sha256,
-    )
 
 
 def _release_owner(publication: _OwnedPublication) -> None:
-    try:
-        publication.owner_path.unlink()
-    except FileNotFoundError:
-        pass
+    publication.owner_handle.close()
+    _remove_owned_name(publication.stage_path, publication.owner_stat)
     if publication.cleanup_dir is not None:
         try:
             publication.cleanup_dir.rmdir()
@@ -1177,24 +1304,32 @@ def _publish_owned_file(
 
     source = Path(source)
     target = Path(target)
-    if source.is_symlink() or not source.is_file():
-        raise RenderError("output_unwritable", "Unable to write render artifacts")
-    try:
-        expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
-    except OSError:
-        raise RenderError("output_unwritable", "Unable to write render artifacts") from None
     if target.exists() or target.is_symlink():
         raise RenderError("output_exists", "Output artifact already exists")
+    handle: BinaryIO | None = None
     try:
-        os.link(source, target, follow_symlinks=False)
-    except FileExistsError:
-        raise RenderError("output_exists", "Output artifact already exists") from None
-    return _OwnedPublication(
-        path=target,
-        owner_path=source,
-        expected_sha256=expected_sha256,
-        cleanup_dir=cleanup_dir,
-    )
+        handle = source.open("rb")
+        owner_stat = os.fstat(handle.fileno())
+        if not stat.S_ISREG(owner_stat.st_mode):
+            raise RenderError("output_unwritable", "Unable to write render artifacts")
+        expected_sha256 = _sha256_handle(handle)
+        return _publish_retained_handle(
+            handle,
+            source,
+            target,
+            expected_sha256,
+            cleanup_dir=cleanup_dir,
+        )
+    except BaseException as error:
+        if handle is not None:
+            try:
+                owner_stat = os.fstat(handle.fileno())
+            except OSError:
+                owner_stat = None
+            handle.close()
+        if isinstance(error, OSError):
+            raise RenderError("output_unwritable", "Unable to write render artifacts") from None
+        raise
 
 
 def _verify_publications(publications: list[_OwnedPublication]) -> None:
@@ -1202,20 +1337,21 @@ def _verify_publications(publications: list[_OwnedPublication]) -> None:
 
     for publication in publications:
         try:
-            owner_stat = publication.owner_path.lstat()
+            owner_stat = os.fstat(publication.owner_handle.fileno())
             visible_stat = publication.path.lstat()
         except OSError:
             raise RenderError(
                 "output_changed", "A rendered artifact changed before commit"
             ) from None
-        if not os.path.samestat(owner_stat, visible_stat):
+        if (
+            not stat.S_ISREG(owner_stat.st_mode)
+            or not os.path.samestat(owner_stat, visible_stat)
+        ):
             raise RenderError(
                 "output_changed", "A rendered artifact changed before commit"
             )
         try:
-            actual_sha256 = hashlib.sha256(
-                publication.owner_path.read_bytes()
-            ).hexdigest()
+            actual_sha256 = _sha256_handle(publication.owner_handle)
         except OSError:
             raise RenderError(
                 "output_changed", "A rendered artifact changed before commit"
@@ -1236,50 +1372,14 @@ def _rollback_owned(publication: _OwnedPublication) -> None:
     in place rather than deleting either competitor.
     """
 
-    quarantine_dir: Path | None = None
-    candidate: Path | None = None
     try:
         try:
-            owner_stat = publication.owner_path.lstat()
-        except FileNotFoundError:
-            return
-        try:
-            quarantine_dir = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{publication.path.name}.rollback-",
-                    dir=publication.path.parent,
-                )
-            )
-            candidate = quarantine_dir / "candidate"
-            os.rename(publication.path, candidate)
-        except FileNotFoundError:
-            return
+            owner_stat = os.fstat(publication.owner_handle.fileno())
         except OSError:
             return
-
-        candidate_stat = candidate.lstat()
-        if os.path.samestat(owner_stat, candidate_stat):
-            candidate.unlink()
-            return
-
-        try:
-            os.link(candidate, publication.path, follow_symlinks=False)
-        except FileExistsError:
-            return
-        try:
-            restored_stat = publication.path.lstat()
-        except FileNotFoundError:
-            return
-        if not os.path.samestat(candidate_stat, restored_stat):
-            return
-        candidate.unlink()
+        _remove_owned_name(publication.path, owner_stat)
     finally:
         _release_owner(publication)
-        if quarantine_dir is not None:
-            try:
-                quarantine_dir.rmdir()
-            except OSError:
-                pass
 
 
 def atomic_write_text(path: Path, text: str) -> None:

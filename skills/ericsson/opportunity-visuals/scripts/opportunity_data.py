@@ -628,11 +628,22 @@ def normalize_rank(
 
     if field not in {"tcv", "probability"}:
         raise ValueError(f"Unsupported rank field: {field}")
-    display = str(value)
-    if value is None or not display.strip() or isinstance(value, bool):
-        raise DataContractError(
-            f"invalid_{field}", f"Invalid {field} value: {value!r}"
+
+    def invalid_value() -> DataContractError:
+        try:
+            rendered = repr(value)
+        except (TypeError, ValueError, OverflowError):
+            rendered = f"<{type(value).__name__}>"
+        return DataContractError(
+            f"invalid_{field}", f"Invalid {field} value: {rendered}"
         )
+
+    try:
+        display = str(value)
+    except (TypeError, ValueError, OverflowError):
+        raise invalid_value() from None
+    if value is None or not display.strip() or isinstance(value, bool):
+        raise invalid_value()
     if not isinstance(configured_order, list) or any(
         not isinstance(item, str) for item in configured_order
     ):
@@ -650,28 +661,30 @@ def normalize_rank(
     percent = False
     multiplier = 1.0
     if isinstance(value, Real):
-        number = float(value)
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise invalid_value() from None
     elif isinstance(value, str):
         candidate = value.strip().replace(",", "").replace(" ", "")
         match = _NUMERIC_VALUE_PATTERN.fullmatch(candidate)
         if match:
             sign, numeric_text, suffix, percent_mark = match.groups()
-            number = float(f"{sign}{numeric_text}")
+            try:
+                number = float(f"{sign}{numeric_text}")
+            except (TypeError, ValueError, OverflowError):
+                raise invalid_value() from None
             percent = bool(percent_mark)
             multiplier = {"k": 1_000.0, "m": 1_000_000.0, "b": 1_000_000_000.0}.get(
                 (suffix or "").casefold(), 1.0
             )
     if number is None or not math.isfinite(number):
-        raise DataContractError(
-            f"invalid_{field}", f"Invalid {field} value: {value!r}"
-        )
+        raise invalid_value()
     rank = number * multiplier
     if field == "probability" and not percent and 0 <= rank <= 1:
         rank *= 100
     if field == "probability" and not 0 <= rank <= 100:
-        raise DataContractError(
-            "invalid_probability", f"Invalid probability value: {value!r}"
-        )
+        raise invalid_value()
     return display, rank, "numeric"
 
 
@@ -999,17 +1012,27 @@ def _validate_filters(filters: dict[str, object] | None) -> dict[str, object]:
     for prefix in ("tcv", "probability"):
         minimum = filters.get(f"{prefix}_min")
         maximum = filters.get(f"{prefix}_max")
-        if minimum is not None and (
-            isinstance(minimum, bool)
-            or not isinstance(minimum, Real)
-            or not math.isfinite(float(minimum))
-        ):
+        try:
+            minimum_is_finite = (
+                minimum is not None
+                and not isinstance(minimum, bool)
+                and isinstance(minimum, Real)
+                and math.isfinite(float(minimum))
+            )
+        except (TypeError, ValueError, OverflowError):
+            minimum_is_finite = False
+        if minimum is not None and not minimum_is_finite:
             raise DataContractError("invalid_filters", f"{prefix}_min must be numeric")
-        if maximum is not None and (
-            isinstance(maximum, bool)
-            or not isinstance(maximum, Real)
-            or not math.isfinite(float(maximum))
-        ):
+        try:
+            maximum_is_finite = (
+                maximum is not None
+                and not isinstance(maximum, bool)
+                and isinstance(maximum, Real)
+                and math.isfinite(float(maximum))
+            )
+        except (TypeError, ValueError, OverflowError):
+            maximum_is_finite = False
+        if maximum is not None and not maximum_is_finite:
             raise DataContractError("invalid_filters", f"{prefix}_max must be numeric")
         if minimum is not None and maximum is not None and minimum > maximum:
             raise DataContractError(

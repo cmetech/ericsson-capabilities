@@ -329,6 +329,34 @@ def test_renderer_rejects_out_of_range_normalized_probability(normalized_documen
         render_svg_page(normalized_document, page, TEMPLATE)
 
 
+def test_renderer_cli_reports_invalid_probability_for_oversized_json_integer(
+    tmp_path, normalized_document, capsys
+):
+    normalized_document["records"][0]["probability"] = {
+        "display": "oversized",
+        "sort": 10**1000,
+        "kind": "numeric",
+    }
+    normalized_path = tmp_path / "normalized-data.json"
+    normalized_path.write_text(json.dumps(normalized_document), encoding="utf-8")
+
+    result = renderer.main(
+        [
+            str(normalized_path),
+            "--output-dir",
+            str(tmp_path / "rendered"),
+            "--png",
+            "never",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert result == 2
+    assert captured.err == ""
+    assert json.loads(captured.out)["error"]["code"] == "invalid_probability"
+    assert "Traceback" not in captured.out
+
+
 @pytest.mark.parametrize(
     ("width", "height", "title_font", "header_font", "body_font", "stage_font", "pill_height"),
     [
@@ -413,9 +441,9 @@ def test_atomic_write_text_cannot_overwrite_target_created_during_publish(
     output = tmp_path / "page.svg"
     real_link = os.link
 
-    def competing_publish(source, target):
+    def competing_publish(source, target, **kwargs):
         Path(target).write_text("competitor\n", encoding="utf-8")
-        return real_link(source, target)
+        return real_link(source, target, **kwargs)
 
     monkeypatch.setattr(os, "link", competing_publish)
 
@@ -423,6 +451,40 @@ def test_atomic_write_text_cannot_overwrite_target_created_during_publish(
         atomic_write_text(output, "renderer\n")
     assert output.read_text(encoding="utf-8") == "competitor\n"
     assert not (tmp_path / ".page.svg.tmp").exists()
+
+
+def test_atomic_write_text_rejects_same_byte_stage_inode_substitution(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "page.svg"
+    temporary = tmp_path / ".page.svg.tmp"
+    victim = tmp_path / "external-victim.svg"
+    victim.write_text("renderer\n", encoding="utf-8")
+    victim_stat = victim.lstat()
+    real_link = os.link
+    calls = 0
+
+    def substitute_stage_then_link(source, target, **kwargs):
+        nonlocal calls
+        calls += 1
+        source = Path(source)
+        if calls == 1:
+            source.unlink()
+            real_link(victim, source, follow_symlinks=False)
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", substitute_stage_then_link)
+
+    with pytest.raises(RenderError) as caught:
+        atomic_write_text(output, "renderer\n")
+
+    assert caught.value.code == "output_changed"
+    assert os.path.samestat(victim.lstat(), victim_stat)
+    assert os.path.samestat(temporary.lstat(), victim_stat)
+    assert os.path.samestat(output.lstat(), victim_stat)
+    victim.write_text("MUTATED EXTERNAL CONTENT\n", encoding="utf-8")
+    assert temporary.read_text(encoding="utf-8") == "MUTATED EXTERNAL CONTENT\n"
+    assert output.read_text(encoding="utf-8") == "MUTATED EXTERNAL CONTENT\n"
 
 
 def test_html_is_self_contained(tmp_path, normalized_document):
@@ -1710,12 +1772,12 @@ def test_cli_rolls_back_all_pages_when_an_atomic_publish_fails(
     real_link = os.link
     calls = 0
 
-    def fail_second_publish(source, target):
+    def fail_second_publish(source, target, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("sensitive /private/data")
-        return real_link(source, target)
+        return real_link(source, target, **kwargs)
 
     monkeypatch.setattr(os, "link", fail_second_publish)
     result = renderer.main(
@@ -1749,12 +1811,12 @@ def test_cli_rolls_back_only_its_pages_when_competitor_wins_later_page(
     real_link = os.link
     calls = 0
 
-    def compete_on_second_page(source, target):
+    def compete_on_second_page(source, target, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 2:
             Path(target).write_text("competitor\n", encoding="utf-8")
-        return real_link(source, target)
+        return real_link(source, target, **kwargs)
 
     monkeypatch.setattr(os, "link", compete_on_second_page)
     result = renderer.main(

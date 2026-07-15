@@ -81,6 +81,16 @@ _FILTER_KEYS = {
 }
 
 
+def _reject_json_constant(value: str) -> object:
+    raise json.JSONDecodeError("Non-standard JSON numeric constant", value, 0)
+
+
+def strict_json_loads(text: str) -> object:
+    """Parse standards-compliant JSON, rejecting NaN and infinities."""
+
+    return json.loads(text, parse_constant=_reject_json_constant)
+
+
 def _normalize_header(header: str) -> str:
     return " ".join(header.replace("’", "'").replace("_", " ").split()).casefold()
 
@@ -154,7 +164,7 @@ def _load_source(
         }
 
     if suffix == ".json":
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = strict_json_loads(path.read_text(encoding="utf-8"))
         selected_key: str | None = None
         array_keys: list[str] = []
         if isinstance(payload, list):
@@ -658,6 +668,10 @@ def normalize_rank(
     rank = number * multiplier
     if field == "probability" and not percent and 0 <= rank <= 1:
         rank *= 100
+    if field == "probability" and not 0 <= rank <= 100:
+        raise DataContractError(
+            "invalid_probability", f"Invalid probability value: {value!r}"
+        )
     return display, rank, "numeric"
 
 
@@ -745,10 +759,13 @@ def _minimal_reason(
     }
 
 
-def _row_id(row: dict[str, object], source_row: int) -> str:
+def row_id(row: dict[str, object], source_row: int) -> str:
+    """Return a nonblank explicit ID or the deterministic source-row fallback."""
+
     for header in ("ID", "Id"):
-        if header in row and str(row[header]).strip():
-            return str(row[header])
+        value = row.get(header)
+        if value is not None and str(value).strip():
+            return str(value)
     return f"ROW-{source_row:04d}"
 
 
@@ -772,11 +789,16 @@ def normalize_rows(
     records: list[dict[str, object]] = []
     exclusions: list[dict[str, object]] = []
     rank_kinds: dict[str, set[str]] = {"tcv": set(), "probability": set()}
+    resolved_ids = [
+        row_id(row, source_index + 2) for source_index, row in enumerate(rows)
+    ]
+    if len(set(resolved_ids)) != len(resolved_ids):
+        raise DataContractError("duplicate_id", "Row IDs must be unique")
 
     for source_index, row in enumerate(rows):
         source_row = source_index + 2
-        row_id = _row_id(row, source_row)
-        reason_stub = {"id": row_id, "source_row": source_row}
+        resolved_row_id = resolved_ids[source_index]
+        reason_stub = {"id": resolved_row_id, "source_row": source_row}
         missing_field = next(
             (
                 field
@@ -927,7 +949,7 @@ def normalize_rows(
         rank_kinds["probability"].add(probability_kind)
         records.append(
             {
-                "id": row_id,
+                "id": resolved_row_id,
                 "source_row": source_row,
                 "area": str(row[str(mapping["area"])]),
                 "sub_area": str(row[str(mapping["sub_area"])]),
@@ -977,9 +999,17 @@ def _validate_filters(filters: dict[str, object] | None) -> dict[str, object]:
     for prefix in ("tcv", "probability"):
         minimum = filters.get(f"{prefix}_min")
         maximum = filters.get(f"{prefix}_max")
-        if minimum is not None and not isinstance(minimum, Real):
+        if minimum is not None and (
+            isinstance(minimum, bool)
+            or not isinstance(minimum, Real)
+            or not math.isfinite(float(minimum))
+        ):
             raise DataContractError("invalid_filters", f"{prefix}_min must be numeric")
-        if maximum is not None and not isinstance(maximum, Real):
+        if maximum is not None and (
+            isinstance(maximum, bool)
+            or not isinstance(maximum, Real)
+            or not math.isfinite(float(maximum))
+        ):
             raise DataContractError("invalid_filters", f"{prefix}_max must be numeric")
         if minimum is not None and maximum is not None and minimum > maximum:
             raise DataContractError(

@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from opportunity_data import (
@@ -15,14 +18,16 @@ from opportunity_data import (
     load_source,
     normalize_rows,
     resolve_mapping,
+    row_id,
     select_records,
+    strict_json_loads,
     validate_semantics,
 )
 
 
 def _load_json_object(path: Path, kind: str) -> dict[str, object]:
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = strict_json_loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise DataContractError(
             f"invalid_{kind}", f"Unable to read {kind} JSON: {path.name}"
@@ -72,13 +77,6 @@ def _selected_mapping(
     return selected_mapping, selected_months, first_index
 
 
-def _row_id(row: dict[str, object], source_row: int) -> str:
-    for header in ("ID", "Id"):
-        if header in row and str(row[header]).strip():
-            return str(row[header])
-    return f"ROW-{source_row:04d}"
-
-
 def _terminal_before_range_exclusions(
     rows: list[dict[str, object]],
     all_months: list[dict[str, object]],
@@ -102,7 +100,7 @@ def _terminal_before_range_exclusions(
             source_row = source_index + 2
             excluded.append(
                 {
-                    "id": _row_id(row, source_row),
+                    "id": row_id(row, source_row),
                     "source_row": source_row,
                     "code": "terminal_before_range",
                     "message": "Row reached a terminal before the selected range",
@@ -111,16 +109,110 @@ def _terminal_before_range_exclusions(
     return excluded
 
 
-def _atomic_json(path: Path, value: object) -> None:
+@dataclass(frozen=True)
+class _OwnedPublication:
+    path: Path
+    owner_path: Path
+    expected_sha256: str
+
+
+def _atomic_json(path: Path, value: object) -> _OwnedPublication:
+    """Publish JSON without clobbering and retain private ownership evidence."""
+
+    path = Path(path)
     temporary = path.with_name(f".{path.name}.tmp")
+    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
+        raise FileExistsError("Output artifact already exists")
     try:
-        temporary.write_text(
-            json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        temporary.replace(path)
+        with temporary.open("xb") as handle:
+            handle.write(encoded)
+        os.link(temporary, path, follow_symlinks=False)
+    except BaseException:
+        if temporary.exists() and not temporary.is_symlink():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise
+    return _OwnedPublication(
+        path=path,
+        owner_path=temporary,
+        expected_sha256=hashlib.sha256(encoded).hexdigest(),
+    )
+
+
+def _release_owner(publication: _OwnedPublication) -> None:
+    try:
+        publication.owner_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _verify_publications(publications: list[_OwnedPublication]) -> None:
+    for publication in publications:
+        try:
+            owner_stat = publication.owner_path.lstat()
+            visible_stat = publication.path.lstat()
+            actual_sha256 = hashlib.sha256(publication.owner_path.read_bytes()).hexdigest()
+        except OSError:
+            raise DataContractError(
+                "output_changed", "An output artifact changed before commit"
+            ) from None
+        if (
+            not os.path.samestat(owner_stat, visible_stat)
+            or actual_sha256 != publication.expected_sha256
+        ):
+            raise DataContractError(
+                "output_changed", "An output artifact changed before commit"
+            )
+
+
+def _rollback_owned(publication: _OwnedPublication) -> None:
+    """Remove only this transaction's inode and preserve a competing replacement."""
+
+    quarantine_dir: Path | None = None
+    candidate: Path | None = None
+    try:
+        try:
+            owner_stat = publication.owner_path.lstat()
+        except FileNotFoundError:
+            return
+        try:
+            quarantine_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{publication.path.name}.rollback-",
+                    dir=publication.path.parent,
+                )
+            )
+            candidate = quarantine_dir / "candidate"
+            os.rename(publication.path, candidate)
+        except (FileNotFoundError, OSError):
+            return
+
+        candidate_stat = candidate.lstat()
+        if os.path.samestat(owner_stat, candidate_stat):
+            candidate.unlink()
+            return
+
+        try:
+            os.link(candidate, publication.path, follow_symlinks=False)
+        except FileExistsError:
+            return
+        try:
+            restored_stat = publication.path.lstat()
+        except FileNotFoundError:
+            return
+        if not os.path.samestat(candidate_stat, restored_stat):
+            return
+        candidate.unlink()
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        _release_owner(publication)
+        if quarantine_dir is not None:
+            try:
+                quarantine_dir.rmdir()
+            except OSError:
+                pass
 
 
 def _validate_output_destination(output_dir: Path) -> bool:
@@ -151,27 +243,28 @@ def _write_artifacts(
     artifacts: list[tuple[str, object]],
     create_output_dir: bool,
 ) -> None:
-    written: list[Path] = []
+    publications: list[_OwnedPublication] = []
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         for name, value in artifacts:
             path = output_dir / name
-            _atomic_json(path, value)
-            written.append(path)
-    except OSError:
-        for path in written:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            publications.append(_atomic_json(path, value))
+        _verify_publications(publications)
+    except BaseException as error:
+        for publication in reversed(publications):
+            _rollback_owned(publication)
         if create_output_dir:
             try:
                 output_dir.rmdir()
             except OSError:
                 pass
+        if isinstance(error, DataContractError):
+            raise
         raise DataContractError(
             "output_unwritable", "Unable to write output artifacts"
         ) from None
+    for publication in publications:
+        _release_owner(publication)
 
 
 def _selected_formula_errors(

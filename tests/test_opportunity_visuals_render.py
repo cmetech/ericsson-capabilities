@@ -1536,6 +1536,21 @@ def test_png_required_cli_returns_two_one_safe_json_and_no_partials(
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
 
 
+def test_renderer_rejects_nonstandard_json_numeric_constants(
+    tmp_path, normalized_document
+):
+    normalized_path = tmp_path / "normalized-data.json"
+    text = json.dumps(normalized_document, sort_keys=True)
+    normalized_path.write_text(text.replace('"sort": 3', '"sort": NaN', 1), encoding="utf-8")
+    output_dir = tmp_path / "rendered"
+
+    with pytest.raises(RenderError) as caught:
+        render_document(normalized_path, output_dir, png_mode="never")
+
+    assert caught.value.code == "invalid_json"
+    assert not output_dir.exists()
+
+
 def test_cli_writes_unique_numbered_svg_files_and_one_json_result(
     tmp_path, normalized_document
 ):

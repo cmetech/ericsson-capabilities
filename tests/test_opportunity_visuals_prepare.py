@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -90,6 +91,21 @@ def test_loaders_return_equivalent_rows(csv_source, json_source, xlsx_source):
     xlsx_rows, meta = load_source(xlsx_source, "Pipeline")
     assert csv_rows == json_rows == xlsx_rows
     assert meta["sheet"] == "Pipeline"
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_json_source_rejects_nonstandard_numeric_constants(tmp_path, constant):
+    source = tmp_path / "nonstandard.json"
+    source.write_text(
+        '[{"Area":"A","Sub-area":"S","Opportunity Name":"O",'
+        f'"TCV":1,"Probability":{constant},"Mar \'26":"A","Apr \'26":"B"}}]',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DataContractError) as caught:
+        load_source(source)
+
+    assert caught.value.code == "invalid_json"
 
 
 def test_loaders_and_mapping_preserve_padded_header_labels(tmp_path):
@@ -454,6 +470,47 @@ def test_normalize_rank_accepts_numeric_and_categorical_values(
     assert normalize_rank(value, order, field) == expected
 
 
+@pytest.mark.parametrize("value", [-0.01, -1, 101, "101%", "-0.5%"])
+def test_normalize_rank_rejects_numeric_probability_outside_percentage_range(value):
+    with pytest.raises(DataContractError) as caught:
+        normalize_rank(value, [], "probability")
+
+    assert caught.value.code == "invalid_probability"
+
+
+def test_invalid_monthly_probability_is_excluded_before_it_can_change_classification(
+    semantics,
+):
+    row = {
+        "ID": "BAD-MONTHLY",
+        "Area": "Core",
+        "Sub-area": "Cloud",
+        "Opportunity Name": "Invalid probability",
+        "TCV": "$1M",
+        "Probability": 50,
+        "Mar '26": "Solution",
+        "Mar '26 Probability": 50,
+        "Apr '26": "Proposal",
+        "Apr '26 Probability": 101,
+        "May '26": "Proposal",
+        "May '26 Probability": 50,
+        "Jun '26": "Proposal",
+        "Jun '26 Probability": 50,
+    }
+
+    records, exclusions = normalize_rows([row], _showcase_mapping(), semantics)
+
+    assert records == []
+    assert exclusions == [
+        {
+            "id": "BAD-MONTHLY",
+            "source_row": 2,
+            "code": "invalid_probability",
+            "message": "Invalid probability value: 101",
+        }
+    ]
+
+
 def _showcase_rows():
     histories = {
         "OV-001": [("Ideation", "Low"), ("Proposal", "Medium"), ("Won", "Certain"), ("In Delivery", "Certain")],
@@ -573,6 +630,57 @@ def test_normalize_rows_preserves_values_blanks_ranks_and_warnings(semantics):
     }
 
 
+def test_normalize_rows_generates_unique_fallback_ids_for_json_null_ids(semantics):
+    rows = [dict(_showcase_rows()[0], ID=None), dict(_showcase_rows()[1], ID=None)]
+
+    records, exclusions = normalize_rows(rows, _showcase_mapping(), semantics)
+
+    assert exclusions == []
+    assert [record["id"] for record in records] == ["ROW-0002", "ROW-0003"]
+
+
+def test_normalize_rows_generates_unique_fallback_ids_for_xlsx_blank_ids(
+    tmp_path, semantics
+):
+    rows = [dict(_showcase_rows()[0], ID=None), dict(_showcase_rows()[1], ID=None)]
+    source = tmp_path / "blank-ids.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pipeline"
+    headers = list(rows[0])
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([row[header] for header in headers])
+    workbook.save(source)
+
+    loaded, _ = load_source(source, "Pipeline")
+    records, exclusions = normalize_rows(loaded, _showcase_mapping(), semantics)
+
+    assert exclusions == []
+    assert [record["id"] for record in records] == ["ROW-0002", "ROW-0003"]
+
+
+def test_pre_range_exclusions_use_fallback_ids_for_blank_explicit_ids(semantics):
+    rows = [dict(_showcase_rows()[0], ID=None), dict(_showcase_rows()[1], ID="")]
+    exclusions = prepare_opportunities._terminal_before_range_exclusions(
+        rows,
+        _showcase_mapping()["months"],
+        3,
+        semantics,
+    )
+
+    assert [item["id"] for item in exclusions] == ["ROW-0002"]
+
+
+def test_normalize_rows_rejects_duplicate_explicit_nonblank_ids(semantics):
+    rows = [dict(_showcase_rows()[0], ID="DUPLICATE"), dict(_showcase_rows()[1], ID="DUPLICATE")]
+
+    with pytest.raises(DataContractError) as caught:
+        normalize_rows(rows, _showcase_mapping(), semantics)
+
+    assert caught.value.code == "duplicate_id"
+
+
 def test_select_records_applies_each_view_and_deterministic_sorting(semantics):
     records, _ = normalize_rows(_showcase_rows(), _showcase_mapping(), semantics)
 
@@ -625,6 +733,14 @@ def test_apply_filters_matches_case_insensitively_and_uses_rank_bounds(semantics
     assert all(record["area"] == "Core Group" for record in included)
     assert all(item["code"] == "filter_not_matched" for item in excluded)
     assert all("Harbor Observability" not in item["message"] for item in excluded)
+
+
+@pytest.mark.parametrize("bound", [True, False, float("nan"), float("inf"), float("-inf")])
+def test_apply_filters_rejects_boolean_and_nonfinite_numeric_bounds(bound):
+    with pytest.raises(DataContractError) as caught:
+        apply_filters([], {"probability_min": bound})
+
+    assert caught.value.code == "invalid_filters"
 
 
 def test_prepare_cli_writes_stable_artifacts_and_refuses_nonempty_output(
@@ -909,17 +1025,17 @@ def test_prepare_cli_reports_atomic_write_failure_without_partial_artifacts(
     semantics_path = tmp_path / "semantics.json"
     semantics_path.write_text(json.dumps(semantics), encoding="utf-8")
     output_dir = tmp_path / "prepared"
-    original_replace = Path.replace
-    replace_calls = 0
+    original_link = os.link
+    link_calls = 0
 
-    def fail_replace(self, target):
-        nonlocal replace_calls
-        replace_calls += 1
-        if replace_calls == 2:
+    def fail_link(source, target, **kwargs):
+        nonlocal link_calls
+        link_calls += 1
+        if link_calls == 2:
             raise OSError("sensitive raw path /private/secret")
-        return original_replace(self, target)
+        return original_link(source, target, **kwargs)
 
-    monkeypatch.setattr(Path, "replace", fail_replace)
+    monkeypatch.setattr(os, "link", fail_link)
 
     result = prepare_opportunities.main(
         [
@@ -948,6 +1064,81 @@ def test_prepare_cli_reports_atomic_write_failure_without_partial_artifacts(
     }
     assert "/private/secret" not in captured.out
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_atomic_json_rejects_raced_temporary_symlink_without_touching_victim(tmp_path):
+    output = tmp_path / "source-summary.json"
+    temporary = tmp_path / ".source-summary.json.tmp"
+    victim = tmp_path / "external-victim.txt"
+    victim.write_text("DO NOT TOUCH\n", encoding="utf-8")
+    temporary.symlink_to(victim)
+
+    with pytest.raises(OSError):
+        prepare_opportunities._atomic_json(output, {"safe": True})
+
+    assert victim.read_text(encoding="utf-8") == "DO NOT TOUCH\n"
+    assert temporary.is_symlink()
+    assert not output.exists()
+
+
+def test_atomic_json_cannot_overwrite_target_created_during_publish(tmp_path, monkeypatch):
+    output = tmp_path / "source-summary.json"
+    real_link = os.link
+
+    def competing_publish(source, target, **kwargs):
+        Path(target).write_text("competitor\n", encoding="utf-8")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", competing_publish)
+
+    with pytest.raises(FileExistsError):
+        prepare_opportunities._atomic_json(output, {"owner": "preparer"})
+
+    assert output.read_text(encoding="utf-8") == "competitor\n"
+    assert not (tmp_path / ".source-summary.json.tmp").exists()
+
+
+def test_preparation_rollback_preserves_competitors_for_all_artifact_names(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "prepared"
+    real_link = os.link
+    calls = 0
+    competitor_stats = {}
+
+    def replace_owned_outputs_then_claim_last(source, target, **kwargs):
+        nonlocal calls
+        calls += 1
+        target = Path(target)
+        if calls == 3:
+            for name in ("source-summary.json", "normalized-data.json"):
+                path = output_dir / name
+                path.unlink()
+                path.write_text(f"competitor-{name}\n", encoding="utf-8")
+                competitor_stats[name] = path.lstat()
+            target.write_text("competitor-exclusions.json\n", encoding="utf-8")
+            competitor_stats[target.name] = target.lstat()
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", replace_owned_outputs_then_claim_last)
+
+    with pytest.raises(DataContractError) as caught:
+        prepare_opportunities._write_artifacts(
+            output_dir,
+            [
+                ("source-summary.json", {"artifact": 1}),
+                ("normalized-data.json", {"artifact": 2}),
+                ("exclusions.json", {"artifact": 3}),
+            ],
+            create_output_dir=True,
+        )
+
+    assert caught.value.code == "output_unwritable"
+    for name, expected_stat in competitor_stats.items():
+        path = output_dir / name
+        assert os.path.samestat(path.lstat(), expected_stat)
+        assert path.read_text(encoding="utf-8") == f"competitor-{name}\n"
+    assert not list(output_dir.glob(".*.tmp"))
 
 
 def test_prepare_cli_rejects_symlink_destination_without_touching_target(

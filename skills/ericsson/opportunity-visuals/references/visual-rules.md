@@ -26,7 +26,9 @@ HTML is a self-contained preview; PNG is an optional local rasterization.
   Probability, then chronological months.
 - Give all rows on a page equal height and all month columns equal width.
 - Wrap text within bounded lines or ellipsize it. Retain every complete value in
-  HTML metadata and the render manifest.
+  `normalized-data.json` and HTML/SVG `data-full-value` metadata. The
+  privacy-safe render manifest records IDs, page mappings, warnings, and hashes,
+  not the complete display values.
 - Create deterministic numbered pages when rows or month columns cannot fit
   legibly.
 - Every page repeats the title, fixed column headers, month headers, and

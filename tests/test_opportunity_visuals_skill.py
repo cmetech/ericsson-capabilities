@@ -85,6 +85,15 @@ def test_data_contract_requires_transition_warnings_in_both_manifests():
     assert "and carried into `render-manifest.json`" in text
 
 
+def test_visual_rules_name_the_artifacts_that_retain_complete_ellipsized_values():
+    text = (SKILL_DIR / "references/visual-rules.md").read_text()
+    normalized = " ".join(text.split())
+
+    assert "Retain every complete value in `normalized-data.json`" in normalized
+    assert "HTML/SVG `data-full-value` metadata" in normalized
+    assert "HTML metadata and the render manifest" not in normalized
+
+
 def test_opportunity_visuals_docs_match_the_live_port():
     showcase = (REPO / "docs/showcases/opportunity-visuals.md").read_text()
     config = (REPO / "docs/configuration.md").read_text()

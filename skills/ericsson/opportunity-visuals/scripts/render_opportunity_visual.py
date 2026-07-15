@@ -1290,8 +1290,14 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def _load_document(path: Path) -> dict[str, object]:
+    def reject_constant(value: str) -> object:
+        raise json.JSONDecodeError("Non-standard JSON numeric constant", value, 0)
+
     try:
-        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        document = json.loads(
+            Path(path).read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+        )
     except FileNotFoundError:
         raise RenderError("input_not_found", "Normalized data file was not found") from None
     except (OSError, UnicodeDecodeError):

@@ -1,6 +1,6 @@
 {
   "name": "ericsson",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Shared Ericsson coworker capabilities (OTTO + LOOP24)",
   "skills": [
     "skills/ericsson/workflow-orchestrator",
@@ -23,7 +23,6 @@
   "env": [
     {"key": "JIRA_BASE_URL", "description": "Ericsson Jira base URL", "category": "tool"},
     {"key": "JIRA_PAT", "description": "Jira personal access token", "category": "tool", "password": true},
-    {"key": "GLEAN_MCP_URL", "description": "Glean MCP endpoint (internal document search)", "category": "tool"},
     {"key": "GLEAN_API_TOKEN", "description": "Glean API token", "category": "tool", "password": true},
     {"key": "ERICSSON_GRAPH_CLIENT_ID", "description": "Optional Microsoft Graph public-client ID override for Ericsson Teams tools", "category": "tool"}
   ]

@@ -213,7 +213,6 @@ EXPECTED_CRITICAL_CONFIGURATION = {
         ("limit", "workflow-input", False),
     },
     "glean-search": {
-        ("GLEAN_MCP_URL", "static-setting", True),
         ("GLEAN_API_TOKEN", "static-secret", True),
     },
 }

@@ -35,13 +35,13 @@ def test_manifest_content():
     assert keys == {
         "JIRA_BASE_URL",
         "JIRA_PAT",
-        "GLEAN_MCP_URL",
         "GLEAN_API_TOKEN",
         "ERICSSON_GRAPH_CLIENT_ID",
     }
+    assert "GLEAN_MCP_URL" not in keys
     assert {e["category"] for e in doc["env"]} == {"tool"}
     assert "ERICSSON_ENV" not in {e["key"] for e in doc["env"]}
-    assert doc["version"] == "0.4.0"
+    assert doc["version"] == "0.4.1"
     assert "requiresEnv" not in doc
     assert "disabledByDefault" not in doc
     assert "ERICSSON_ENV" not in MANIFEST.read_text()

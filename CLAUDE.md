@@ -63,8 +63,11 @@ writes, approvals, outputs, and artifact guidance; demo/test artifacts and troub
 applicable; onboarding entry/generated catalog; and vendored Hermes snapshot. Prefer the
 validators over checklist memory.
 
-Ericsson has no capability-set toggle or disabled-by-default delivery declarations; keep generic
-staging infrastructure available for other sets. Pseudonymization is the recommendation-ineligible
+Ericsson has no capability-set toggle or set-level `disabledByDefault`
+declaration. The remote Glean MCP entry is a deliberate server-level exception:
+it is seeded with `enabled: false` until the user supplies their token and opts in.
+Keep generic staging infrastructure available for other sets. Pseudonymization is the
+recommendation-ineligible
 `not-supported-no-port-planned` historical tombstone and has no roadmap. Re-Identification is
 non-runnable because its protected mapping dependency is unavailable. Windows resume uses explicit
 OS dispatch to a native backend; portable tests pass off Windows, while the 11 native acceptance

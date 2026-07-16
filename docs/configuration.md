@@ -15,7 +15,7 @@ This is the configuration source of truth for the documented flows and the imple
 | Capability | Current configuration | Authentication form | Used by |
 |---|---|---|---|
 | Jira | `JIRA_BASE_URL`, `JIRA_PAT` | Static PAT/API token | Ticket summary; Jira→GitLab; defect loop |
-| Glean | `GLEAN_MCP_URL`, `GLEAN_API_TOKEN` | Remote MCP URL and bearer token | Internal search when a workflow elects to use Glean |
+| Glean | `GLEAN_API_TOKEN` | Bearer token for the supplied remote MCP endpoint | Internal search when a workflow elects to use Glean |
 | Teams | `teams_auth`; optional `ERICSSON_GRAPH_CLIENT_ID` | MSAL device-code sign-in | Teams list/read/send/reply and future notifications |
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
 | GitLab | Source flow uses a PAT; Hermes key names are not yet implemented | PAT with `api` scope; optional mTLS | CI audit; Jira→GitLab; defect loop |
@@ -49,12 +49,19 @@ Common errors: missing keys; `401` for an invalid/expired token; `403` for insuf
 
 ### Current keys
 
-- `GLEAN_MCP_URL`: organization-provided remote MCP endpoint.
-- `GLEAN_API_TOKEN`: bearer token for that endpoint.
+- `GLEAN_API_TOKEN`: bearer token for the supplied endpoint,
+  `https://be.everyday-assistant.ericsson.net/mcp/EEA-KIRO-MCP`.
 
-The seeded `glean` entry remains inert until both placeholders resolve. There is no Glean server code in Loop24 or this repository; the capability is an external service configuration.
+The supplied endpoint is preconfigured in the seeded `glean` entry. The server ships
+with `enabled: false` and remains inert until the user configures the token and
+intentionally enables it. There is no Glean server code in Loop24 or this repository;
+the capability is an external service configuration.
 
-Configure the values through Keys, then validate by connecting to the MCP server and listing tools before attempting a search. The onboarding router distinguishes DNS/TLS/network failures, authentication failures, and a connected server that exposes no expected search tool. The endpoint and token acquisition process are organization-owned and must not be guessed.
+Readiness requires, in order: the token configured, the server intentionally enabled,
+a connection established, tools discovered, and then a narrow read-only search. The
+onboarding router distinguishes DNS/TLS/network failures, authentication failures, and
+a connected server that exposes no expected search tool. The token acquisition process
+is organization-owned and must not be guessed.
 
 ## Teams and Microsoft Graph
 

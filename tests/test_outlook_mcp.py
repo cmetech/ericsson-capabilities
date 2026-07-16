@@ -39,5 +39,10 @@ def test_mcp_servers_yaml():
     servers = doc["mcp_servers"]
     assert set(servers) == {"outlook", "glean"}
     assert "${CAPABILITY_DIR}/outlook-mcp/run_server.py" in servers["outlook"]["args"]
-    assert servers["glean"]["url"] == "${GLEAN_MCP_URL}"
-    assert servers["glean"]["headers"]["Authorization"] == "Bearer ${GLEAN_API_TOKEN}"
+    assert servers["glean"]["enabled"] is False
+    assert servers["glean"]["url"] == (
+        "https://be.everyday-assistant.ericsson.net/mcp/EEA-KIRO-MCP"
+    )
+    assert servers["glean"]["headers"]["Authorization"] == (
+        "Bearer ${GLEAN_API_TOKEN}"
+    )

@@ -761,6 +761,31 @@ def test_validation_reconciles_all_repository_inventory(
     ) == []
 
 
+def test_validation_normalizes_object_plugins_and_omits_missing_disabled_plans(
+    repo_fixture: RepoFixture,
+) -> None:
+    manifest_path = repo_fixture.root / "sets/ericsson.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["plugins"] = [
+        {
+            "path": "plugins/ericsson-example",
+            "id": "ericsson-example",
+            "enabled": False,
+        },
+        {
+            "path": "plugins/ericsson-planned",
+            "id": "ericsson-planned",
+            "enabled": False,
+        },
+    ]
+    repo_fixture._write_json("sets/ericsson.json", manifest)
+    repo_fixture.write_complete_entry()
+
+    assert validate_repository(
+        repo_fixture.root, load_entries(repo_fixture.root)
+    ) == []
+
+
 @pytest.mark.parametrize(
     ("implementation", "expected"),
     [

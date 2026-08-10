@@ -77,6 +77,13 @@ _LIST_FIELDS = {
 _SECRET_VALUE_PATTERN = re.compile(
     r"(?i)\b(?:value|token|password|secret|api[_ -]?key)\s*[:=]\s*\S+"
 )
+_BUILTIN_BACKEND_PLUGINS = frozenset({"plugins/workflow"})
+_BUILTIN_WORKFLOW_REPLACED_SKILLS = frozenset(
+    {
+        "skills/ericsson/workflow-builder",
+        "skills/ericsson/workflow-orchestrator",
+    }
+)
 _ENV_PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 _WORKFLOW_PROMPT_TOOL = re.compile(
     r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\s+tool\b"
@@ -325,6 +332,38 @@ def _manifest_list(manifest: dict[str, Any], key: str, path: Path) -> set[str]:
     return set(value)
 
 
+def _manifest_plugin_paths(manifest: dict[str, Any], path: Path) -> set[str]:
+    value = manifest.get("plugins", [])
+    if not isinstance(value, list):
+        raise CatalogError(f"{path}: plugins must be a list")
+
+    repo = path.parents[1]
+    plugin_paths: set[str] = set()
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            if (
+                item in _BUILTIN_BACKEND_PLUGINS
+                and not (repo / item / "plugin.yaml").is_file()
+            ):
+                continue
+            plugin_paths.add(item)
+            continue
+        if not isinstance(item, dict):
+            raise CatalogError(
+                f"{path}: plugins[{index}] must be a string or mapping"
+            )
+        plugin_path = item.get("path")
+        enabled = item.get("enabled")
+        if not isinstance(plugin_path, str):
+            raise CatalogError(f"{path}: plugins[{index}].path must be a string")
+        if not isinstance(enabled, bool):
+            raise CatalogError(f"{path}: plugins[{index}].enabled must be a boolean")
+        if not enabled and not (repo / plugin_path / "plugin.yaml").is_file():
+            continue
+        plugin_paths.add(plugin_path)
+    return plugin_paths
+
+
 def _string_list_metadata(
     metadata: dict[str, Any], key: str, path: Path, problems: list[str]
 ) -> set[str]:
@@ -514,11 +553,20 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         raise CatalogError(f"{manifest_path}: manifest must be a mapping")
 
     manifest_skills = _manifest_list(manifest, "skills", manifest_path)
-    manifest_plugins = _manifest_list(manifest, "plugins", manifest_path)
+    manifest_plugins = _manifest_plugin_paths(manifest, manifest_path)
     manifest_mcp_local = _manifest_list(manifest, "mcpLocal", manifest_path)
     manifest_workflows = _manifest_list(manifest, "workflows", manifest_path)
     workflow_core_tools = _manifest_list(
         manifest, "workflowCoreTools", manifest_path
+    )
+    replaced_builtin_skills = (
+        _BUILTIN_WORKFLOW_REPLACED_SKILLS
+        if any(
+            item in _BUILTIN_BACKEND_PLUGINS
+            for item in manifest.get("plugins", [])
+            if isinstance(item, str)
+        )
+        else frozenset()
     )
     problems: list[str] = []
 
@@ -814,6 +862,7 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         "manifest_plugins": manifest_plugins,
         "manifest_mcp_local": manifest_mcp_local,
         "manifest_workflows": manifest_workflows,
+        "replaced_builtin_skills": replaced_builtin_skills,
         "actual_skills": actual_skills,
         "actual_plugins": actual_plugins,
         "actual_mcp_local": {
@@ -914,6 +963,11 @@ def compare_inventories(
     )
     for actual_key, manifest_key, message in unpackaged:
         for item in sorted(set(inventory[actual_key]) - set(inventory[manifest_key])):
+            if (
+                actual_key == "actual_skills"
+                and item in inventory["replaced_builtin_skills"]
+            ):
+                continue
             problems.append(f"{message}: {item}")
     return problems
 

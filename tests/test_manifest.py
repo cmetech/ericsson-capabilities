@@ -232,6 +232,10 @@ def test_lint_rejects_invalid_or_misplaced_lifecycle_migrations(tmp_path):
                 "from": "auto_seeded_backend",
             },
         },
+        {
+            **_standalone_plugin("ericsson-gitlab"),
+            "lifecycleMigration": None,
+        },
     ]
     for index, entry in enumerate(cases):
         doc = json.loads(MANIFEST.read_text())

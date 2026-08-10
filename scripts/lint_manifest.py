@@ -89,8 +89,9 @@ def lint(manifest_path: Path) -> list[str]:
                         f"plugins[{i}].enabled must be false for a standalone plugin"
                     )
 
+                has_migration = "lifecycleMigration" in entry
                 migration = entry.get("lifecycleMigration")
-                if migration is not None:
+                if has_migration:
                     if enabled is not False or not isinstance(plugin_id, str):
                         problems.append(
                             f"plugins[{i}].lifecycleMigration is allowed only on "

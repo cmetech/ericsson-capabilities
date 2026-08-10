@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import ssl
+import stat
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -17,6 +19,7 @@ _DEFAULT_KEY = "~/.config/edpctl/auth/client-key.pem"
 _MAX_ORIGIN = 2048
 _MAX_PATH = 4096
 _MAX_TOKEN = 4096
+_MAX_PEM_BYTES = 1024 * 1024
 
 
 def _safe_setting(configuration, field_id: str, default: str) -> str:
@@ -39,6 +42,18 @@ def _expand_path(value: str, home: Path) -> Path:
     return Path(value).expanduser()
 
 
+def _usable_regular_file(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and 0 < metadata.st_size <= _MAX_PEM_BYTES
+        and os.access(path, os.R_OK)
+    )
+
+
 def _certificate_pair(cert_value: str, key_value: str, home: Path):
     if not cert_value and not key_value:
         return None
@@ -46,15 +61,20 @@ def _certificate_pair(cert_value: str, key_value: str, home: Path):
         raise GitLabError("invalid_configuration")
     cert = _expand_path(cert_value, home)
     key = _expand_path(key_value, home)
-    cert_ok = cert.is_file() and not cert.is_symlink() and os.access(cert, os.R_OK)
-    key_ok = key.is_file() and not key.is_symlink() and os.access(key, os.R_OK)
+    cert_ok = _usable_regular_file(cert)
+    key_ok = _usable_regular_file(key)
     if not cert_ok and not key_ok:
         if cert_value == _DEFAULT_CERT and key_value == _DEFAULT_KEY:
             return None
         raise GitLabError("invalid_configuration")
     if not cert_ok or not key_ok:
         raise GitLabError("invalid_configuration")
-    return cert, key
+    try:
+        context = ssl.create_default_context()
+        context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+    except (OSError, ssl.SSLError, ValueError):
+        raise GitLabError("invalid_configuration") from None
+    return (cert, key), context
 
 
 def _from_configuration(configuration, *, home: Path | None = None) -> GitLabAuth:
@@ -83,10 +103,12 @@ def _from_configuration(configuration, *, home: Path | None = None) -> GitLabAut
     cert_value = _safe_setting(configuration, "client_certificate_path", _DEFAULT_CERT)
     key_value = _safe_setting(configuration, "client_key_path", _DEFAULT_KEY)
     selected_home = Path.home() if home is None else Path(home)
+    certificate_pair = _certificate_pair(cert_value, key_value, selected_home)
     return GitLabAuth(
         origin=origin,
         pat=pat,
-        certificate_pair=_certificate_pair(cert_value, key_value, selected_home),
+        certificate_pair=certificate_pair[0] if certificate_pair else None,
+        tls_context=certificate_pair[1] if certificate_pair else None,
     )
 
 

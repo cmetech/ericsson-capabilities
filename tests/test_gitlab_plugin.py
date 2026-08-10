@@ -183,6 +183,83 @@ def test_plugin_configuration_lookup_failure_is_stable_and_classified():
     }
 
 
+@pytest.mark.parametrize("pem_case", ["malformed", "mismatched"])
+def test_malformed_or_mismatched_mtls_is_unavailable_and_handler_reports_invalid_configuration(
+    tmp_path, pem_case
+):
+    # GL-AUTH-02 legacy: gitlab_project_resolver.py:GitLabProjectResolver._get_session
+    from test_gitlab_client import (
+        CERTIFICATE_PEM,
+        MISMATCHED_PRIVATE_KEY_PEM,
+    )
+
+    cert = tmp_path / "private-sensitive-cert.pem"
+    key = tmp_path / "private-sensitive-key.pem"
+    if pem_case == "malformed":
+        cert.write_text("not a certificate", encoding="ascii")
+        key.write_text("not a private key", encoding="ascii")
+    else:
+        cert.write_text(CERTIFICATE_PEM, encoding="ascii")
+        key.write_text(MISMATCHED_PRIVATE_KEY_PEM, encoding="ascii")
+
+    class PemConfiguration(Configuration):
+        def setting(self, field_id):
+            if field_id == "client_certificate_path":
+                return str(cert)
+            if field_id == "client_key_path":
+                return str(key)
+            return super().setting(field_id)
+
+    class PemContext(Context):
+        def configuration(self):
+            self.configuration_calls += 1
+            return PemConfiguration()
+
+    plugin = _load_plugin()
+    context = PemContext()
+    plugin.register(context)
+    registration = context.registrations["gitlab_resolve_project"]
+    assert registration["check_fn"]() is False
+    result = json.loads(registration["handler"]({"project": "42"}))
+    assert result == {
+        "success": False,
+        "error": {
+            "category": "invalid_configuration",
+            "message": "GitLab configuration is invalid",
+        },
+    }
+    assert "private-sensitive" not in repr(result)
+
+
+def test_registered_handler_uses_current_thread_interrupt_authority_without_sys_path_mutation(
+    monkeypatch,
+):
+    # GL-AUTH-01 legacy: gitlab_project_resolver.py:GitLabProjectResolver.resolve_project
+    interrupt_module = types.ModuleType("tools.interrupt")
+    interrupt_module.is_interrupted = lambda: True
+    host_tools = types.ModuleType("tools")
+    host_tools.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", host_tools)
+    monkeypatch.setitem(sys.modules, "tools.interrupt", interrupt_module)
+    path_before = tuple(sys.path)
+
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    result = json.loads(
+        context.registrations["gitlab_resolve_project"]["handler"]({"project": "42"})
+    )
+
+    assert result == {
+        "success": False,
+        "error": {
+            "category": "cancelled",
+            "message": "GitLab request was cancelled",
+        },
+    }
+    assert tuple(sys.path) == path_before
+
+
 def test_direct_handlers_reject_unknown_and_missing_schema_arguments_before_transport():
     # GL-READ-07 legacy: gitlab_file_reader.py:read_files
     plugin = _load_plugin()

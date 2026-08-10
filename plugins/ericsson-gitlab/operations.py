@@ -47,6 +47,22 @@ def _validate_ref(ref: str) -> str:
     return ref
 
 
+def _validate_remote_ref(ref: Any) -> str:
+    if (
+        not isinstance(ref, str)
+        or not ref
+        or len(ref) > _MAX_REF
+        or ref.startswith("/")
+        or ref.endswith("/")
+        or any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in ref
+        )
+    ):
+        raise GitLabError("invalid_remote_data")
+    return ref
+
+
 def _positive_bound(value: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         raise GitLabError("invalid_input")
@@ -166,8 +182,10 @@ class GitLabOperations:
         if unquote(urlsplit(web_url).path).strip("/") != slug:
             raise GitLabError("invalid_remote_data")
         default = payload.get("default_branch")
-        fallback = not isinstance(default, str) or not default.strip()
-        default_branch = "main" if fallback else _validate_ref(default)
+        fallback = default is None or default == ""
+        if not fallback and not isinstance(default, str):
+            raise GitLabError("invalid_remote_data")
+        default_branch = "main" if fallback else _validate_remote_ref(default)
         result: dict[str, Any] = {
             "id": project_id,
             "name": name,
@@ -234,7 +252,7 @@ class GitLabOperations:
                 candidate = next_page
             else:
                 candidate = page + 1
-            if page >= self.client.max_ref_pages:
+            if candidate > self.client.max_ref_pages:
                 raise GitLabError("capacity")
             page = candidate
         return refs
@@ -272,6 +290,7 @@ class GitLabOperations:
         items: list[dict[str, Any]] = []
         truncated = False
         next_page: int | None = None
+        next_offset: int | None = None
         while page <= self.client.max_pages:
             query = dict(params)
             query.update({"per_page": 100, "page": page})
@@ -279,10 +298,11 @@ class GitLabOperations:
                 path, params=query, deadline=deadline
             )
             values = _as_list(payload)
-            for raw in values:
+            for offset, raw in enumerate(values):
                 if len(items) >= max_items:
                     truncated = True
                     next_page = page
+                    next_offset = offset
                     break
                 items.append(normalize(_as_object(raw)))
             if truncated:
@@ -298,12 +318,20 @@ class GitLabOperations:
                     raise GitLabError("invalid_remote_data") from None
                 if candidate <= page:
                     raise GitLabError("invalid_remote_data")
-            if page >= self.client.max_pages:
+            if candidate > self.client.max_pages:
                 truncated = True
                 next_page = candidate
                 break
             page = candidate
-        return PageResult(tuple(items), truncated, next_page)
+        return PageResult(tuple(items), truncated, next_page, next_offset)
+
+    @staticmethod
+    def _continuation(pages: PageResult) -> dict[str, int] | None:
+        if pages.next_page is None:
+            return None
+        if pages.next_offset is not None:
+            return {"page": pages.next_page, "offset": pages.next_offset}
+        return {"next_page": pages.next_page}
 
     def list_repository_tree(
         self,
@@ -347,7 +375,7 @@ class GitLabOperations:
             "entries": entries,
             "count": len(entries),
             "truncated": pages.truncated,
-            "continuation": {"next_page": pages.next_page} if pages.next_page else None,
+            "continuation": self._continuation(pages),
         }
 
     def read_file(
@@ -419,7 +447,27 @@ class GitLabOperations:
         raw_changes = _as_list(payload.get("changes"))
         changes: list[dict[str, Any]] = []
         remaining = self.client.max_diff_bytes
-        truncated = len(raw_changes) > self.client.max_changes
+        local_truncated = len(raw_changes) > self.client.max_changes
+        overflow = payload.get("overflow")
+        if overflow is not None and not isinstance(overflow, bool):
+            raise GitLabError("invalid_remote_data")
+        remote_truncated = overflow is True
+        changes_count = payload.get("changes_count")
+        if changes_count is not None:
+            if isinstance(changes_count, bool):
+                raise GitLabError("invalid_remote_data")
+            capped_count = False
+            if isinstance(changes_count, str):
+                capped_count = changes_count.endswith("+")
+                digits = changes_count[:-1] if capped_count else changes_count
+                if not digits.isdigit() or len(digits) > 10:
+                    raise GitLabError("invalid_remote_data")
+                changes_count = int(digits)
+            if not isinstance(changes_count, int) or changes_count < len(raw_changes):
+                raise GitLabError("invalid_remote_data")
+            remote_truncated = (
+                remote_truncated or capped_count or changes_count > len(raw_changes)
+            )
         for raw in raw_changes[: self.client.max_changes]:
             item = _as_object(raw)
             diff = item.get("diff")
@@ -428,7 +476,7 @@ class GitLabOperations:
             encoded = diff.encode("utf-8")
             if len(encoded) > remaining:
                 diff = encoded[:remaining].decode("utf-8", errors="ignore")
-                truncated = True
+                local_truncated = True
             remaining -= len(diff.encode("utf-8"))
             projected = {"diff": diff}
             for field in ("old_path", "new_path"):
@@ -440,8 +488,14 @@ class GitLabOperations:
                 projected[field] = item.get(field) is True
             changes.append(projected)
             if remaining <= 0:
-                truncated = truncated or len(changes) < len(raw_changes)
+                local_truncated = local_truncated or len(changes) < len(raw_changes)
                 break
+        truncated = local_truncated or remote_truncated
+        warnings = []
+        if local_truncated:
+            warnings.append("merge_request_changes_truncated")
+        if remote_truncated:
+            warnings.append("merge_request_remote_truncated")
         result = {
             "id": payload.get("id"),
             "iid": payload.get("iid"),
@@ -453,7 +507,7 @@ class GitLabOperations:
             "changes": changes,
             "change_count": len(changes),
             "truncated": truncated,
-            "warnings": ["merge_request_changes_truncated"] if truncated else [],
+            "warnings": warnings,
         }
         for field in ("id", "iid"):
             value = result[field]
@@ -522,5 +576,5 @@ class GitLabOperations:
             "pipelines": list(pages.items),
             "count": len(pages.items),
             "truncated": pages.truncated,
-            "continuation": {"next_page": pages.next_page} if pages.next_page else None,
+            "continuation": self._continuation(pages),
         }

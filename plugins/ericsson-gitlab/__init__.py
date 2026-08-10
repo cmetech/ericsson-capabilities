@@ -12,6 +12,14 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _interrupt_authority():
+    try:
+        from tools.interrupt import is_interrupted
+    except ImportError:
+        return lambda: False
+    return is_interrupted
+
+
 def register(ctx) -> None:
     """Register exactly the five Task 8 reads under one service-gated toolset."""
 
@@ -40,7 +48,12 @@ def register(ctx) -> None:
                     }
                 )
             try:
-                result = gitlab_tools.invoke(name, args or {}, configuration)
+                result = gitlab_tools.invoke(
+                    name,
+                    args or {},
+                    configuration,
+                    cancel_check=_interrupt_authority(),
+                )
                 return _json({"success": True, "result": result})
             except GitLabError as exc:
                 return _json(

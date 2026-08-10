@@ -36,6 +36,7 @@ class GitLabAuth:
     origin: str
     pat: str
     certificate_pair: tuple[Any, Any] | None = None
+    tls_context: Any | None = None
 
     def __repr__(self) -> str:
         certificate_state = "set" if self.certificate_pair else "unset"
@@ -50,3 +51,4 @@ class PageResult:
     items: tuple[dict[str, Any], ...]
     truncated: bool
     next_page: int | None
+    next_offset: int | None = None

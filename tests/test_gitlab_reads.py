@@ -123,6 +123,27 @@ def test_resolve_project_preserves_nonempty_default_and_reports_main_only_when_m
     assert fallback["default_branch_fallback"] is True
 
 
+def test_resolve_project_preserves_valid_default_branch_bytes_and_rejects_invalid_remote_refs():
+    # GL-ID-04 legacy: gitlab_project_resolver.py:GitLabProjectResolver.resolve_project
+    operations = _operations()
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42")
+        route.side_effect = [
+            httpx.Response(200, json=_project_json("Feature/Release-2026")),
+            httpx.Response(200, json=_project_json(" release/2026 ")),
+            httpx.Response(200, json=_project_json("release/\n2026")),
+        ]
+        exact = operations.resolve_project("42")
+        failures = []
+        for _case in range(2):
+            with pytest.raises(Exception) as caught:
+                operations.resolve_project("42")
+            failures.append(getattr(caught.value, "category", None))
+    assert exact["default_branch"] == "Feature/Release-2026"
+    assert exact["default_branch_fallback"] is False
+    assert failures == ["invalid_remote_data", "invalid_remote_data"]
+
+
 def test_project_identity_rejects_cross_origin_web_url_and_builds_canonical_links():
     # GL-ID-01/02 legacy: gitlab_project_resolver.py:GitLabProjectResolver.resolve_project
     operations = _operations()
@@ -197,6 +218,52 @@ def test_tree_pagination_honors_headers_short_pages_and_hard_item_page_ceilings(
     assert len(result["entries"]) == 2
     assert result["truncated"] is True
     assert result["continuation"] == {"next_page": 3}
+
+
+def test_general_pagination_jump_beyond_page_ceiling_is_truthfully_truncated():
+    # GL-READ-02/GL-CI-10 legacy: gitlab_file_reader.py:_get_tree; GitLab list loops
+    operations = _operations(max_pages=2)
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tree").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": "99"},
+                json=[
+                    {
+                        "id": "one",
+                        "name": "one.py",
+                        "path": "one.py",
+                        "type": "blob",
+                        "mode": "100644",
+                    }
+                ],
+            )
+        )
+        result = operations.list_repository_tree("42", ref="main", max_items=10)
+    assert result["truncated"] is True
+    assert result["continuation"] == {"next_page": 99}
+
+
+def test_mid_page_item_ceiling_returns_unambiguous_page_and_offset_continuation():
+    # GL-READ-01/02/GL-CI-10 legacy: gitlab_file_fetcher.py:_get_tree; GitLab list loops
+    operations = _operations(max_pages=2)
+    page = [
+        {
+            "id": str(index),
+            "name": f"{index}.py",
+            "path": f"{index}.py",
+            "type": "blob",
+            "mode": "100644",
+        }
+        for index in range(3)
+    ]
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tree").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": "2"}, json=page)
+        )
+        result = operations.list_repository_tree("42", ref="main", max_items=2)
+    assert result["truncated"] is True
+    assert result["continuation"] == {"page": 1, "offset": 2}
 
 
 def test_tree_pagination_uses_one_aggregate_operation_deadline():
@@ -287,6 +354,30 @@ def test_incomplete_ref_inventory_fails_closed_instead_of_selecting_shorter_pref
                 headers={"X-Next-Page": "2"},
                 json=[{"name": "feature"}],
             )
+        )
+        with pytest.raises(Exception) as caught:
+            operations.resolve_project(
+                f"{ORIGIN}/division/platform/team/repo/-/tree/feature/long/ref/src"
+            )
+    assert getattr(caught.value, "category", None) == "capacity"
+
+
+def test_ref_inventory_page_jump_beyond_ceiling_fails_capacity_closed():
+    # GL-READ-06/GL-CI-10 legacy: gitlab_file_reader.py:_list_refs/_resolve_ref
+    operations = _operations(max_ref_pages=2)
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/division%2Fplatform%2Fteam%2Frepo").mock(
+            return_value=httpx.Response(200, json=_project_json())
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/branches").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": "99"},
+                json=[{"name": "feature"}],
+            )
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tags").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
         )
         with pytest.raises(Exception) as caught:
             operations.resolve_project(
@@ -390,6 +481,79 @@ def test_read_merge_request_bounds_change_count_and_aggregate_diff_bytes():
     assert result["truncated"] is True
     assert result["warnings"] == ["merge_request_changes_truncated"]
     assert "must-not-appear" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "remote_incomplete_evidence",
+    [{"overflow": True}, {"changes_count": "2"}, {"changes_count": "1000+"}],
+)
+def test_merge_request_remote_incomplete_evidence_forces_truncation_warning(
+    remote_incomplete_evidence,
+):
+    # GL-REVIEW-01 legacy: code_review_runner.py:CodeReviewRunner._fetch_diff
+    operations = _operations()
+    payload = {
+        "id": 70,
+        "iid": 7,
+        "title": "Review",
+        "state": "opened",
+        "source_branch": "feature",
+        "target_branch": "main",
+        "web_url": f"{ORIGIN}/x/y/-/merge_requests/7",
+        "changes": [
+            {
+                "old_path": "a.py",
+                "new_path": "a.py",
+                "new_file": False,
+                "renamed_file": False,
+                "deleted_file": False,
+                "diff": "one complete visible change",
+            }
+        ],
+        **remote_incomplete_evidence,
+    }
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests/7/changes").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        result = operations.read_merge_request("42", 7)
+    assert result["truncated"] is True
+    assert "merge_request_remote_truncated" in result["warnings"]
+
+
+@pytest.mark.parametrize("changes_count", ["many", "0", -1, True])
+def test_merge_request_rejects_malformed_or_under_count_remote_change_evidence(
+    changes_count,
+):
+    # GL-REVIEW-01 legacy: code_review_runner.py:CodeReviewRunner._fetch_diff
+    operations = _operations()
+    payload = {
+        "id": 70,
+        "iid": 7,
+        "title": "Review",
+        "state": "opened",
+        "source_branch": "feature",
+        "target_branch": "main",
+        "web_url": f"{ORIGIN}/x/y/-/merge_requests/7",
+        "changes": [
+            {
+                "old_path": "a.py",
+                "new_path": "a.py",
+                "new_file": False,
+                "renamed_file": False,
+                "deleted_file": False,
+                "diff": "visible",
+            }
+        ],
+        "changes_count": changes_count,
+    }
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests/7/changes").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        with pytest.raises(Exception) as caught:
+            operations.read_merge_request("42", 7)
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
 
 
 def test_merge_request_rejects_cross_origin_url_and_non_scalar_identity():

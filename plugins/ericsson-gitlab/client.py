@@ -65,6 +65,8 @@ class GitLabClient:
         self.max_diff_bytes = int(max_diff_bytes)
         self.max_changes = int(max_changes)
         self.total_timeout_seconds = float(total_timeout_seconds)
+        self._connect_timeout_seconds = float(connect_timeout_seconds)
+        self._read_timeout_seconds = float(read_timeout_seconds)
         self._cancel_check = cancel_check or (lambda: False)
         self._clock = clock
         timeout = httpx.Timeout(
@@ -83,8 +85,8 @@ class GitLabClient:
             "follow_redirects": False,
             "trust_env": False,
         }
-        if authentication.certificate_pair is not None:
-            options["cert"] = tuple(str(path) for path in authentication.certificate_pair)
+        if authentication.tls_context is not None:
+            options["verify"] = authentication.tls_context
         self._client = httpx.Client(**options)
 
     def __repr__(self) -> str:
@@ -103,6 +105,17 @@ class GitLabClient:
         """Create one deadline to share across every request in an operation."""
 
         return self._clock() + self.total_timeout_seconds
+
+    def _request_timeout(self, deadline: float) -> httpx.Timeout:
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise GitLabError("deadline")
+        return httpx.Timeout(
+            connect=min(self._connect_timeout_seconds, remaining),
+            read=min(self._read_timeout_seconds, remaining),
+            write=min(self._read_timeout_seconds, remaining),
+            pool=min(self._connect_timeout_seconds, remaining),
+        )
 
     def _validate_path(self, path: str) -> None:
         if (
@@ -151,7 +164,12 @@ class GitLabClient:
             self._check_cancelled(deadline)
             response = None
             try:
-                with self._client.stream("GET", path, params=params) as current:
+                with self._client.stream(
+                    "GET",
+                    path,
+                    params=params,
+                    timeout=self._request_timeout(deadline),
+                ) as current:
                     response = current
                     if 300 <= response.status_code < 400:
                         raise GitLabError("invalid_remote_data")
@@ -171,6 +189,7 @@ class GitLabClient:
             except GitLabError:
                 raise
             except (httpx.TimeoutException, httpx.TransportError):
+                self._check_cancelled(deadline)
                 if attempt < self.max_retries:
                     attempt += 1
                     self._check_cancelled(deadline)

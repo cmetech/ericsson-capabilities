@@ -17,8 +17,8 @@ nodes:
       required: [ticket_key, ticket_summary, project_path, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        ticket_summary: {type: [string, "null"], maxLength: 4096}
-        project_path: {type: [string, "null"], maxLength: 1024}
+        ticket_summary: {type: [string, "null"], maxLength: 2048}
+        project_path: {type: [string, "null"], maxLength: 2048}
         status: {type: string}
         warnings: {type: array, maxItems: 128, items: {type: string, maxLength: 4096}}
         attention_needed: {type: boolean}
@@ -49,10 +49,10 @@ nodes:
       required: [ticket_key, ticket_summary, project_id, project_path, default_branch, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        ticket_summary: {type: [string, "null"], maxLength: 4096}
-        project_id: {type: [integer, "null"]}
-        project_path: {type: [string, "null"], maxLength: 1024}
-        default_branch: {type: [string, "null"], maxLength: 1024}
+        ticket_summary: {type: [string, "null"], maxLength: 2048}
+        project_id: {type: [integer, "null"], minimum: 1}
+        project_path: {type: [string, "null"], maxLength: 2048}
+        default_branch: {type: [string, "null"], maxLength: 512}
         status: {type: string}
         warnings: {type: array, maxItems: 128, items: {type: string, maxLength: 4096}}
         attention_needed: {type: boolean}
@@ -87,10 +87,10 @@ nodes:
       required: [ticket_key, ticket_summary, project_id, project_path, default_branch, evidence_summary, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        ticket_summary: {type: [string, "null"], maxLength: 4096}
-        project_id: {type: [integer, "null"]}
-        project_path: {type: [string, "null"], maxLength: 1024}
-        default_branch: {type: [string, "null"], maxLength: 1024}
+        ticket_summary: {type: [string, "null"], maxLength: 2048}
+        project_id: {type: [integer, "null"], minimum: 1}
+        project_path: {type: [string, "null"], maxLength: 2048}
+        default_branch: {type: [string, "null"], maxLength: 512}
         evidence_summary: {type: [string, "null"], maxLength: 16384}
         status: {type: string}
         warnings: {type: array, maxItems: 128, items: {type: string, maxLength: 4096}}
@@ -129,17 +129,17 @@ nodes:
       required: [ticket_key, ticket_summary, project_id, project_path, default_branch, branch_prefix, proposed_branch, branch_summary, commit_message, actions, actions_digest, mr_title, mr_description, mr_target_branch, remove_source_branch, squash, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        ticket_summary: {type: [string, "null"], maxLength: 4096}
-        project_id: {type: [integer, "null"]}
-        project_path: {type: [string, "null"], maxLength: 1024}
-        default_branch: {type: [string, "null"], maxLength: 1024}
-        branch_prefix: {type: [string, "null"], maxLength: 128}
-        proposed_branch: {type: [string, "null"], maxLength: 1024}
+        ticket_summary: {type: [string, "null"], maxLength: 2048}
+        project_id: {type: [integer, "null"], minimum: 1}
+        project_path: {type: [string, "null"], maxLength: 2048}
+        default_branch: {type: [string, "null"], maxLength: 512}
+        branch_prefix: {type: [string, "null"], maxLength: 512}
+        proposed_branch: {type: [string, "null"], maxLength: 512}
         branch_summary: {type: [string, "null"], maxLength: 4096}
         commit_message: {type: [string, "null"], maxLength: 4096}
         actions:
           type: [array, "null"]
-          maxItems: 64
+          maxItems: 100
           items:
             type: object
             additionalProperties: false
@@ -147,12 +147,12 @@ nodes:
             properties:
               action: {type: string, enum: [create, update, delete]}
               file_path: {type: string, maxLength: 4096}
-              content: {type: string, maxLength: 262144}
+              content: {type: string, maxLength: 524288}
               last_commit_id: {type: string, maxLength: 512}
         actions_digest: {type: [string, "null"], maxLength: 256}
         mr_title: {type: [string, "null"], maxLength: 255}
-        mr_description: {type: [string, "null"], maxLength: 16384}
-        mr_target_branch: {type: [string, "null"], maxLength: 1024}
+        mr_description: {type: [string, "null"], maxLength: 65536}
+        mr_target_branch: {type: [string, "null"], maxLength: 512}
         remove_source_branch: {type: [boolean, "null"]}
         squash: {type: [boolean, "null"]}
         status: {type: string}
@@ -181,7 +181,8 @@ nodes:
             status: {enum: [not_found, permission, incomplete, failed, skipped, zero_ticket]}
 
   - id: approve-code-writes
-    depends_on: [reason-about-fix]
+    depends_on: [read-ticket, resolve-project, research-repository, reason-about-fix]
+    when: "$read-ticket.output.status == 'success' && $resolve-project.output.status == 'success' && $research-repository.output.status == 'success' && $reason-about-fix.output.status == 'success'"
     approval:
       message: >
         Review one exact GitLab write plan. Status
@@ -216,11 +217,15 @@ nodes:
       $reason-about-fix.output.ticket_key, ticket summary
       $reason-about-fix.output.ticket_summary, project path
       $reason-about-fix.output.project_path, and approved proposal
-      $reason-about-fix.output.branch_summary while checking upstream status
+      $reason-about-fix.output.branch_summary; the dry-run branch and created or
+      reused branch must equal the exact approved proposed branch
+      $reason-about-fix.output.proposed_branch byte-for-byte while checking upstream status
       $reason-about-fix.output.status and warnings
       $reason-about-fix.output.warnings and when status is not success, call no tool
       and preserve the exact failure status. Otherwise set dry_run true and compare
-      the preview to the exact approved intent. Only then request visible host
+      the preview to the exact approved intent. If either returned branch differs
+      from the approved proposed branch, return failed with attention needed and
+      do not continue. Only then request visible host
       approval for the current invocation and create the branch. Stop on
       uncertain output; do not retry an ambiguous mutation.
     allowed_tools: [gitlab_create_branch]
@@ -230,10 +235,10 @@ nodes:
       required: [ticket_key, project_id, project_path, branch_name, source_branch, web_url, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        project_id: {type: [integer, "null"]}
-        project_path: {type: [string, "null"], maxLength: 1024}
-        branch_name: {type: [string, "null"], maxLength: 1024}
-        source_branch: {type: [string, "null"], maxLength: 1024}
+        project_id: {type: [integer, "null"], minimum: 1}
+        project_path: {type: [string, "null"], maxLength: 2048}
+        branch_name: {type: [string, "null"], maxLength: 512}
+        source_branch: {type: [string, "null"], maxLength: 512}
         web_url: {type: [string, "null"], maxLength: 4096}
         status: {type: string}
         warnings: {type: array, maxItems: 128, items: {type: string, maxLength: 4096}}
@@ -261,7 +266,10 @@ nodes:
       $reason-about-fix.output.branch_summary with digest
       $reason-about-fix.output.actions_digest while requiring proposal status
       $reason-about-fix.output.status and branch status
-      $create-branch.output.status; preserve proposal warnings
+      $create-branch.output.status; require returned branch
+      $create-branch.output.branch_name to equal the exact approved proposed
+      branch $reason-about-fix.output.proposed_branch byte-for-byte; on mismatch,
+      return failed with attention needed and do not call the tool. Preserve proposal warnings
       $reason-about-fix.output.warnings and branch warnings
       $create-branch.output.warnings and when either status is not success, call no
       tool and preserve the exact failure status. Otherwise set dry_run true and compare
@@ -275,8 +283,8 @@ nodes:
       required: [ticket_key, project_id, branch_name, commit_id, web_url, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        project_id: {type: [integer, "null"]}
-        branch_name: {type: [string, "null"], maxLength: 1024}
+        project_id: {type: [integer, "null"], minimum: 1}
+        branch_name: {type: [string, "null"], maxLength: 512}
         commit_id: {type: [string, "null"], maxLength: 256}
         web_url: {type: [string, "null"], maxLength: 4096}
         status: {type: string}
@@ -308,7 +316,10 @@ nodes:
       $reason-about-fix.output.squash while requiring proposal status
       $reason-about-fix.output.status, branch status
       $create-branch.output.status, and commit status
-      $commit-changes.output.status; preserve their warnings
+      $commit-changes.output.status; require returned branch
+      $create-branch.output.branch_name to equal the exact approved proposed
+      branch $reason-about-fix.output.proposed_branch byte-for-byte; on mismatch,
+      return failed with attention needed and do not call the tool. Preserve their warnings
       $reason-about-fix.output.warnings, $create-branch.output.warnings, and
       $commit-changes.output.warnings and when any status is not success, call no
       tool and preserve the exact failure status. Otherwise set dry_run true and compare its
@@ -322,10 +333,10 @@ nodes:
       required: [ticket_key, project_id, iid, source_branch, target_branch, title, state, web_url, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        project_id: {type: [integer, "null"]}
-        iid: {type: [integer, "null"]}
-        source_branch: {type: [string, "null"], maxLength: 1024}
-        target_branch: {type: [string, "null"], maxLength: 1024}
+        project_id: {type: [integer, "null"], minimum: 1}
+        iid: {type: [integer, "null"], minimum: 1, maximum: 2147483647}
+        source_branch: {type: [string, "null"], maxLength: 512}
+        target_branch: {type: [string, "null"], maxLength: 512}
         title: {type: [string, "null"], maxLength: 255}
         state: {type: [string, "null"], maxLength: 64}
         web_url: {type: [string, "null"], maxLength: 4096}
@@ -369,8 +380,8 @@ nodes:
       required: [ticket_key, project_id, iid, merge_request_url, verdict, review_summary, jira_comment, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        project_id: {type: [integer, "null"]}
-        iid: {type: [integer, "null"]}
+        project_id: {type: [integer, "null"], minimum: 1}
+        iid: {type: [integer, "null"], minimum: 1, maximum: 2147483647}
         merge_request_url: {type: [string, "null"], maxLength: 4096}
         verdict: {type: [string, "null"], maxLength: 64}
         review_summary: {type: [string, "null"], maxLength: 16384}
@@ -396,6 +407,7 @@ nodes:
 
   - id: approve-jira-update
     depends_on: [review-merge-request]
+    when: "$review-merge-request.output.status == 'success' && $review-merge-request.output.jira_comment != ''"
     approval:
       message: >
         Review one exact Jira comment plan. Status
@@ -412,7 +424,9 @@ nodes:
       capture_response: true
 
   - id: update-jira
-    depends_on: [approve-jira-update, review-merge-request]
+    depends_on: [approve-jira-update, review-merge-request, reason-about-fix]
+    trigger_rule: all_done
+    when: "$reason-about-fix.output.status == 'success'"
     prompt: >
       Use the jira_add_comment tool only for exact ticket
       $review-merge-request.output.ticket_key in project
@@ -423,7 +437,8 @@ nodes:
       $review-merge-request.output.warnings, and exact approved review
       $review-merge-request.output.review_summary with exact comment
       $review-merge-request.output.jira_comment while requiring review status
-      $review-merge-request.output.status and when status is not success, call no
+      $review-merge-request.output.status and proposal status
+      $reason-about-fix.output.status and when either status is not success, call no
       tool and preserve the exact failure status. Otherwise request visible host approval for
       this current invocation. Do not retry if uncertain.
     allowed_tools: [jira_add_comment]
@@ -433,8 +448,8 @@ nodes:
       required: [ticket_key, project_id, iid, merge_request_url, comment_status, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        project_id: {type: [integer, "null"]}
-        iid: {type: [integer, "null"]}
+        project_id: {type: [integer, "null"], minimum: 1}
+        iid: {type: [integer, "null"], minimum: 1, maximum: 2147483647}
         merge_request_url: {type: [string, "null"], maxLength: 4096}
         comment_status: {type: [string, "null"], maxLength: 4096}
         status: {type: string}
@@ -452,14 +467,49 @@ nodes:
             status: {enum: [not_found, permission, incomplete, failed, skipped, zero_ticket]}
 
   - id: report-status
-    depends_on: [update-jira, review-merge-request]
+    depends_on: [reason-about-fix]
+    when: "$reason-about-fix.output.status != 'success'"
     prompt: >
-      Return truthful per-ticket status for ticket
+      Return truthful per-ticket failure or attention status from the exact
+      pre-write proposal evidence. Preserve ticket
+      $reason-about-fix.output.ticket_key, summary
+      $reason-about-fix.output.ticket_summary, project ID
+      $reason-about-fix.output.project_id, project path
+      $reason-about-fix.output.project_path, application status
+      $reason-about-fix.output.status, warnings
+      $reason-about-fix.output.warnings, and attention
+      $reason-about-fix.output.attention_needed; preserve not_found, permission,
+      incomplete, failed, skipped, or zero-ticket with null unavailable
+      identities. No approval or write is relevant on this lane.
+    allowed_tools: []
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, ticket_summary, project_id, project_path, status, warnings, attention_needed]
+      properties:
+        ticket_key: {type: [string, "null"], maxLength: 128}
+        ticket_summary: {type: [string, "null"], maxLength: 2048}
+        project_id: {type: [integer, "null"], minimum: 1}
+        project_path: {type: [string, "null"], maxLength: 2048}
+        status: {type: string, enum: [failed, incomplete, not_found, permission, skipped, zero_ticket]}
+        warnings:
+          type: array
+          maxItems: 128
+          items: {type: string, maxLength: 4096}
+        attention_needed: {type: boolean}
+
+  - id: report-completion-status
+    depends_on: [update-jira, review-merge-request, reason-about-fix]
+    trigger_rule: all_done
+    when: "$reason-about-fix.output.status == 'success'"
+    prompt: >
+      Return truthful per-ticket post-write status for ticket
       $review-merge-request.output.ticket_key in project
       $review-merge-request.output.project_id for MR iid
       $review-merge-request.output.iid and URL
-      $review-merge-request.output.merge_request_url while including review status
-      $review-merge-request.output.status, review
+      $review-merge-request.output.merge_request_url while requiring exact
+      successful pre-write proposal status $reason-about-fix.output.status and
+      including review status $review-merge-request.output.status, review
       $review-merge-request.output.review_summary, verdict
       $review-merge-request.output.verdict, warnings
       $review-merge-request.output.warnings, Jira status
@@ -474,8 +524,8 @@ nodes:
       required: [ticket_key, project_id, iid, merge_request_url, jira_status, review_status, status, warnings, attention_needed]
       properties:
         ticket_key: {type: [string, "null"], maxLength: 128}
-        project_id: {type: [integer, "null"]}
-        iid: {type: [integer, "null"]}
+        project_id: {type: [integer, "null"], minimum: 1}
+        iid: {type: [integer, "null"], minimum: 1, maximum: 2147483647}
         merge_request_url: {type: [string, "null"], maxLength: 4096}
         jira_status: {type: [string, "null"], maxLength: 4096}
         review_status: {type: [string, "null"], maxLength: 4096}

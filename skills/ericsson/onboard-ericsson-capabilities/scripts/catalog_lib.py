@@ -190,6 +190,8 @@ def validate_workflow_sidecar(
     """Statically enforce the published Archon companion compatibility shape."""
     if not isinstance(metadata, dict):
         return ["root"]
+    if any(not isinstance(field, str) for field in metadata):
+        raise CatalogError("workflow sidecar field names must be strings")
     problems: list[str] = []
     for field in sorted(set(metadata) - _WORKFLOW_SIDECAR_FIELDS):
         problems.append(field)

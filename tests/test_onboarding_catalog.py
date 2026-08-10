@@ -1794,6 +1794,46 @@ def test_catalog_rejects_every_schema_invalid_or_uncompilable_archon_sidecar(
         assert any("invalid workflow sidecar" in problem for problem in problems)
 
 
+def test_catalog_library_rejects_mixed_sidecar_key_types_with_fixed_error(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07", 7: "unknown"},
+    )
+    repo_fixture.write_complete_entry()
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar field names must be strings"
+
+
+def test_validate_catalog_cli_reports_mixed_sidecar_keys_without_traceback(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07", 7: "unknown"},
+    )
+    repo_fixture.write_complete_entry()
+    script = SCRIPTS_DIR / "validate_catalog.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--repo", str(repo_fixture.root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar field names must be strings"],
+    }
+
+
 def test_validation_preserves_legacy_workflow_mapping_contract(
     repo_fixture: RepoFixture,
 ) -> None:

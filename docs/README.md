@@ -29,11 +29,11 @@ those pages would falsely claim review of newer live replacements and newly adde
 
 | Original flow | Current status | Hermes counterpart or likely target |
 |---|---|---|
-| [CI File Auditor](flows/ci-file-auditor.md) | Not ported | GitLab tools plus audit workflow |
+| [CI File Auditor](flows/ci-file-auditor.md) | Partially ported | Bounded GitLab CI reads exist; multi-project policy reports remain |
 | [Search and Read E-Mails](flows/search-and-read-emails.md) | Intent ported | Outlook MCP plus `inbox-digest` workflow |
 | [TOL Generation](flows/tol-generation.md) | Not ported | Document parser, prompt workflow, spreadsheet artifact |
 | [Image Generation](flows/image-generation.md) | Intent ported | [`opportunity-visuals` skill](../skills/ericsson/opportunity-visuals/SKILL.md); [reproducible showcase](showcases/opportunity-visuals.md) |
-| [Jira to GitLab](flows/jira-to-gitlab.md) | Partially ported | Jira tools exist; GitLab write path and workflow are missing |
+| [Jira to GitLab](flows/jira-to-gitlab.md) | Intent ported | Jira and GitLab tools plus the approved `jira-to-gitlab` workflow |
 | [Jira Assigned Tickets Summary](flows/jira-assigned-tickets-summary.md) | Intent ported | Jira tools plus `my-tickets-summary` workflow |
 | [Jira Defect Loop](flows/jira-defect-loop.md) | Partially ported | Jira tools exist; triage, GitLab tools, loop, reviews, and summary remain |
 | [3PP Support and LCM Tracker](flows/third-party-support-lcm-tracker.md) | Not ported | Spreadsheet tools plus lifecycle-research workflow |
@@ -41,7 +41,13 @@ those pages would falsely claim review of newer live replacements and newly adde
 | [Re-Identification](flows/re-identification.md) | Planned, not implemented | No runnable mapping capability is available |
 | [Windows Laptop Diagnostic](flows/windows-laptop-diagnostic.md) | Not ported | Windows-only diagnostic skill with reviewed script |
 
-Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and Hermes' enabled built-in workflow backend and skills. The GitLab standalone connector is declared disabled in the manifest but is not runnable until its implementation and setup contract land.
+Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and Hermes' enabled built-in workflow backend and skills. The implemented GitLab standalone connector is bundled disabled for explicit opt-in; after enablement, configuration, readiness, and a fresh conversation it exposes bounded reads, approval-gated writes, and three qualified skills.
+
+GitLab repository, merge-request, and CI conversations route to the qualified
+`ericsson-gitlab:repository-research`, `ericsson-gitlab:merge-request-review`, and
+`ericsson-gitlab:ci-investigation` skills. Ticket delivery uses the reviewed
+`jira-to-gitlab` skill and workflow. See the [configuration guide](configuration.md#gitlab)
+for the exact nine-tool surface and approval boundary.
 
 ## Onboarding, configuration, and maintenance
 

@@ -49,9 +49,7 @@ ENTRY_REQUIRED = {
     "demonstrations",
     "troubleshooting",
 }
-ENTRY_DIR = (
-    "skills/ericsson/onboard-ericsson-capabilities/references/capabilities"
-)
+ENTRY_DIR = "skills/ericsson/onboard-ericsson-capabilities/references/capabilities"
 
 _ENTRY_ALLOWED = ENTRY_REQUIRED
 _IMPLEMENTATION_KEYS = {
@@ -84,10 +82,14 @@ _BUILTIN_WORKFLOW_REPLACED_SKILLS = frozenset(
         "skills/ericsson/workflow-orchestrator",
     }
 )
-_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
-_WORKFLOW_PROMPT_TOOL = re.compile(
-    r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\s+tool\b"
+_BUILTIN_WORKFLOW_SKILLS = frozenset(
+    {
+        "skills/productivity/workflow",
+        "skills/software-development/workflow-builder",
+    }
 )
+_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
+_WORKFLOW_PROMPT_TOOL = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\s+tool\b")
 _WORKFLOW_INVOKED_TOOL = re.compile(
     r"(?i)\b(?:call|use|run|invoke)\s+(?:the\s+)?`?"
     r"([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b`?"
@@ -215,7 +217,9 @@ def validate_entry_shapes(entries: list[dict]) -> None:
             raise CatalogError(f"{path}: missing required fields: {', '.join(missing)}")
 
         entry_id = entry["id"]
-        if not isinstance(entry_id, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", entry_id):
+        if not isinstance(entry_id, str) or not re.fullmatch(
+            r"[a-z0-9]+(?:-[a-z0-9]+)*", entry_id
+        ):
             raise CatalogError(f"{path}: id must be a lowercase slug")
         if entry_id in seen_ids:
             raise CatalogError(f"duplicate entry id: {entry_id}")
@@ -225,8 +229,13 @@ def validate_entry_shapes(entries: list[dict]) -> None:
                 f"{path}: entry id must match filename: expected {path.stem}, got {entry_id}"
             )
 
-        if not isinstance(entry["display_name"], str) or not entry["display_name"].strip():
-            raise CatalogError(f"entry {entry_id}: display_name must be a non-empty string")
+        if (
+            not isinstance(entry["display_name"], str)
+            or not entry["display_name"].strip()
+        ):
+            raise CatalogError(
+                f"entry {entry_id}: display_name must be a non-empty string"
+            )
         for field in sorted(_LIST_FIELDS):
             _expect_string_list(entry_id, field, entry[field])
         if not entry["goals"]:
@@ -291,16 +300,22 @@ def validate_entry_shapes(entries: list[dict]) -> None:
             if not isinstance(name, str) or not name.strip():
                 raise CatalogError(f"{label}: name must be a non-empty string")
             if name in config_names:
-                raise CatalogError(f"entry {entry_id}: duplicate configuration name: {name}")
+                raise CatalogError(
+                    f"entry {entry_id}: duplicate configuration name: {name}"
+                )
             config_names.add(name)
             if item["kind"] not in CONFIG_KINDS:
-                raise CatalogError(f"{label}: unknown configuration kind: {item['kind']}")
+                raise CatalogError(
+                    f"{label}: unknown configuration kind: {item['kind']}"
+                )
             if not isinstance(item["required"], bool):
                 raise CatalogError(f"{label}: required must be a boolean")
             guidance = item["guidance"]
             if not isinstance(guidance, str) or not guidance.strip():
                 raise CatalogError(f"{label}: guidance must be a non-empty string")
-            if item["kind"] == "static-secret" and _SECRET_VALUE_PATTERN.search(guidance):
+            if item["kind"] == "static-secret" and _SECRET_VALUE_PATTERN.search(
+                guidance
+            ):
                 raise CatalogError(f"{label}: secret guidance must not contain a value")
 
         references = list(entry["source_flows"])
@@ -349,9 +364,7 @@ def _manifest_plugin_paths(manifest: dict[str, Any], path: Path) -> set[str]:
             plugin_paths.add(item)
             continue
         if not isinstance(item, dict):
-            raise CatalogError(
-                f"{path}: plugins[{index}] must be a string or mapping"
-            )
+            raise CatalogError(f"{path}: plugins[{index}] must be a string or mapping")
         plugin_path = item.get("path")
         enabled = item.get("enabled")
         if not isinstance(plugin_path, str):
@@ -456,6 +469,126 @@ def _registered_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
     return registered
 
 
+def _schema_loop_handler_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
+    """Recognize a directly bound handler factory in a SCHEMAS loop."""
+    for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
+        if not (
+            isinstance(loop.target, ast.Tuple)
+            and len(loop.target.elts) == 2
+            and all(isinstance(item, ast.Name) for item in loop.target.elts)
+            and isinstance(loop.iter, ast.Call)
+            and isinstance(loop.iter.func, ast.Attribute)
+            and loop.iter.func.attr == "items"
+            and isinstance(loop.iter.func.value, ast.Attribute)
+            and loop.iter.func.value.attr == "SCHEMAS"
+        ):
+            continue
+        name_variable = loop.target.elts[0].id
+        factories = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and len(node.args.args) == 1
+            and node.args.args[0].arg == name_variable
+        }
+        for call in ast.walk(loop):
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "register_tool"
+            ):
+                continue
+            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+            name_value = keywords.get("name")
+            handler_value = keywords.get("handler")
+            if not (
+                isinstance(name_value, ast.Name)
+                and name_value.id == name_variable
+                and isinstance(handler_value, ast.Call)
+                and isinstance(handler_value.func, ast.Name)
+                and handler_value.func.id in factories
+                and len(handler_value.args) == 1
+                and isinstance(handler_value.args[0], ast.Name)
+                and handler_value.args[0].id == name_variable
+                and not handler_value.keywords
+            ):
+                continue
+            return set(schema_tools)
+    return set()
+
+
+def _plugin_config_schema_contract(
+    plugin_dir: Path,
+    metadata: dict[str, Any],
+    relative: str,
+    problems: list[str],
+) -> tuple[set[str], set[str]]:
+    descriptor = metadata.get("config_schema")
+    if descriptor is None:
+        return set(), set()
+    if not isinstance(descriptor, str) or _is_unsafe_reference(descriptor):
+        problems.append(f"unsafe plugin config schema: {relative}")
+        return set(), set()
+    path = plugin_dir / descriptor
+    try:
+        resolved = path.resolve(strict=True)
+        plugin_root = plugin_dir.resolve(strict=True)
+        resolved.relative_to(plugin_root)
+        if not resolved.is_file() or resolved.stat().st_size > 512 * 1024:
+            raise OSError
+        value = json.loads(resolved.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        problems.append(f"missing plugin config schema: {relative}: {descriptor}")
+        return set(), set()
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        problems.append(f"invalid plugin config schema: {relative}: {descriptor}")
+        return set(), set()
+    if not isinstance(value, dict):
+        problems.append(f"invalid plugin config schema: {relative}: {descriptor}")
+        return set(), set()
+    version = value.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        problems.append(f"unsupported plugin config schema version: {relative}")
+        return set(), set()
+    fields = value.get("fields")
+    if not isinstance(fields, list) or len(fields) > 128:
+        problems.append(f"invalid plugin config schema: {relative}: fields")
+        return set(), set()
+    required: set[str] = set()
+    optional: set[str] = set()
+    seen: set[str] = set()
+    for index, field in enumerate(fields):
+        if not isinstance(field, dict):
+            problems.append(
+                f"invalid plugin configuration field: {relative}: fields[{index}]"
+            )
+            continue
+        field_id = field.get("id")
+        storage = field.get("storage")
+        field_type = field.get("type")
+        is_required = field.get("required", False)
+        if (
+            not isinstance(field_id, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", field_id)
+            or storage not in {"setting", "secret"}
+            or not isinstance(field_type, str)
+            or not field_type.strip()
+            or not isinstance(is_required, bool)
+        ):
+            problems.append(
+                f"invalid plugin configuration field: {relative}: fields[{index}]"
+            )
+            continue
+        if field_id in seen:
+            problems.append(
+                f"duplicate plugin configuration field: {relative}: {field_id}"
+            )
+            continue
+        seen.add(field_id)
+        (required if is_required else optional).add(field_id)
+    return required, optional
+
+
 def _environment_accesses(tree: ast.Module) -> set[str]:
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -475,9 +608,11 @@ def _environment_accesses(tree: ast.Module) -> set[str]:
                 and isinstance(function.value, ast.Name)
                 and function.value.id == "os"
             )
-            if (is_environ_get or is_getenv) and isinstance(
-                node.args[0], ast.Constant
-            ) and isinstance(node.args[0].value, str):
+            if (
+                (is_environ_get or is_getenv)
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
                 names.add(node.args[0].value)
         if isinstance(node, ast.Subscript):
             target = node.value
@@ -493,9 +628,7 @@ def _environment_accesses(tree: ast.Module) -> set[str]:
     return names - _GENERIC_ENVIRONMENT
 
 
-def _mcp_runtime_contract(
-    root: Path, problems: list[str]
-) -> tuple[set[str], set[str]]:
+def _mcp_runtime_contract(root: Path, problems: list[str]) -> tuple[set[str], set[str]]:
     listed: set[str] = set()
     dispatched: set[str] = set()
     for python_file in sorted(root.rglob("*.py")):
@@ -556,9 +689,7 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
     manifest_plugins = _manifest_plugin_paths(manifest, manifest_path)
     manifest_mcp_local = _manifest_list(manifest, "mcpLocal", manifest_path)
     manifest_workflows = _manifest_list(manifest, "workflows", manifest_path)
-    workflow_core_tools = _manifest_list(
-        manifest, "workflowCoreTools", manifest_path
-    )
+    workflow_core_tools = _manifest_list(manifest, "workflowCoreTools", manifest_path)
     replaced_builtin_skills = (
         _BUILTIN_WORKFLOW_REPLACED_SKILLS
         if any(
@@ -594,6 +725,8 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
     implementation_configuration: set[str] = set()
     required_configuration: set[str] = set()
     optional_configuration: set[str] = set()
+    descriptor_required_configuration: set[str] = set()
+    descriptor_optional_configuration: set[str] = set()
     for plugin_file in sorted((repo / "plugins").glob("*/plugin.yaml")):
         relative = plugin_file.parent.relative_to(repo).as_posix()
         metadata = _load_yaml_mapping(plugin_file, label="plugin metadata")
@@ -620,6 +753,15 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         configuration.update(plugin_optional)
         required_configuration.update(plugin_required)
         optional_configuration.update(plugin_optional)
+        descriptor_required, descriptor_optional = _plugin_config_schema_contract(
+            plugin_file.parent, metadata, relative, problems
+        )
+        configuration.update(descriptor_required)
+        configuration.update(descriptor_optional)
+        implementation_configuration.update(descriptor_required)
+        implementation_configuration.update(descriptor_optional)
+        descriptor_required_configuration.update(descriptor_required)
+        descriptor_optional_configuration.update(descriptor_optional)
 
         python_trees: list[tuple[Path, ast.Module]] = []
         for python_file in sorted(plugin_file.parent.glob("*.py")):
@@ -643,6 +785,7 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         if init_tree is not None:
             for handlers in _assigned_dicts(init_tree, "handlers"):
                 handler_tools.update(_literal_dict_keys(handlers))
+            handler_tools.update(_schema_loop_handler_tools(init_tree, schema_tools))
             registered_tools = _registered_tools(init_tree, schema_tools)
 
         for tool in sorted(declared_tools - schema_tools):
@@ -730,7 +873,9 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         for tool in sorted(listed - dispatched):
             problems.append(f"local MCP tool missing dispatcher: {local_path}: {tool}")
         for tool in sorted(dispatched - listed):
-            problems.append(f"local MCP dispatcher missing schema: {local_path}: {tool}")
+            problems.append(
+                f"local MCP dispatcher missing schema: {local_path}: {tool}"
+            )
         for server_name in mcp_local_servers.get(local_path, set()):
             mcp_server_tools[server_name].update(listed)
 
@@ -739,9 +884,7 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
     workflow_inputs: dict[str, dict[str, bool]] = {}
     workflow_toolsets: dict[str, set[str]] = {}
     workflow_mcp_servers: dict[str, set[str]] = {}
-    workflow_tool_nodes: dict[
-        str, list[tuple[str, set[str], set[str], str]]
-    ] = {}
+    workflow_tool_nodes: dict[str, list[tuple[str, set[str], set[str], str]]] = {}
     for workflow_file in sorted((repo / "workflows").glob("*.yml")) + sorted(
         (repo / "workflows").glob("*.yaml")
     ):
@@ -758,9 +901,7 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         else:
             problems.append(f"missing workflow name: {relative}")
         requires = metadata.get("requires", {})
-        if not isinstance(requires, dict):
-            problems.append(f"invalid workflow requires: {relative}")
-        else:
+        if isinstance(requires, dict):
             workflow_required = _string_list_metadata(
                 requires, "env", workflow_file, problems
             )
@@ -773,6 +914,13 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
             workflow_mcp_servers[relative] = _string_list_metadata(
                 requires, "mcp_servers", workflow_file, problems
             )
+        elif isinstance(requires, list) and all(
+            isinstance(item, str) and item for item in requires
+        ):
+            workflow_toolsets[relative] = set(requires)
+            workflow_mcp_servers[relative] = set()
+        else:
+            problems.append(f"invalid workflow requires: {relative}")
         inputs = metadata.get("inputs", [])
         parsed_inputs: dict[str, bool] = {}
         if not isinstance(inputs, list):
@@ -780,11 +928,15 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         else:
             for index, item in enumerate(inputs):
                 if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-                    problems.append(f"invalid workflow input: {relative}: inputs[{index}]")
+                    problems.append(
+                        f"invalid workflow input: {relative}: inputs[{index}]"
+                    )
                     continue
                 input_name = item["name"]
                 if input_name in parsed_inputs:
-                    problems.append(f"duplicate workflow input: {relative}: {input_name}")
+                    problems.append(
+                        f"duplicate workflow input: {relative}: {input_name}"
+                    )
                     continue
                 parsed_inputs[input_name] = "default" not in item
         workflow_inputs[relative] = parsed_inputs
@@ -792,15 +944,21 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         nodes = metadata.get("nodes", [])
         if isinstance(nodes, list):
             for index, node in enumerate(nodes):
-                if not isinstance(node, dict) or node.get("kind") != "tool":
+                if not isinstance(node, dict):
+                    continue
+                if node.get("kind") == "tool":
+                    tool_field = "tools"
+                elif "allowed_tools" in node:
+                    tool_field = "allowed_tools"
+                else:
                     continue
                 node_id = node.get("id")
                 if not isinstance(node_id, str):
                     node_id = f"nodes[{index}]"
                 node_tools = _string_list_metadata(
-                    node, "tools", workflow_file, problems
+                    node, tool_field, workflow_file, problems
                 )
-                if not node_tools:
+                if tool_field == "tools" and not node_tools:
                     problems.append(
                         f"workflow tool node missing tools: {relative}: {node_id}"
                     )
@@ -821,10 +979,14 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
             manifest_environment.add(item["key"])
             configuration.add(item["key"])
 
-    for name in sorted((required_configuration | optional_configuration) - manifest_environment):
+    for name in sorted(
+        (required_configuration | optional_configuration) - manifest_environment
+    ):
         problems.append(f"configuration missing from manifest env: {name}")
     for name in sorted(manifest_environment - implementation_configuration):
         problems.append(f"unused manifest environment: {name}")
+    required_configuration.update(descriptor_required_configuration)
+    optional_configuration.update(descriptor_optional_configuration)
     for workflow, toolsets in sorted(workflow_toolsets.items()):
         for toolset in sorted(toolsets - plugin_names):
             problems.append(f"unknown workflow toolset: {workflow}: {toolset}")
@@ -839,9 +1001,7 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
             available_tools.update(mcp_server_tools.get(server, set()))
         for node_id, node_tools, prompt_tools, prompt in nodes:
             for tool in sorted(node_tools - available_tools):
-                problems.append(
-                    f"unknown workflow tool: {workflow}: {node_id}: {tool}"
-                )
+                problems.append(f"unknown workflow tool: {workflow}: {node_id}: {tool}")
             for tool in sorted(prompt_tools - node_tools):
                 problems.append(
                     f"undeclared workflow prompt tool: {workflow}: {node_id}: {tool}"
@@ -944,6 +1104,10 @@ def compare_inventories(
     )
     for source_key, represented_key, message in known:
         for item in sorted(represented[represented_key] - set(inventory[source_key])):
+            if represented_key == "skills" and item in _BUILTIN_WORKFLOW_SKILLS:
+                continue
+            if represented_key == "plugins" and item in _BUILTIN_BACKEND_PLUGINS:
+                continue
             problems.append(f"{message}: {item}")
 
     manifest_actual = (
@@ -1011,7 +1175,9 @@ def validate_flow_maturity(repo: Path, entries: list[dict]) -> list[str]:
         flow_entries = by_flow.get(relative, [])
         metadata = read_frontmatter(path)
         status = metadata.get("status")
-        expected = FLOW_STATUS_TO_MATURITY.get(status) if isinstance(status, str) else None
+        expected = (
+            FLOW_STATUS_TO_MATURITY.get(status) if isinstance(status, str) else None
+        )
         if expected is None:
             problems.append(f"unknown flow status: {relative}: {status}")
         target_artifacts = metadata.get("target_artifacts")
@@ -1075,7 +1241,9 @@ def validate_configuration_names(repo: Path, entries: list[dict]) -> list[str]:
             if item["kind"] == "workflow-input"
         }
         for name in sorted(set(authoritative_inputs) - set(represented_inputs)):
-            problems.append(f"unrepresented workflow input: entry {entry['id']}: {name}")
+            problems.append(
+                f"unrepresented workflow input: entry {entry['id']}: {name}"
+            )
         for name in sorted(set(represented_inputs) - set(authoritative_inputs)):
             problems.append(f"unknown workflow input: entry {entry['id']}: {name}")
         for item in entry["configuration"]:
@@ -1117,7 +1285,11 @@ def validate_entry_paths(repo: Path, entries: list[dict]) -> list[str]:
         for reference in references:
             if _is_unsafe_reference(reference):
                 problems.append(f"unsafe entry path: {entry_id}: {reference}")
-            elif not (repo / reference).exists():
+            elif (
+                reference not in _BUILTIN_WORKFLOW_SKILLS
+                and reference not in _BUILTIN_BACKEND_PLUGINS
+                and not (repo / reference).exists()
+            ):
                 problems.append(f"missing entry path: {entry_id}: {reference}")
         for artifact in entry["artifacts"]:
             if _is_unsafe_reference(artifact):

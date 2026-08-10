@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from . import tools as gitlab_tools  # noqa: E402
 from .models import GitLabError, SAFE_ERROR_MESSAGES  # noqa: E402
@@ -14,6 +15,20 @@ _WRITE_TOOLS = frozenset(
         "gitlab_commit_changes",
         "gitlab_create_merge_request",
     }
+)
+_PLUGIN_SKILLS = (
+    (
+        "repository-research",
+        "Research bounded GitLab repository evidence.",
+    ),
+    (
+        "merge-request-review",
+        "Review bounded GitLab merge request evidence.",
+    ),
+    (
+        "ci-investigation",
+        "Investigate bounded GitLab CI evidence.",
+    ),
 )
 
 
@@ -140,3 +155,13 @@ def register(ctx) -> None:
             check_fn=available,
             emoji="🦊",
         )
+
+    skill_root = Path(__file__).parent / "skills"
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is not None:
+        for name, description in _PLUGIN_SKILLS:
+            register_skill(
+                name,
+                skill_root / name / "SKILL.md",
+                description,
+            )

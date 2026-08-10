@@ -5,6 +5,7 @@ Usage: python3 scripts/lint_manifest.py sets/ericsson.json
 Prints one JSON object; exit 0 when ok, 1 when problems were found.
 Run from the repo root (paths in the manifest are repo-relative).
 """
+
 import json
 import re
 import sys
@@ -17,8 +18,120 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PLUGIN_PATH_RE = re.compile(r"^plugins/[a-z0-9][a-z0-9_-]*$")
 MIGRATION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 BUILTIN_BACKEND_PATHS = frozenset({"plugins/workflow"})
-REQUIRED = ["name", "version", "description", "skills", "plugins",
-            "mcpServers", "mcpLocal", "workflows", "personas", "env"]
+REQUIRED = [
+    "name",
+    "version",
+    "description",
+    "skills",
+    "plugins",
+    "mcpServers",
+    "mcpLocal",
+    "workflows",
+    "personas",
+    "env",
+]
+
+
+def _is_string_list(value):
+    return isinstance(value, list) and all(
+        isinstance(item, str) and item for item in value
+    )
+
+
+def _looks_outward_tool(name):
+    segments = set(name.split("_"))
+    return bool(
+        segments
+        & {"add", "commit", "create", "delete", "post", "send", "update", "write"}
+    )
+
+
+def _lint_archon_workflow(document):
+    """Statically validate the flat Archon source shape without importing it."""
+    problems = []
+    if not isinstance(document, dict):
+        return ["workflow must be a mapping"]
+    for field in ("name", "description"):
+        if not isinstance(document.get(field), str) or not document[field].strip():
+            problems.append(f"missing or empty required key: {field}")
+    if not _is_string_list(document.get("requires")) or not document.get("requires"):
+        problems.append("requires must be a non-empty list of toolset ids")
+    nodes = document.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        return problems + ["nodes must be a non-empty list"]
+
+    by_id = {}
+    dependencies = {}
+    approval_ids = set()
+    write_nodes = set()
+    for index, node in enumerate(nodes):
+        label = f"node {index}"
+        if not isinstance(node, dict):
+            problems.append(f"{label}: must be a mapping")
+            continue
+        node_id = node.get("id")
+        if not isinstance(node_id, str) or not node_id:
+            problems.append(f"{label}: id must be a non-empty string")
+            continue
+        label = f"node {node_id}"
+        if node_id in by_id:
+            problems.append(f"{label}: duplicate id")
+            continue
+        by_id[node_id] = node
+        depends_on = node.get("depends_on", [])
+        if not _is_string_list(depends_on) and depends_on != []:
+            problems.append(f"{label}: depends_on must be a list of strings")
+            depends_on = []
+        dependencies[node_id] = set(depends_on)
+
+        if "approval" in node:
+            approval = node["approval"]
+            if (
+                not isinstance(approval, dict)
+                or not isinstance(approval.get("message"), str)
+                or not approval["message"].strip()
+            ):
+                problems.append(f"{label}: approval must contain a message")
+            else:
+                approval_ids.add(node_id)
+        tools = node.get("allowed_tools")
+        if "allowed_tools" in node and (
+            not isinstance(tools, list)
+            or any(not isinstance(tool, str) or not tool for tool in tools)
+        ):
+            problems.append(f"{label}: allowed_tools must be a list of strings")
+            tools = []
+        if "prompt" in node:
+            if not isinstance(node["prompt"], str) or not node["prompt"].strip():
+                problems.append(f"{label}: prompt must be a non-empty string")
+            if "allowed_tools" not in node:
+                problems.append(f"{label}: allowed_tools must be a list of strings")
+                tools = []
+            if any(_looks_outward_tool(tool) for tool in tools):
+                write_nodes.add(node_id)
+        elif "allowed_tools" in node:
+            problems.append(f"{label}: allowed_tools requires a prompt")
+        if not any(key in node for key in ("approval", "prompt", "bash")):
+            problems.append(f"{label}: requires prompt, approval, or bash")
+
+    for node_id, required in dependencies.items():
+        for dependency in sorted(required - set(by_id)):
+            problems.append(f"node {node_id}: unknown dependency: {dependency}")
+
+    def has_approval_ancestor(node_id, seen=None):
+        seen = set() if seen is None else seen
+        if node_id in seen:
+            return False
+        seen.add(node_id)
+        direct = dependencies.get(node_id, set())
+        return bool(direct & approval_ids) or any(
+            has_approval_ancestor(parent, seen) for parent in direct
+        )
+
+    for node_id in sorted(write_nodes):
+        if not has_approval_ancestor(node_id):
+            problems.append(f"node {node_id}: outward tool requires approval ancestor")
+    return problems
 
 
 def lint(manifest_path: Path) -> list[str]:
@@ -102,17 +215,16 @@ def lint(manifest_path: Path) -> list[str]:
                             f"plugins[{i}].lifecycleMigration must be a mapping"
                         )
                     else:
-                        migration_unknown = sorted(
-                            set(migration) - {"id", "from"}
-                        )
+                        migration_unknown = sorted(set(migration) - {"id", "from"})
                         if migration_unknown:
                             problems.append(
                                 f"plugins[{i}].lifecycleMigration has unknown fields: "
                                 f"{migration_unknown}"
                             )
                         migration_id = migration.get("id")
-                        if not isinstance(migration_id, str) or not MIGRATION_ID_RE.fullmatch(
-                                migration_id):
+                        if not isinstance(
+                            migration_id, str
+                        ) or not MIGRATION_ID_RE.fullmatch(migration_id):
                             problems.append(
                                 f"plugins[{i}].lifecycleMigration.id must be a stable "
                                 "slug of at most 64 characters"
@@ -153,27 +265,45 @@ def lint(manifest_path: Path) -> list[str]:
         if not (REPO / rel).is_dir():
             problems.append(f"mcpLocal dir missing: {rel}")
 
-    sys.path.insert(0, str(REPO / "skills/ericsson/workflow-orchestrator/scripts"))
-    import workflow_ctl as wc
+    wc = None
     for rel in doc["workflows"]:
         p = REPO / rel
         if not p.exists():
             problems.append(f"workflow missing: {rel}")
             continue
         try:
-            errors, _ = wc.validate_workflow(wc.load_workflow(p))
+            loaded = yaml.safe_load(p.read_text())
+            if isinstance(loaded, dict) and isinstance(loaded.get("requires"), list):
+                errors = _lint_archon_workflow(loaded)
+            else:
+                if wc is None:
+                    sys.path.insert(
+                        0,
+                        str(REPO / "skills/ericsson/workflow-orchestrator/scripts"),
+                    )
+                    import workflow_ctl as wc_module
+
+                    wc = wc_module
+                errors, _ = wc.validate_workflow(wc.load_workflow(p))
             problems += [f"{rel}: {e}" for e in errors]
         except Exception as e:
             problems.append(f"{rel}: {e}")
 
     for i, entry in enumerate(doc["env"]):
-        if not isinstance(entry, dict) or not entry.get("key") or not entry.get("description"):
+        if (
+            not isinstance(entry, dict)
+            or not entry.get("key")
+            or not entry.get("description")
+        ):
             problems.append(f"env[{i}] needs key + description")
 
     req_env = doc.get("requiresEnv", {})
     if not isinstance(req_env, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in req_env.items()):
-        problems.append("requiresEnv must be a mapping of env-var name -> required value")
+        isinstance(k, str) and isinstance(v, str) for k, v in req_env.items()
+    ):
+        problems.append(
+            "requiresEnv must be a mapping of env-var name -> required value"
+        )
     dbd = doc.get("disabledByDefault", {})
     if not isinstance(dbd, dict):
         problems.append("disabledByDefault must be a mapping")

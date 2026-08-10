@@ -18,7 +18,7 @@ This is the configuration source of truth for the documented flows and the imple
 | Glean | `GLEAN_API_TOKEN` | Bearer token for the supplied remote MCP endpoint | Internal search when a workflow elects to use Glean |
 | Teams | `teams_auth`; optional `ERICSSON_GRAPH_CLIENT_ID` | MSAL device-code sign-in | Teams list/read/send/reply and future notifications |
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
-| GitLab | Standalone connector declared disabled; key names and implementation are not yet available | PAT with `api` scope; optional mTLS | CI audit; Jira→GitLab; defect loop |
+| GitLab | `origin`, protected `pat`; optional `client_certificate_path` and `client_key_path` | PAT with appropriate scope; optional mTLS | Repository research; CI inspection; Jira→GitLab |
 | Document parsing/export | Local Python packages | No key | TOL generation; 3PP tracker |
 | Opportunity Visuals | Python/local files; optional openpyxl and Playwright/Chromium | No API key | Opportunity progression visual artifacts |
 | Pseudonymization | No configuration; explicitly unsupported | None | Historical questions only; no port roadmap |
@@ -41,10 +41,10 @@ connectors without a capability-set toggle:
   that had previously been auto-seeded. Its stable id and exact
   `from: auto_seeded_backend` transition live only in the manifest.
 
-Do not use connector metadata to disable skills or workflows, add a set-wide
+Do not use connector metadata to disable source skills or workflows, add a set-wide
 `disabledByDefault` switch, or infer that a declared connector is implemented. The
-GitLab object currently declares the Release 1 lifecycle contract; its plugin and setup
-keys arrive in their implementation tasks. Jira remains an existing backend for this
+GitLab object declares the Release 1 lifecycle contract and the implemented plugin
+remains disabled until explicit per-profile opt-in. Jira remains an existing backend for this
 release, while SharePoint and Confluence have no production connector placeholders.
 
 ## Jira
@@ -107,13 +107,22 @@ Requirements:
 
 Validate in increasing-risk order: start the MCP server/list its tools; list mailboxes; list a small number of messages; read one known message; only then test draft/send/calendar mutations with explicit approval. Distinguish “MCP server did not start,” “PowerShell unavailable,” “Outlook COM unavailable,” “Outlook closed/offline,” and “mailbox item not found.”
 
-## GitLab (planned Hermes capability)
+## GitLab
 
 The Loop24 flows accept a GitLab personal access token in each component and require `api` scope for project discovery, repository reads, branch/commit creation, merge requests, CI variables, and review data. Some internal deployments also use an mTLS client certificate and key beneath `~/.config/edpctl/auth/`.
 
-The manifest now declares `ericsson-gitlab` at `plugins/ericsson-gitlab` as a standalone connector with `enabled: false`. This declaration controls future per-profile staging; it does not make the connector runnable and it deliberately carries no migration from an older auto-seeded backend. The plugin implementation and stable setup key names—likely a base URL plus secret PAT—are not yet present, so onboarding must continue to describe GitLab as planned rather than available. The implementation must also decide how explicit certificate paths coexist with the accepted `~/.config/edpctl/auth/client.pem` and `client-key.pem` defaults.
+The manifest bundles `ericsson-gitlab` at `plugins/ericsson-gitlab` with `enabled: false` and no migration from an older auto-seeded backend. Enable it explicitly, configure the exact HTTP(S) `origin` and protected `pat`, and optionally configure both `client_certificate_path` and `client_key_path`. The optional pair must identify bounded regular files and load as a matching certificate/key pair; certificate contents never enter diagnostics.
 
-Validation should be staged: identify the current user; resolve a permitted project; read its default branch; list repository files; inspect CI metadata; then, only with approval and a test project, create a branch/MR. Never test by pushing to a production default branch. Expected permission for the full write path is GitLab `api`; a read-only auditor should use a narrower token if the server supports it.
+After enablement start a fresh conversation, then validate by resolving a permitted project and reading its default branch before bounded repository or CI inspection. Only with explicit intent, a dry-run preview, and host approval should a test project receive a branch, atomic commit, or merge request. Never validate by pushing to a production default branch. Use least privilege supported by the server; the full write path commonly requires GitLab `api`.
+
+The read surface is `gitlab_resolve_project`, `gitlab_list_repository_tree`,
+`gitlab_read_file`, `gitlab_read_merge_request`, `gitlab_list_pipelines`, and
+`gitlab_inspect_ci`. The write surface is `gitlab_create_branch`,
+`gitlab_commit_changes`, and `gitlab_create_merge_request`. Enabled profiles also
+receive the qualified `ericsson-gitlab:repository-research`,
+`ericsson-gitlab:merge-request-review`, and
+`ericsson-gitlab:ci-investigation` skills. The reviewed cross-connector workflow is
+`jira-to-gitlab`.
 
 ## Model and embedded Langflow LLM settings
 

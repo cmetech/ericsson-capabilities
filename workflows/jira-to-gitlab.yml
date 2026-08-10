@@ -1,0 +1,94 @@
+name: jira-to-gitlab
+description: Bounded Jira ticket research, approved GitLab fix, review, and status update
+tags: [ericsson, jira, gitlab]
+requires: [ericsson-gitlab, ericsson-jira]
+nodes:
+  - id: read-ticket
+    prompt: >
+      Use the jira_get_issue tool for the exact ticket key. Preserve not_found,
+      permission, and incomplete facts; do not infer missing issue content.
+    allowed_tools: [jira_get_issue]
+
+  - id: resolve-project
+    depends_on: [read-ticket]
+    prompt: >
+      Use the gitlab_resolve_project tool for the ticket's explicit project.
+      Preserve canonical identity and default branch or report attention needed.
+    allowed_tools: [gitlab_resolve_project]
+
+  - id: research-repository
+    depends_on: [resolve-project]
+    prompt: >
+      Use the gitlab_list_repository_tree tool and gitlab_read_file tool only
+      for bounded evidence relevant to the ticket. Preserve every warning and
+      continuation fact.
+    allowed_tools: [gitlab_list_repository_tree, gitlab_read_file]
+
+  - id: reason-about-fix
+    depends_on: [research-repository]
+    prompt: >
+      As the active agent, explain the proposed fix, exact bounded actions,
+      evidence gaps, and tests. Stop if the intended change is uncertain.
+    allowed_tools: []
+
+  - id: approve-code-writes
+    depends_on: [reason-about-fix]
+    approval:
+      message: Review the proposed branch, file actions, and merge request before GitLab writes.
+      capture_response: true
+
+  - id: create-branch
+    depends_on: [approve-code-writes]
+    prompt: >
+      First use the gitlab_create_branch tool with dry_run true and compare the
+      preview to the exact approved intent. Only then request visible host approval
+      for the current invocation and create the branch. Stop on uncertain output;
+      do not retry an ambiguous mutation.
+    allowed_tools: [gitlab_create_branch]
+
+  - id: commit-changes
+    depends_on: [create-branch]
+    prompt: >
+      First use the gitlab_commit_changes tool with dry_run true and compare the
+      reconciled actions to the exact approved intent. Only then request visible
+      host approval for the current invocation and perform the one atomic commit.
+      Stop on uncertain output and do not retry.
+    allowed_tools: [gitlab_commit_changes]
+
+  - id: create-merge-request
+    depends_on: [commit-changes]
+    prompt: >
+      First use the gitlab_create_merge_request tool with dry_run true and compare
+      its source, target, and title to the exact approved intent. Only then request
+      visible host approval for the current invocation and create or reconcile the
+      merge request. Do not retry an uncertain result.
+    allowed_tools: [gitlab_create_merge_request]
+
+  - id: review-merge-request
+    depends_on: [create-merge-request]
+    prompt: >
+      Use the gitlab_read_merge_request tool and gitlab_read_file tool for one
+      bounded active-agent review. Preserve warnings and identify any attention needed.
+    allowed_tools: [gitlab_read_merge_request, gitlab_read_file]
+
+  - id: approve-jira-update
+    depends_on: [review-merge-request]
+    approval:
+      message: Review the exact confirmed GitLab facts before adding the Jira status comment.
+      capture_response: true
+
+  - id: update-jira
+    depends_on: [approve-jira-update]
+    prompt: >
+      Use the jira_add_comment tool only with the exact approved, confirmed branch,
+      commit, merge request, review, warning, and attention-needed facts. Request
+      visible host approval for this current invocation. Do not retry if uncertain.
+    allowed_tools: [jira_add_comment]
+
+  - id: report-status
+    depends_on: [update-jira]
+    prompt: >
+      Return truthful per-ticket status, including not_found or zero-ticket input,
+      canonical project, branch, commit, merge request, warnings, and attention needed.
+      Never convert an uncertain write into success and do not retry it.
+    allowed_tools: []

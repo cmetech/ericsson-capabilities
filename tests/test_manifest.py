@@ -3,6 +3,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import lint_manifest  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 LINT = REPO / "scripts/lint_manifest.py"
 MANIFEST = REPO / "sets/ericsson.json"
@@ -11,8 +16,9 @@ LEGACY_FLOW_SHA = "3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e"
 
 
 def _lint(path):
-    proc = subprocess.run([sys.executable, str(LINT), str(path)],
-                          capture_output=True, text=True, cwd=REPO)
+    proc = subprocess.run(
+        [sys.executable, str(LINT), str(path)], capture_output=True, text=True, cwd=REPO
+    )
     if not proc.stdout:
         return proc.returncode, {
             "ok": False,
@@ -35,12 +41,90 @@ def _standalone_plugin(plugin_id, *, enabled=False, path=None):
     }
 
 
+def _minimal_lint_repo(tmp_path: Path, workflow: dict) -> Path:
+    (tmp_path / "sets").mkdir()
+    (tmp_path / "mcp").mkdir()
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "mcp/servers.yaml").write_text("mcp_servers: {}\n")
+    (tmp_path / "workflows/example.yml").write_text(
+        yaml.safe_dump(workflow, sort_keys=False)
+    )
+    manifest = {
+        "name": "example",
+        "version": "1.0.0",
+        "description": "Example",
+        "skills": [],
+        "plugins": [],
+        "mcpServers": "mcp/servers.yaml",
+        "mcpLocal": [],
+        "workflows": ["workflows/example.yml"],
+        "personas": [],
+        "env": [],
+    }
+    path = tmp_path / "sets/example.json"
+    path.write_text(json.dumps(manifest))
+    return path
+
+
+def test_lint_accepts_generic_flat_archon_and_rejects_malformed_nodes(
+    tmp_path, monkeypatch
+):
+    valid = {
+        "name": "example",
+        "description": "Example flat workflow",
+        "requires": ["example-tools"],
+        "nodes": [
+            {
+                "id": "read",
+                "prompt": "Read evidence",
+                "allowed_tools": ["example_read"],
+            },
+            {
+                "id": "approve",
+                "depends_on": ["read"],
+                "approval": {"message": "Review the outward action."},
+            },
+            {
+                "id": "write",
+                "depends_on": ["approve"],
+                "prompt": "Perform the approved action",
+                "allowed_tools": ["example_write"],
+            },
+        ],
+    }
+    manifest = _minimal_lint_repo(tmp_path, valid)
+    monkeypatch.setattr(lint_manifest, "REPO", tmp_path)
+    assert lint_manifest.lint(manifest) == []
+
+    invalid = dict(valid)
+    invalid["nodes"] = [{"id": "broken", "allowed_tools": "example_read"}]
+    (tmp_path / "workflows/example.yml").write_text(
+        yaml.safe_dump(invalid, sort_keys=False)
+    )
+    assert any(
+        "allowed_tools must be a list of strings" in problem
+        for problem in lint_manifest.lint(manifest)
+    )
+
+    invalid["requires"] = []
+    invalid["nodes"] = valid["nodes"]
+    (tmp_path / "workflows/example.yml").write_text(
+        yaml.safe_dump(invalid, sort_keys=False)
+    )
+    assert any(
+        "requires must be a non-empty list" in problem
+        for problem in lint_manifest.lint(manifest)
+    )
+
+
 def test_manifest_content():
     doc = json.loads(MANIFEST.read_text())
     assert doc["name"] == "ericsson"
     assert doc["skills"] == [
         "skills/ericsson/opportunity-visuals",
         "skills/ericsson/onboard-ericsson-capabilities",
+        "skills/ericsson/gitlab",
+        "skills/ericsson/jira-to-gitlab",
     ]
     assert doc["plugins"] == [
         "plugins/ericsson-jira",
@@ -55,8 +139,11 @@ def test_manifest_content():
     assert doc["mcpServers"] == "mcp/mcp-servers.yaml"
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]
     assert doc["workflowCoreTools"] == []
-    assert set(doc["workflows"]) == {"workflows/my-tickets-summary.yml",
-                                      "workflows/inbox-digest.yml"}
+    assert set(doc["workflows"]) == {
+        "workflows/my-tickets-summary.yml",
+        "workflows/inbox-digest.yml",
+        "workflows/jira-to-gitlab.yml",
+    }
     assert doc["personas"] == []
     keys = {e["key"] for e in doc["env"]}
     assert keys == {
@@ -267,7 +354,9 @@ def test_lint_rejects_duplicate_lifecycle_migration_ids(tmp_path):
     code, out = _lint(_write_manifest(tmp_path, doc))
 
     assert code == 1
-    assert any("duplicate lifecycleMigration id" in problem for problem in out["problems"]), out
+    assert any(
+        "duplicate lifecycleMigration id" in problem for problem in out["problems"]
+    ), out
 
 
 def test_lint_rejects_bad_disabled_block(tmp_path):

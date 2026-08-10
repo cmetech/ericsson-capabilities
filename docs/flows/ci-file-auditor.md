@@ -2,8 +2,8 @@
 source_flow: flows/how-to/CI File Auditor.json
 source_commit: 3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e
 source_sha256: 9d067c265538ebe500cf590fd96ad1d567518529efbcab1a5c16e1f569c3ebeb
-status: not-ported
-target_artifacts: [ericsson-gitlab-plugin, ci-file-audit-workflow]
+status: partially-ported
+target_artifacts: [ericsson-gitlab]
 supporting_capabilities: [gitlab, hermes-agent]
 platforms: [macos, linux, windows]
 ---
@@ -33,7 +33,7 @@ Inputs are a project list, branch selection (`ALL`, `RECENT`, or exact branch), 
 
 ## Supporting capabilities and configuration
 
-The source requires a GitLab PAT and may require mTLS. See [configuration](../configuration.md#gitlab-planned-hermes-capability). The current Ericsson capability set has no GitLab tools, so this flow cannot run end to end.
+The source requires a GitLab PAT and may require mTLS. See [configuration](../configuration.md#gitlab). The current Ericsson capability set supplies bounded GitLab CI reads, but not the multi-project policy-audit workflow and report writers.
 
 ## Failure, safety, and privacy behavior
 
@@ -41,8 +41,8 @@ Use read-only GitLab access where possible. Never retrieve CI variable values. A
 
 ## Hermes port status and target shape
 
-Create reusable read-only GitLab tools for project resolution, CI files/includes, pipeline metrics, branches, and variable metadata. A deterministic workflow should iterate projects, store evidence, run two prompt nodes with validated JSON schemas, and assemble a report. The LLM nodes become Hermes prompt work; they are not plugins.
+Partially ported: project resolution, bounded CI files/includes, pipeline facts, branch selection, and variable metadata are implemented with explicit warning and truncation facts. A future deterministic workflow must still iterate projects, store evidence, run two active-agent analysis nodes with validated outputs, and assemble reports.
 
 ## How Hermes should explain and configure it
 
-Ask which projects, desired branch scope, lookback period, and whether the user wants general findings, policy coverage, or both. Confirm GitLab readiness with identity/project/default-branch reads before collecting CI evidence. Explain clearly that the flow is not ported yet and can only be planned or performed manually with existing tools.
+Ask which projects, desired branch scope, lookback period, and whether the user wants current evidence or the deferred findings/policy reports. Confirm GitLab readiness with identity/project/default-branch reads before collection and never present bounded inspection as a completed policy audit.

@@ -2,8 +2,8 @@
 source_flow: flows/jira_gitlab/Jira -_ Gitlab.json
 source_commit: 3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e
 source_sha256: cf68ba438816621d3d2e30b2bff00a872060928ac60c9824e2f05f998f4c3815
-status: partially-ported
-target_artifacts: [ericsson-gitlab-plugin, jira-to-gitlab-workflow]
+status: intent-ported
+target_artifacts: [ericsson-gitlab, jira-to-gitlab]
 supporting_capabilities: [jira, gitlab, hermes-agent]
 platforms: [macos, linux, windows]
 ---
@@ -33,7 +33,7 @@ Inputs include Jira/GitLab auth, ticket key, branch prefix, file extension allow
 
 ## Supporting capabilities and configuration
 
-Jira read/comment tools exist. GitLab project/read/write/review tools do not. See [Jira](../configuration.md#jira) and [planned GitLab configuration](../configuration.md#gitlab-planned-hermes-capability).
+Jira read/comment tools and the bounded GitLab project/read/write tools now exist. See [Jira](../configuration.md#jira) and [GitLab configuration](../configuration.md#gitlab).
 
 ## Failure, safety, and privacy behavior
 
@@ -41,8 +41,8 @@ This is high-consequence automation. Require explicit approval before the first 
 
 ## Hermes port status and target shape
 
-Partially ported: Jira list/detail/comment and the workflow state machine exist. Missing are GitLab tools, a schema-validated fix contract, approvals, the end-to-end workflow, and tests. LLM context building/review should be prompt nodes; GitLab API operations should be reusable plugin tools.
+Intent ported: the source now supplies Jira reads/comments, nine bounded GitLab tools, active-agent guidance, visible approval nodes, and a flat portable workflow. It deliberately replaces hidden aggregation and model clients with explicit tool contracts. Multi-ticket `loop_group` parity remains deferred.
 
 ## How Hermes should explain and configure it
 
-Explain every write before setup. Ask for the ticket, permitted project, desired branch prefix, target branch, file scope, and approval policy. Validate Jira and GitLab read-only first. Until the GitLab capability lands, state that the flow cannot run and offer a manual assisted-code workflow instead.
+Explain every write before setup. Ask for the ticket, permitted project, desired branch prefix, target branch, file scope, and approval policy. Validate Jira and GitLab read-only first, preview mutations, and obtain current-invocation host approval for each outward action.

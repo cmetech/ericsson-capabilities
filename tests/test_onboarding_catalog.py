@@ -23,6 +23,7 @@ from catalog_lib import (  # noqa: E402
     serialize_catalog,
     validate_entry_paths,
     validate_repository,
+    validate_workflow_sidecar,
 )
 
 
@@ -1845,6 +1846,151 @@ def test_validate_catalog_cli_reports_mixed_sidecar_keys_without_traceback(
     assert json.loads(result.stdout) == {
         "ok": False,
         "problems": ["workflow sidecar field names must be strings"],
+    }
+
+
+def test_catalog_library_rejects_cyclic_sidecar_with_fixed_error(
+    repo_fixture: RepoFixture,
+) -> None:
+    # A missing identity-aware active-path check recurses forever on a real
+    # PyYAML self-alias instead of returning one bounded catalog diagnostic.
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {
+            "language_compatibility": "archon-2026-07",
+            "delivery_defaults": cyclic,
+        },
+    )
+    repo_fixture.write_complete_entry()
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar structure must not contain cycles"
+
+
+def test_validate_catalog_cli_reports_cyclic_sidecar_without_traceback(
+    repo_fixture: RepoFixture,
+) -> None:
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {
+            "language_compatibility": "archon-2026-07",
+            "delivery_defaults": cyclic,
+        },
+    )
+    repo_fixture.write_complete_entry()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "validate_catalog.py"),
+            "--repo",
+            str(repo_fixture.root),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar structure must not contain cycles"],
+    }
+
+
+def _nested_sidecar_value(container_depth: int) -> object:
+    value: object = "leaf"
+    for index in range(container_depth):
+        value = {"next": value} if index % 2 else [value]
+    return value
+
+
+def test_catalog_library_bounds_sidecar_depth_and_entries() -> None:
+    # The safe structure convention permits depth 24 and 2,048 visited entries,
+    # then rejects the immediately adjacent values without Python recursion.
+    at_depth_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {"value": _nested_sidecar_value(22)},
+    }
+    above_depth_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {"value": _nested_sidecar_value(23)},
+    }
+    at_entry_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {f"field-{index}": "x" for index in range(2045)},
+    }
+    above_entry_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {f"field-{index}": "x" for index in range(2046)},
+    }
+
+    assert validate_workflow_sidecar(at_depth_limit, node_ids=set()) == []
+    assert validate_workflow_sidecar(at_entry_limit, node_ids=set()) == []
+    for sidecar in (above_depth_limit, above_entry_limit):
+        with pytest.raises(CatalogError) as exc:
+            validate_workflow_sidecar(sidecar, node_ids=set())
+        assert str(exc.value) == "workflow sidecar exceeds safe structure limits"
+
+
+def test_catalog_library_allows_acyclic_shared_aliases() -> None:
+    # Completed container identities may be reused; only an identity on the
+    # active traversal path is a cycle.
+    shared = {"values": ["one", {"two": "three"}]}
+    sidecar = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {"first": shared, "second": shared},
+    }
+
+    assert validate_workflow_sidecar(sidecar, node_ids=set()) == []
+
+
+def test_catalog_library_rejects_very_deep_mixed_sidecar_without_recursion() -> None:
+    sidecar = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": _nested_sidecar_value(1101),
+    }
+
+    with pytest.raises(CatalogError) as exc:
+        validate_workflow_sidecar(sidecar, node_ids=set())
+
+    assert str(exc.value) == "workflow sidecar exceeds safe structure limits"
+
+
+def test_validate_catalog_cli_bounds_very_deep_sidecar_without_traceback(
+    repo_fixture: RepoFixture,
+) -> None:
+    deep_value = "[" * 1101 + "{7: value}" + "]" * 1101
+    repo_fixture._write_text(
+        "workflows/example.hermes.yaml",
+        f"language_compatibility: archon-2026-07\ndelivery_defaults: {deep_value}\n",
+    )
+    repo_fixture.write_complete_entry()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "validate_catalog.py"),
+            "--repo",
+            str(repo_fixture.root),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar exceeds safe structure limits"],
     }
 
 

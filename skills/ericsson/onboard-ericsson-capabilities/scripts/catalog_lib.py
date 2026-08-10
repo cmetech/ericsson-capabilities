@@ -178,6 +178,11 @@ _WORKFLOW_RESOURCE_LIMITS = frozenset(
         "max_descendants",
     }
 )
+# Match the repository's bounded onboarding JSON-tree capacity convention.
+_WORKFLOW_SIDECAR_MAX_DEPTH = 24
+_WORKFLOW_SIDECAR_MAX_ENTRIES = 2048
+_WORKFLOW_SIDECAR_CYCLE_ERROR = "workflow sidecar structure must not contain cycles"
+_WORKFLOW_SIDECAR_LIMIT_ERROR = "workflow sidecar exceeds safe structure limits"
 
 
 class CatalogError(ValueError):
@@ -185,14 +190,49 @@ class CatalogError(ValueError):
 
 
 def _require_string_mapping_keys(value: object) -> None:
-    if isinstance(value, dict):
-        if any(not isinstance(field, str) for field in value):
-            raise CatalogError("workflow sidecar field names must be strings")
-        for nested in value.values():
-            _require_string_mapping_keys(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            _require_string_mapping_keys(nested)
+    """Validate one bounded YAML graph without recursive Python calls.
+
+    Repeated acyclic aliases are safe and traversed once. An identity still on
+    the active path is a cycle. Every reference still consumes the entry
+    budget, so aliases cannot amplify an otherwise oversized document.
+    """
+
+    stack: list[tuple[object, int, bool]] = [(value, 0, False)]
+    active: set[int] = set()
+    completed: set[int] = set()
+    entries = 1
+    while stack:
+        item, depth, leaving = stack.pop()
+        if leaving:
+            identity = id(item)
+            active.remove(identity)
+            completed.add(identity)
+            continue
+        if depth > _WORKFLOW_SIDECAR_MAX_DEPTH:
+            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
+        if isinstance(item, dict):
+            if any(not isinstance(field, str) for field in item):
+                raise CatalogError("workflow sidecar field names must be strings")
+            child_count = len(item)
+        elif isinstance(item, list):
+            child_count = len(item)
+        else:
+            continue
+
+        identity = id(item)
+        if identity in active:
+            raise CatalogError(_WORKFLOW_SIDECAR_CYCLE_ERROR)
+        if identity in completed:
+            continue
+        if child_count and depth >= _WORKFLOW_SIDECAR_MAX_DEPTH:
+            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
+        if entries + child_count > _WORKFLOW_SIDECAR_MAX_ENTRIES:
+            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
+        entries += child_count
+        active.add(identity)
+        stack.append((item, depth, True))
+        nested_values = tuple(item.values()) if isinstance(item, dict) else tuple(item)
+        stack.extend((nested, depth + 1, False) for nested in reversed(nested_values))
 
 
 def validate_workflow_sidecar(
@@ -320,6 +360,10 @@ def _relative_label(path: Path) -> str:
 def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, Any]:
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except RecursionError:
+        if label == "workflow sidecar":
+            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR) from None
+        raise CatalogError(f"{label} exceeds safe structure limits") from None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise CatalogError(f"{path}: invalid {label}: {exc}") from exc
     if not isinstance(value, dict):
@@ -336,7 +380,9 @@ def _workflow_language_profile(
         return None
     try:
         metadata = _load_yaml_mapping(sidecar, label="workflow sidecar")
-    except CatalogError:
+    except CatalogError as exc:
+        if str(exc) == _WORKFLOW_SIDECAR_LIMIT_ERROR:
+            raise
         problems.append(f"invalid workflow sidecar: {relative}")
         return "invalid"
     nodes = _load_yaml_mapping(workflow_file, label="workflow metadata").get(

@@ -6,7 +6,8 @@ This handbook explains the Loop24 Langflow automations translated into native Co
 
 - Source checkout: Loop24 repository `loop_24` (location varies by environment)
 - Git remote: `git@git.rosetta.ericssondevops.com:sd-americas-css/sd-americas-ai/loop_24.git`
-- Inventory snapshot: commit `3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e`
+- Inventory snapshot: commit `fc3bf26d64e05cc3703ee39e323bbf3c1eaa4cd6`
+- Inventory size: 30 live, non-archived flow JSON files (excluding `flows/manifest.json`)
 - Source areas: `flows/`, `custom_components/`, `mcp/`, and supporting scripts under `utils/`
 
 The goal is to port each flow's intent, controls, and user outcome—not reproduce the Langflow graph node for node. In Hermes:
@@ -17,7 +18,14 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 - an embedded Langflow LLM node becomes work performed by the active Hermes agent;
 - secrets stay in Hermes configuration, never in workflows or these documents.
 
-## Flow inventory
+## Reviewed legacy flow inventory
+
+The source snapshot contains 30 live flow JSON files. The table below covers the 11
+legacy flows already reviewed and documented in this repository; it is not the complete
+current inventory. Each page intentionally retains `source_commit`
+`3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e`: comparison against the frozen snapshot
+found the corresponding JSON moved byte-for-byte to `flows/archieve/`, so restamping
+those pages would falsely claim review of newer live replacements and newly added flows.
 
 | Original flow | Current status | Hermes counterpart or likely target |
 |---|---|---|
@@ -33,7 +41,7 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 | [Re-Identification](flows/re-identification.md) | Planned, not implemented | No runnable mapping capability is available |
 | [Windows Laptop Diagnostic](flows/windows-laptop-diagnostic.md) | Not ported | Windows-only diagnostic skill with reviewed script |
 
-Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and the workflow orchestrator/builder.
+Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and Hermes' enabled built-in workflow backend and skills. The GitLab standalone connector is declared disabled in the manifest but is not runnable until its implementation and setup contract land.
 
 ## Onboarding, configuration, and maintenance
 

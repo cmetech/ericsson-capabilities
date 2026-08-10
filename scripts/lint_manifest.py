@@ -14,6 +14,9 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+PLUGIN_PATH_RE = re.compile(r"^plugins/[a-z0-9][a-z0-9_-]*$")
+MIGRATION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+BUILTIN_BACKEND_PATHS = frozenset({"plugins/workflow"})
 REQUIRED = ["name", "version", "description", "skills", "plugins",
             "mcpServers", "mcpLocal", "workflows", "personas", "env"]
 
@@ -36,10 +39,105 @@ def lint(manifest_path: Path) -> list[str]:
     for rel in doc["skills"]:
         if not (REPO / rel / "SKILL.md").exists():
             problems.append(f"skill missing or lacks SKILL.md: {rel}")
-    for rel in doc["plugins"]:
-        for req in ("plugin.yaml", "__init__.py"):
-            if not (REPO / rel / req).exists():
-                problems.append(f"plugin missing {req}: {rel}")
+    plugin_paths = set()
+    plugin_ids = set()
+    migration_ids = set()
+    if not isinstance(doc["plugins"], list):
+        problems.append("plugins must be a list")
+    else:
+        for i, entry in enumerate(doc["plugins"]):
+            if isinstance(entry, str):
+                rel = entry
+                if not PLUGIN_PATH_RE.fullmatch(rel):
+                    problems.append(f"plugins[{i}] path must be plugins/<slug>")
+                    continue
+                if rel not in BUILTIN_BACKEND_PATHS:
+                    for req in ("plugin.yaml", "__init__.py"):
+                        if not (REPO / rel / req).exists():
+                            problems.append(f"plugin missing {req}: {rel}")
+            elif isinstance(entry, dict):
+                allowed = {"path", "id", "enabled", "lifecycleMigration"}
+                unknown = sorted(set(entry) - allowed)
+                if unknown:
+                    problems.append(
+                        f"plugins[{i}] has unknown standalone fields: {unknown}"
+                    )
+
+                rel = entry.get("path")
+                if not isinstance(rel, str) or not PLUGIN_PATH_RE.fullmatch(rel):
+                    problems.append(f"plugins[{i}].path must be plugins/<slug>")
+                    rel = None
+                elif rel in BUILTIN_BACKEND_PATHS:
+                    problems.append(
+                        f"plugins[{i}].path {rel} is an enabled backend and cannot "
+                        "use standalone connector metadata"
+                    )
+
+                plugin_id = entry.get("id")
+                if not isinstance(plugin_id, str) or not SLUG_RE.fullmatch(plugin_id):
+                    problems.append(f"plugins[{i}].id must be a slug")
+                elif plugin_id in plugin_ids:
+                    problems.append(f"duplicate standalone plugin id: {plugin_id}")
+                else:
+                    plugin_ids.add(plugin_id)
+
+                enabled = entry.get("enabled")
+                if not isinstance(enabled, bool):
+                    problems.append(f"plugins[{i}].enabled must be boolean false")
+                elif enabled:
+                    problems.append(
+                        f"plugins[{i}].enabled must be false for a standalone plugin"
+                    )
+
+                migration = entry.get("lifecycleMigration")
+                if migration is not None:
+                    if enabled is not False or not isinstance(plugin_id, str):
+                        problems.append(
+                            f"plugins[{i}].lifecycleMigration is allowed only on "
+                            "a disabled standalone plugin"
+                        )
+                    if not isinstance(migration, dict):
+                        problems.append(
+                            f"plugins[{i}].lifecycleMigration must be a mapping"
+                        )
+                    else:
+                        migration_unknown = sorted(
+                            set(migration) - {"id", "from"}
+                        )
+                        if migration_unknown:
+                            problems.append(
+                                f"plugins[{i}].lifecycleMigration has unknown fields: "
+                                f"{migration_unknown}"
+                            )
+                        migration_id = migration.get("id")
+                        if not isinstance(migration_id, str) or not MIGRATION_ID_RE.fullmatch(
+                                migration_id):
+                            problems.append(
+                                f"plugins[{i}].lifecycleMigration.id must be a stable "
+                                "slug of at most 64 characters"
+                            )
+                        elif migration_id in migration_ids:
+                            problems.append(
+                                f"duplicate lifecycleMigration id: {migration_id}"
+                            )
+                        else:
+                            migration_ids.add(migration_id)
+                        if migration.get("from") != "auto_seeded_backend":
+                            problems.append(
+                                f"plugins[{i}].lifecycleMigration.from must be "
+                                "auto_seeded_backend"
+                            )
+            else:
+                problems.append(
+                    f"plugins[{i}] must be a backend path string or standalone mapping"
+                )
+                continue
+
+            if rel is not None:
+                if rel in plugin_paths:
+                    problems.append(f"duplicate plugin path: {rel}")
+                else:
+                    plugin_paths.add(rel)
     mcp_cfg = REPO / doc["mcpServers"]
     if not mcp_cfg.exists():
         problems.append(f"mcpServers file missing: {doc['mcpServers']}")

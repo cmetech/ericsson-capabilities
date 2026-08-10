@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 
+from jsonschema import Draft202012Validator
 import yaml
 
 
@@ -31,6 +32,120 @@ OUTWARD_NODES = {
     "create-merge-request",
     "update-jira",
 }
+
+COMMON_OUTPUT = {
+    "status": "success",
+    "warnings": [],
+    "attention_needed": False,
+}
+SUCCESS_OUTPUTS = {
+    "read-ticket": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "ticket_summary": "Fix the issue",
+        "project_path": "group/project",
+    },
+    "resolve-project": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "ticket_summary": "Fix the issue",
+        "project_id": 42,
+        "project_path": "group/project",
+        "default_branch": "main",
+    },
+    "research-repository": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "ticket_summary": "Fix the issue",
+        "project_id": 42,
+        "project_path": "group/project",
+        "default_branch": "main",
+        "evidence_summary": "bounded evidence",
+    },
+    "reason-about-fix": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "ticket_summary": "Fix the issue",
+        "project_id": 42,
+        "project_path": "group/project",
+        "default_branch": "main",
+        "branch_prefix": "fix",
+        "proposed_branch": "fix/ERIC-123-fix-the-issue",
+        "branch_summary": "bounded proposal",
+        "commit_message": "Fix ERIC-123",
+        "actions": [{"action": "update", "file_path": "a.py", "content": "fixed"}],
+        "actions_digest": "sha256:abcd",
+        "mr_title": "ERIC-123: Fix the issue",
+        "mr_description": "bounded description",
+        "mr_target_branch": "main",
+        "remove_source_branch": True,
+        "squash": False,
+    },
+    "create-branch": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "project_id": 42,
+        "project_path": "group/project",
+        "branch_name": "fix/ERIC-123-fix-the-issue",
+        "source_branch": "main",
+        "web_url": "https://gitlab.example/group/project/-/tree/fix",
+    },
+    "commit-changes": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "project_id": 42,
+        "branch_name": "fix/ERIC-123-fix-the-issue",
+        "commit_id": "a" * 40,
+        "web_url": "https://gitlab.example/group/project/-/commit/a",
+    },
+    "create-merge-request": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "project_id": 42,
+        "iid": 7,
+        "source_branch": "fix/ERIC-123-fix-the-issue",
+        "target_branch": "main",
+        "title": "ERIC-123: Fix the issue",
+        "state": "opened",
+        "web_url": "https://gitlab.example/group/project/-/merge_requests/7",
+    },
+    "review-merge-request": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "project_id": 42,
+        "iid": 7,
+        "merge_request_url": "https://gitlab.example/group/project/-/merge_requests/7",
+        "verdict": "approved",
+        "review_summary": "bounded review",
+        "jira_comment": "MR 7 reviewed and ready",
+    },
+    "update-jira": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "project_id": 42,
+        "iid": 7,
+        "merge_request_url": "https://gitlab.example/group/project/-/merge_requests/7",
+        "comment_status": "created",
+    },
+    "report-status": COMMON_OUTPUT
+    | {
+        "ticket_key": "ERIC-123",
+        "project_id": 42,
+        "iid": 7,
+        "merge_request_url": "https://gitlab.example/group/project/-/merge_requests/7",
+        "jira_status": "created",
+        "review_status": "approved",
+    },
+}
+ALL_FAILURE_STATUSES = {
+    "not_found",
+    "permission",
+    "incomplete",
+    "failed",
+    "skipped",
+    "zero_ticket",
+}
+FAILURE_STATUSES = {node_id: ALL_FAILURE_STATUSES for node_id in SUCCESS_OUTPUTS}
 
 
 def _document() -> dict:
@@ -187,6 +302,136 @@ def test_each_reasoning_node_has_an_exact_least_privilege_tool_contract() -> Non
         assert schema.get("type") == "object"
         assert schema.get("additionalProperties") is False
         assert set(schema.get("required", ())) == set(schema.get("properties", {}))
+        assert len(schema.get("oneOf", ())) == 2
+
+
+def test_every_prompt_output_has_success_identity_and_truthful_failure_variants() -> (
+    None
+):
+    # GL-JIRA-05/08/09/10/13: success facts are exact; failure and zero-ticket
+    # facts remain representable without inventing GitLab/Jira identities.
+    nodes = _node_map(_document())
+    for node_id, success in SUCCESS_OUTPUTS.items():
+        schema = nodes[node_id]["output_format"]
+        validator = Draft202012Validator(schema)
+        assert list(validator.iter_errors(success)) == [], node_id
+        for field, value in success.items():
+            if field in {"status", "warnings", "attention_needed"}:
+                continue
+            missing_identity = success | {field: None}
+            assert list(validator.iter_errors(missing_identity)), (node_id, field)
+        for failure_status in FAILURE_STATUSES[node_id]:
+            failure = {field: None for field in schema["properties"]}
+            failure.update(
+                status=failure_status,
+                warnings=[f"{failure_status}: bounded"],
+                attention_needed=True,
+            )
+            assert list(validator.iter_errors(failure)) == [], (
+                node_id,
+                failure_status,
+            )
+
+
+def test_each_node_binds_required_direct_predecessor_provenance() -> None:
+    # GL-JIRA-04/05/06/07/08/09/10: fields a node republishes or mutates are
+    # named from direct predecessors, including all status and warning facts.
+    nodes = _node_map(_document())
+    required_references = {
+        "resolve-project": {
+            "$read-ticket.output.ticket_key",
+            "$read-ticket.output.ticket_summary",
+            "$read-ticket.output.project_path",
+            "$read-ticket.output.status",
+            "$read-ticket.output.warnings",
+        },
+        "research-repository": {
+            "$resolve-project.output.ticket_key",
+            "$resolve-project.output.ticket_summary",
+            "$resolve-project.output.project_id",
+            "$resolve-project.output.project_path",
+            "$resolve-project.output.default_branch",
+            "$resolve-project.output.status",
+            "$resolve-project.output.warnings",
+        },
+        "reason-about-fix": {
+            "$research-repository.output.ticket_key",
+            "$research-repository.output.ticket_summary",
+            "$research-repository.output.project_id",
+            "$research-repository.output.project_path",
+            "$research-repository.output.default_branch",
+            "$research-repository.output.evidence_summary",
+            "$research-repository.output.status",
+            "$research-repository.output.warnings",
+        },
+        "create-branch": {
+            "$reason-about-fix.output.status",
+            "$reason-about-fix.output.project_id",
+            "$reason-about-fix.output.project_path",
+            "$reason-about-fix.output.default_branch",
+            "$reason-about-fix.output.branch_prefix",
+            "$reason-about-fix.output.ticket_key",
+            "$reason-about-fix.output.ticket_summary",
+            "$reason-about-fix.output.branch_summary",
+        },
+        "commit-changes": {
+            "$reason-about-fix.output.status",
+            "$reason-about-fix.output.project_id",
+            "$reason-about-fix.output.commit_message",
+            "$reason-about-fix.output.actions",
+            "$reason-about-fix.output.actions_digest",
+            "$create-branch.output.status",
+            "$create-branch.output.branch_name",
+        },
+        "create-merge-request": {
+            "$reason-about-fix.output.status",
+            "$reason-about-fix.output.project_id",
+            "$reason-about-fix.output.mr_title",
+            "$reason-about-fix.output.mr_description",
+            "$reason-about-fix.output.mr_target_branch",
+            "$reason-about-fix.output.remove_source_branch",
+            "$reason-about-fix.output.squash",
+            "$create-branch.output.status",
+            "$create-branch.output.branch_name",
+            "$commit-changes.output.status",
+            "$commit-changes.output.commit_id",
+        },
+        "review-merge-request": {
+            "$create-merge-request.output.ticket_key",
+            "$create-merge-request.output.project_id",
+            "$create-merge-request.output.iid",
+            "$create-merge-request.output.web_url",
+            "$create-merge-request.output.status",
+            "$commit-changes.output.commit_id",
+            "$commit-changes.output.status",
+        },
+        "update-jira": {
+            "$review-merge-request.output.ticket_key",
+            "$review-merge-request.output.project_id",
+            "$review-merge-request.output.iid",
+            "$review-merge-request.output.merge_request_url",
+            "$review-merge-request.output.verdict",
+            "$review-merge-request.output.review_summary",
+            "$review-merge-request.output.warnings",
+            "$review-merge-request.output.jira_comment",
+            "$review-merge-request.output.status",
+        },
+        "report-status": {
+            "$review-merge-request.output.ticket_key",
+            "$review-merge-request.output.project_id",
+            "$review-merge-request.output.iid",
+            "$review-merge-request.output.merge_request_url",
+            "$review-merge-request.output.verdict",
+            "$review-merge-request.output.review_summary",
+            "$review-merge-request.output.warnings",
+            "$review-merge-request.output.status",
+            "$update-jira.output.comment_status",
+            "$update-jira.output.status",
+        },
+    }
+    for node_id, references in required_references.items():
+        prompt = nodes[node_id]["prompt"]
+        assert references <= {token for token in references if token in prompt}, node_id
 
 
 def test_every_write_is_downstream_of_visible_approval_and_uses_preview_semantics() -> (
@@ -336,6 +581,9 @@ values = {
         "ticket_key": "ERIC-123",
         "ticket_summary": "READ_SENTINEL",
         "project_path": "group/project",
+        "status": "success",
+        "warnings": [],
+        "attention_needed": False,
     },
     "resolve-project": {
         "ticket_key": "ERIC-123",
@@ -343,6 +591,9 @@ values = {
         "project_id": 42,
         "project_path": "group/project",
         "default_branch": "RESOLVE_SENTINEL",
+        "status": "success",
+        "warnings": [],
+        "attention_needed": False,
     },
     "research-repository": {
         "ticket_key": "ERIC-123",
@@ -351,60 +602,86 @@ values = {
         "project_path": "group/project",
         "default_branch": "RESOLVE_SENTINEL",
         "evidence_summary": "RESEARCH_SENTINEL",
+        "status": "success",
+        "warnings": [],
+        "attention_needed": False,
     },
     "reason-about-fix": {
-        "ticket_key": "ERIC-123",
-        "ticket_summary": "READ_SENTINEL",
-        "project_id": 42,
-        "project_path": "group/project",
-        "default_branch": "main",
-        "branch_prefix": "fix",
-        "branch_summary": "PROPOSAL_SENTINEL",
-        "commit_message": "Fix ERIC-123",
-        "actions": [{"action": "update", "file_path": "a.py", "content": "ACTION_SENTINEL"}],
-        "mr_title": "ERIC-123 fix",
-        "mr_description": "PROPOSAL_DESCRIPTION",
+        "ticket_key": "ERIC-123-TICKET_SENTINEL",
+        "ticket_summary": "TICKET_SUMMARY_SENTINEL",
+        "project_id": 424242,
+        "project_path": "PROJECT_PATH_SENTINEL",
+        "default_branch": "DEFAULT_REF_SENTINEL",
+        "branch_prefix": "PREFIX_SENTINEL",
+        "proposed_branch": "BRANCH_SENTINEL",
+        "branch_summary": "BRANCH_SUMMARY_SENTINEL",
+        "commit_message": "COMMIT_MESSAGE_SENTINEL",
+        "actions": [{"action": "update", "file_path": "ACTION_PATH_SENTINEL", "content": "ACTION_CONTENT_SENTINEL"}],
+        "actions_digest": "ACTION_DIGEST_SENTINEL",
+        "mr_title": "MR_TITLE_SENTINEL",
+        "mr_description": "MR_DESCRIPTION_SENTINEL",
+        "mr_target_branch": "MR_TARGET_SENTINEL",
+        "remove_source_branch": True,
+        "squash": False,
+        "status": "success",
+        "warnings": ["PROPOSAL_WARNING_SENTINEL"],
+        "attention_needed": False,
     },
     "create-branch": {
-        "project_id": 42,
-        "project_path": "group/project",
+        "ticket_key": "ERIC-123-TICKET_SENTINEL",
+        "project_id": 424242,
+        "project_path": "PROJECT_PATH_SENTINEL",
         "branch_name": "BRANCH_SENTINEL",
-        "source_branch": "main",
+        "source_branch": "DEFAULT_REF_SENTINEL",
         "web_url": "https://gitlab.example/branch",
-        "status": "created",
+        "status": "success",
+        "warnings": [],
+        "attention_needed": False,
     },
     "commit-changes": {
-        "project_id": 42,
+        "ticket_key": "ERIC-123-TICKET_SENTINEL",
+        "project_id": 424242,
         "branch_name": "BRANCH_SENTINEL",
         "commit_id": "COMMIT_SENTINEL",
         "web_url": "https://gitlab.example/commit",
-        "status": "committed",
+        "status": "success",
+        "warnings": [],
+        "attention_needed": False,
     },
     "create-merge-request": {
-        "project_id": 42,
-        "iid": 7,
+        "ticket_key": "ERIC-123-TICKET_SENTINEL",
+        "project_id": 424242,
+        "iid": 707,
         "source_branch": "BRANCH_SENTINEL",
-        "target_branch": "main",
-        "title": "ERIC-123 fix",
+        "target_branch": "MR_TARGET_SENTINEL",
+        "title": "MR_TITLE_SENTINEL",
         "state": "opened",
         "web_url": "MR_SENTINEL",
-        "status": "created",
+        "status": "success",
+        "warnings": [],
+        "attention_needed": False,
     },
     "review-merge-request": {
-        "ticket_key": "ERIC-123",
-        "project_id": 42,
-        "iid": 7,
-        "merge_request_url": "REVIEW_MR_URL",
-        "verdict": "attention_needed",
+        "ticket_key": "ERIC-123-TICKET_SENTINEL",
+        "project_id": 424242,
+        "iid": 707,
+        "merge_request_url": "MR_URL_SENTINEL",
+        "verdict": "VERDICT_SENTINEL",
         "review_summary": "REVIEW_SENTINEL",
-        "warnings": ["bounded"],
-        "status": "reviewed",
+        "warnings": ["REVIEW_WARNING_SENTINEL"],
+        "jira_comment": "JIRA_COMMENT_SENTINEL",
+        "status": "success",
+        "attention_needed": False,
     },
     "update-jira": {
-        "ticket_key": "ERIC-123",
-        "merge_request_url": "REVIEW_MR_URL",
+        "ticket_key": "ERIC-123-TICKET_SENTINEL",
+        "project_id": 424242,
+        "iid": 707,
+        "merge_request_url": "MR_URL_SENTINEL",
         "comment_status": "JIRA_SENTINEL",
-        "status": "updated",
+        "status": "success",
+        "warnings": [],
+        "attention_needed": False,
     },
 }
 
@@ -457,17 +734,27 @@ print(json.dumps(rendered, sort_keys=True))
     rendered = json.loads(result.stdout)
     expected_consumers = {
         "USER_SENTINEL": {"read-ticket"},
-        "READ_SENTINEL": {"resolve-project"},
-        "RESOLVE_SENTINEL": {"research-repository"},
+        "READ_SENTINEL": {"resolve-project", "research-repository", "reason-about-fix"},
+        "RESOLVE_SENTINEL": {"research-repository", "reason-about-fix"},
         "RESEARCH_SENTINEL": {"reason-about-fix"},
-        "PROPOSAL_SENTINEL": {
+        "BRANCH_SUMMARY_SENTINEL": {
             "approve-code-writes",
             "create-branch",
             "commit-changes",
             "create-merge-request",
         },
-        "ACTION_SENTINEL": {"commit-changes"},
-        "BRANCH_SENTINEL": {"commit-changes", "create-merge-request"},
+        "ACTION_CONTENT_SENTINEL": {"approve-code-writes", "commit-changes"},
+        "ACTION_DIGEST_SENTINEL": {"approve-code-writes", "commit-changes"},
+        "COMMIT_MESSAGE_SENTINEL": {"approve-code-writes", "commit-changes"},
+        "MR_DESCRIPTION_SENTINEL": {
+            "approve-code-writes",
+            "create-merge-request",
+        },
+        "BRANCH_SENTINEL": {
+            "approve-code-writes",
+            "commit-changes",
+            "create-merge-request",
+        },
         "COMMIT_SENTINEL": {"create-merge-request", "review-merge-request"},
         "MR_SENTINEL": {"review-merge-request"},
         "REVIEW_SENTINEL": {
@@ -476,6 +763,7 @@ print(json.dumps(rendered, sort_keys=True))
             "report-status",
         },
         "JIRA_SENTINEL": {"report-status"},
+        "JIRA_COMMENT_SENTINEL": {"approve-jira-update", "update-jira"},
     }
     for sentinel, consumers in expected_consumers.items():
         assert {
@@ -483,6 +771,74 @@ print(json.dumps(rendered, sort_keys=True))
         } == consumers
     assert "ERIC-123" in rendered["read-ticket"]
     assert "not_found" in rendered["report-status"]
+    code_approval = rendered["approve-code-writes"]
+    for exact_fact in (
+        "ERIC-123-TICKET_SENTINEL",
+        "TICKET_SUMMARY_SENTINEL",
+        "424242",
+        "PROJECT_PATH_SENTINEL",
+        "DEFAULT_REF_SENTINEL",
+        "PREFIX_SENTINEL",
+        "BRANCH_SENTINEL",
+        "COMMIT_MESSAGE_SENTINEL",
+        "ACTION_PATH_SENTINEL",
+        "ACTION_CONTENT_SENTINEL",
+        "ACTION_DIGEST_SENTINEL",
+        "MR_TITLE_SENTINEL",
+        "MR_DESCRIPTION_SENTINEL",
+        "MR_TARGET_SENTINEL",
+        "true",
+        "false",
+    ):
+        assert exact_fact in code_approval
+    write_fact_consumers = {
+        "ERIC-123-TICKET_SENTINEL": {
+            "approve-code-writes",
+            "create-branch",
+        },
+        "TICKET_SUMMARY_SENTINEL": {
+            "approve-code-writes",
+            "create-branch",
+        },
+        "424242": {
+            "approve-code-writes",
+            "create-branch",
+            "commit-changes",
+            "create-merge-request",
+        },
+        "PROJECT_PATH_SENTINEL": {"approve-code-writes", "create-branch"},
+        "DEFAULT_REF_SENTINEL": {"approve-code-writes", "create-branch"},
+        "PREFIX_SENTINEL": {"approve-code-writes", "create-branch"},
+        "BRANCH_SENTINEL": {
+            "approve-code-writes",
+            "commit-changes",
+            "create-merge-request",
+        },
+        "COMMIT_MESSAGE_SENTINEL": {"approve-code-writes", "commit-changes"},
+        "ACTION_CONTENT_SENTINEL": {"approve-code-writes", "commit-changes"},
+        "ACTION_DIGEST_SENTINEL": {"approve-code-writes", "commit-changes"},
+        "MR_TITLE_SENTINEL": {"approve-code-writes", "create-merge-request"},
+        "MR_DESCRIPTION_SENTINEL": {
+            "approve-code-writes",
+            "create-merge-request",
+        },
+        "MR_TARGET_SENTINEL": {"approve-code-writes", "create-merge-request"},
+    }
+    for fact, consumers in write_fact_consumers.items():
+        assert all(fact in rendered[node_id] for node_id in consumers), fact
+    jira_approval = rendered["approve-jira-update"]
+    for exact_fact in (
+        "ERIC-123-TICKET_SENTINEL",
+        "424242",
+        "707",
+        "MR_URL_SENTINEL",
+        "VERDICT_SENTINEL",
+        "REVIEW_SENTINEL",
+        "REVIEW_WARNING_SENTINEL",
+        "JIRA_COMMENT_SENTINEL",
+    ):
+        assert exact_fact in jira_approval
+        assert exact_fact in rendered["update-jira"]
 
 
 def test_workflow_contains_no_secret_transport_or_hidden_model_authority() -> None:

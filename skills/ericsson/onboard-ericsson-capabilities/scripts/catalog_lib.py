@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -105,10 +106,199 @@ _GENERIC_ENVIRONMENT = {
     "TMP",
 }
 _PATH_SUFFIXES = {".md", ".yml", ".yaml", ".json", ".py", ".txt"}
+_WORKFLOW_SIDECAR_FIELDS = frozenset(
+    {
+        "language_compatibility",
+        "delivery_defaults",
+        "required_services",
+        "retention",
+        "tags",
+        "outward_action_nodes",
+        "outward_action_policy",
+        "execution_environment",
+        "overlap_policy",
+        "pause_lane_policy",
+        "concurrency_key",
+        "limits",
+        "resource_limits",
+        "required_secrets",
+        "scheduling",
+    }
+)
+_WORKFLOW_SIDECAR_MAPPING_FIELDS = frozenset(
+    {
+        "delivery_defaults",
+        "retention",
+        "limits",
+        "resource_limits",
+        "scheduling",
+    }
+)
+_WORKFLOW_SIDECAR_LIST_FIELDS = frozenset(
+    {
+        "required_services",
+        "tags",
+        "outward_action_nodes",
+        "required_secrets",
+    }
+)
+_WORKFLOW_LIMIT_INTEGER_BOUNDS = {
+    "max_parallel_nodes": (1, 64),
+    "max_total_workers": (1, 256),
+    "max_executing_runs": (1, 256),
+    "max_queued_runs": (1, 100_000),
+    "max_paused_runs": (1, 100_000),
+    "max_nonterminal_runs": (1, 200_000),
+    "max_start_requests_per_minute": (1, 100_000),
+    "combined_retries": (1, 5),
+    "process_tree_rss_bytes": (16 * 1024 * 1024, 1024**4),
+    "max_descendants": (0, 4096),
+}
+_WORKFLOW_LIMIT_NUMBERS = frozenset(
+    {
+        "ai_idle_timeout_seconds",
+        "ai_wall_timeout_seconds",
+        "provider_request_timeout_seconds",
+        "subprocess_timeout_seconds",
+        "heartbeat_seconds",
+        "lease_seconds",
+        "coordinator_web_election_grace_seconds",
+        "runnable_stall_seconds",
+        "semantic_stall_seconds",
+        "cooperative_shutdown_seconds",
+        "term_grace_seconds",
+        "kill_reap_grace_seconds",
+        "process_tree_cpu_seconds",
+    }
+)
+_WORKFLOW_RESOURCE_LIMITS = frozenset(
+    {
+        "process_tree_rss_bytes",
+        "process_tree_cpu_seconds",
+        "max_descendants",
+    }
+)
 
 
 class CatalogError(ValueError):
     """Raised when catalog source data violates the authoring contract."""
+
+
+def validate_workflow_sidecar(
+    metadata: object, *, node_ids: set[str] | frozenset[str]
+) -> list[str]:
+    """Statically enforce the published Archon companion compatibility shape."""
+    if not isinstance(metadata, dict):
+        return ["root"]
+    problems: list[str] = []
+    for field in sorted(set(metadata) - _WORKFLOW_SIDECAR_FIELDS):
+        problems.append(field)
+    profile = metadata.get("language_compatibility")
+    if profile not in {"hermes-legacy", "archon-2026-07"}:
+        problems.append("language_compatibility")
+    for field in sorted(_WORKFLOW_SIDECAR_MAPPING_FIELDS & set(metadata)):
+        if not isinstance(metadata[field], dict):
+            problems.append(field)
+    for field in sorted(_WORKFLOW_SIDECAR_LIST_FIELDS & set(metadata)):
+        value = metadata[field]
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item for item in value
+        ):
+            problems.append(field)
+    for field in ("outward_action_policy", "concurrency_key"):
+        if field in metadata and (
+            not isinstance(metadata[field], str) or not metadata[field]
+        ):
+            problems.append(field)
+    enums = {
+        "execution_environment": {"trusted_local", "isolated_backend_required"},
+        "overlap_policy": {"queue", "allow", "forbid"},
+        "pause_lane_policy": {"hold", "release"},
+    }
+    for field, allowed in enums.items():
+        if field in metadata and metadata[field] not in allowed:
+            problems.append(field)
+    if (
+        "pause_lane_policy" in metadata
+        and metadata.get("overlap_policy", "queue") != "queue"
+    ):
+        problems.append("pause_lane_policy")
+    outward = metadata.get("outward_action_nodes")
+    if isinstance(outward, list):
+        for item in outward:
+            if isinstance(item, str) and item and item not in node_ids:
+                problems.append("outward_action_nodes")
+                break
+
+    limits = metadata.get("limits")
+    if isinstance(limits, dict):
+        known = set(_WORKFLOW_LIMIT_INTEGER_BOUNDS) | set(_WORKFLOW_LIMIT_NUMBERS)
+        for field in sorted(set(limits) - known):
+            problems.append(f"limits.{field}")
+        for field, value in limits.items():
+            if field in _WORKFLOW_LIMIT_INTEGER_BOUNDS:
+                minimum, maximum = _WORKFLOW_LIMIT_INTEGER_BOUNDS[field]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not minimum <= value <= maximum
+                ):
+                    problems.append(f"limits.{field}")
+            elif field in _WORKFLOW_LIMIT_NUMBERS and (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                problems.append(f"limits.{field}")
+        defaults = {
+            "heartbeat_seconds": 5.0,
+            "lease_seconds": 30.0,
+            "ai_idle_timeout_seconds": 300.0,
+            "ai_wall_timeout_seconds": 1800.0,
+            "provider_request_timeout_seconds": 300.0,
+        }
+        tightened = {}
+        for field, default in defaults.items():
+            value = limits.get(field, default)
+            tightened[field] = (
+                min(default, float(value))
+                if not isinstance(value, bool)
+                and isinstance(value, int | float)
+                and math.isfinite(value)
+                and value > 0
+                else default
+            )
+        if tightened["lease_seconds"] < 3 * tightened["heartbeat_seconds"]:
+            problems.append("limits.lease_seconds")
+        if tightened["ai_idle_timeout_seconds"] > tightened["ai_wall_timeout_seconds"]:
+            problems.append("limits.ai_idle_timeout_seconds")
+        if (
+            tightened["provider_request_timeout_seconds"]
+            > tightened["ai_wall_timeout_seconds"]
+        ):
+            problems.append("limits.provider_request_timeout_seconds")
+    resources = metadata.get("resource_limits")
+    if isinstance(resources, dict):
+        for field in sorted(set(resources) - _WORKFLOW_RESOURCE_LIMITS):
+            problems.append(f"resource_limits.{field}")
+        for field, value in resources.items():
+            if field in _WORKFLOW_LIMIT_INTEGER_BOUNDS:
+                minimum, maximum = _WORKFLOW_LIMIT_INTEGER_BOUNDS[field]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not minimum <= value <= maximum
+                ):
+                    problems.append(f"resource_limits.{field}")
+            elif field == "process_tree_cpu_seconds" and (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                problems.append(f"resource_limits.{field}")
+    return sorted(set(problems))
 
 
 def _relative_label(path: Path) -> str:
@@ -137,6 +327,20 @@ def _workflow_language_profile(
     except CatalogError:
         problems.append(f"invalid workflow sidecar: {relative}")
         return "invalid"
+    nodes = _load_yaml_mapping(workflow_file, label="workflow metadata").get(
+        "nodes", []
+    )
+    node_ids = (
+        {
+            node["id"]
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }
+        if isinstance(nodes, list)
+        else set()
+    )
+    for field in validate_workflow_sidecar(metadata, node_ids=node_ids):
+        problems.append(f"invalid workflow sidecar: {relative}: {field}")
     profile = metadata.get("language_compatibility")
     if not isinstance(profile, str):
         problems.append(f"invalid workflow sidecar: {relative}")

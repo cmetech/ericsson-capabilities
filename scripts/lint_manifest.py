@@ -14,6 +14,10 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
+CATALOG_SCRIPTS = REPO / "skills/ericsson/onboard-ericsson-capabilities/scripts"
+sys.path.insert(0, str(CATALOG_SCRIPTS))
+from catalog_lib import validate_workflow_sidecar  # noqa: E402
+
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PLUGIN_PATH_RE = re.compile(r"^plugins/[a-z0-9][a-z0-9_-]*$")
 MIGRATION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -134,19 +138,30 @@ def _lint_archon_workflow(document):
     return problems
 
 
-def _workflow_language_profile(path):
+def _workflow_language_profile(path, workflow):
     """Return the explicitly packaged workflow profile, if one exists."""
     sidecar = path.with_name(f"{path.stem}.hermes.yaml")
     if not sidecar.is_file():
-        return None
+        return None, []
     try:
         document = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError):
-        return "invalid"
+        return "invalid", ["root"]
     if not isinstance(document, dict):
-        return "invalid"
+        return "invalid", ["root"]
+    nodes = workflow.get("nodes", []) if isinstance(workflow, dict) else []
+    node_ids = (
+        {
+            node["id"]
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }
+        if isinstance(nodes, list)
+        else set()
+    )
+    errors = validate_workflow_sidecar(document, node_ids=node_ids)
     profile = document.get("language_compatibility")
-    return profile if isinstance(profile, str) else "invalid"
+    return (profile if isinstance(profile, str) else "invalid"), errors
 
 
 def lint(manifest_path: Path) -> list[str]:
@@ -288,11 +303,15 @@ def lint(manifest_path: Path) -> list[str]:
             continue
         try:
             loaded = yaml.safe_load(p.read_text())
-            profile = _workflow_language_profile(p)
+            profile, sidecar_errors = _workflow_language_profile(p, loaded)
             flat_requires = isinstance(loaded, dict) and isinstance(
                 loaded.get("requires"), list
             )
-            if profile == "archon-2026-07":
+            if sidecar_errors:
+                errors = [
+                    f"invalid workflow sidecar: {field}" for field in sidecar_errors
+                ]
+            elif profile == "archon-2026-07":
                 errors = _lint_archon_workflow(loaded)
             elif flat_requires:
                 if profile is None:

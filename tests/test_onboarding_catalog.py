@@ -1703,6 +1703,97 @@ def test_validation_rejects_flat_workflow_without_archon_sidecar(
     assert expected in problems
 
 
+def test_catalog_rejects_every_schema_invalid_or_uncompilable_archon_sidecar(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "description": "Example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the example_tool tool.",
+                    "allowed_tools": ["example_tool"],
+                }
+            ],
+        },
+    )
+    valid = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {},
+        "required_services": ["ericsson-example"],
+        "retention": {},
+        "tags": ["example"],
+        "outward_action_nodes": ["inspect"],
+        "outward_action_policy": "approval_required",
+        "execution_environment": "trusted_local",
+        "overlap_policy": "queue",
+        "pause_lane_policy": "hold",
+        "concurrency_key": "example",
+        "limits": {"max_parallel_nodes": 2},
+        "resource_limits": {"max_descendants": 2},
+        "required_secrets": ["EXAMPLE_TOKEN"],
+        "scheduling": {},
+    }
+    repo_fixture._write_yaml("workflows/example.hermes.yaml", valid)
+    repo_fixture.write_complete_entry()
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+    invalid_overrides = {
+        "unknown_policy": True,
+        "outward_action_nodes": "inspect",
+        "outward_action_policy": 1,
+        "execution_environment": "remote",
+        "overlap_policy": "sometimes",
+        "pause_lane_policy": "sometimes",
+        "delivery_defaults": [],
+        "required_services": "ericsson-example",
+        "retention": [],
+        "tags": [1],
+        "concurrency_key": "",
+        "limits": [],
+        "resource_limits": [],
+        "required_secrets": [""],
+        "scheduling": [],
+    }
+    for field, invalid_value in invalid_overrides.items():
+        sidecar = valid | {field: invalid_value}
+        repo_fixture._write_yaml("workflows/example.hermes.yaml", sidecar)
+        problems = validate_repository(
+            repo_fixture.root, load_entries(repo_fixture.root)
+        )
+        assert any(
+            "invalid workflow sidecar" in problem and field in problem
+            for problem in problems
+        ), (field, problems)
+
+    for sidecar in (
+        valid | {"outward_action_nodes": ["missing"]},
+        valid | {"pause_lane_policy": "hold", "overlap_policy": "forbid"},
+        valid | {"limits": {"max_iterations": 12}},
+        valid | {"limits": {"max_parallel_nodes": 0}},
+        valid | {"limits": {"heartbeat_seconds": 5, "lease_seconds": 10}},
+        valid
+        | {"limits": {"ai_idle_timeout_seconds": 20, "ai_wall_timeout_seconds": 10}},
+        valid
+        | {
+            "limits": {
+                "provider_request_timeout_seconds": 20,
+                "ai_wall_timeout_seconds": 10,
+            }
+        },
+        valid | {"resource_limits": {"unknown": 1}},
+    ):
+        repo_fixture._write_yaml("workflows/example.hermes.yaml", sidecar)
+        problems = validate_repository(
+            repo_fixture.root, load_entries(repo_fixture.root)
+        )
+        assert any("invalid workflow sidecar" in problem for problem in problems)
+
+
 def test_validation_preserves_legacy_workflow_mapping_contract(
     repo_fixture: RepoFixture,
 ) -> None:

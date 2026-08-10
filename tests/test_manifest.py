@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,78 @@ LINT = REPO / "scripts/lint_manifest.py"
 MANIFEST = REPO / "sets/ericsson.json"
 FROZEN_LOOP24_SHA = "fc3bf26d64e05cc3703ee39e323bbf3c1eaa4cd6"
 LEGACY_FLOW_SHA = "3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e"
+
+VALID_ARCHON_SIDECAR = {
+    "language_compatibility": "archon-2026-07",
+    "delivery_defaults": {},
+    "required_services": ["example-tools"],
+    "retention": {},
+    "tags": ["example"],
+    "outward_action_nodes": ["write"],
+    "outward_action_policy": "approval_required",
+    "execution_environment": "trusted_local",
+    "overlap_policy": "queue",
+    "concurrency_key": "example",
+    "limits": {"max_parallel_nodes": 2},
+    "resource_limits": {"max_descendants": 2},
+    "required_secrets": ["EXAMPLE_TOKEN"],
+    "scheduling": {},
+}
+INVALID_ARCHON_SIDECARS = {
+    "unknown": {"unknown_policy": True},
+    "outward_type": {"outward_action_nodes": "write"},
+    "outward_item": {"outward_action_nodes": [1]},
+    "outward_unknown": {"outward_action_nodes": ["missing"]},
+    "outward_policy_type": {"outward_action_policy": 1},
+    "outward_policy_empty": {"outward_action_policy": ""},
+    "execution_environment": {"execution_environment": "remote"},
+    "overlap_policy": {"overlap_policy": "sometimes"},
+    "pause_lane_policy": {"pause_lane_policy": "sometimes"},
+    "pause_lane_cross_field": {
+        "pause_lane_policy": "hold",
+        "overlap_policy": "forbid",
+    },
+    "delivery_defaults": {"delivery_defaults": []},
+    "required_services_type": {"required_services": "example-tools"},
+    "required_services_item": {"required_services": [""]},
+    "retention": {"retention": []},
+    "tags_type": {"tags": "example"},
+    "tags_item": {"tags": [1]},
+    "concurrency_key": {"concurrency_key": ""},
+    "limits_type": {"limits": []},
+    "limits_unknown": {"limits": {"max_iterations": 12}},
+    "limits_value": {"limits": {"max_parallel_nodes": 0}},
+    "limits_lease_relationship": {
+        "limits": {"heartbeat_seconds": 5, "lease_seconds": 10}
+    },
+    "limits_idle_relationship": {
+        "limits": {"ai_idle_timeout_seconds": 20, "ai_wall_timeout_seconds": 10}
+    },
+    "limits_provider_relationship": {
+        "limits": {
+            "provider_request_timeout_seconds": 20,
+            "ai_wall_timeout_seconds": 10,
+        }
+    },
+    "resource_limits_type": {"resource_limits": []},
+    "resource_limits_unknown": {"resource_limits": {"unknown": 1}},
+    "required_secrets_type": {"required_secrets": "EXAMPLE_TOKEN"},
+    "required_secrets_item": {"required_secrets": [""]},
+    "scheduling": {"scheduling": []},
+}
+COMPILER_LENIENT_SCHEMA_INVALID = {
+    "outward_policy_type",
+    "outward_policy_empty",
+    "overlap_policy",
+    "delivery_defaults",
+    "required_services_type",
+    "required_services_item",
+    "retention",
+    "tags_type",
+    "tags_item",
+    "concurrency_key",
+    "scheduling",
+}
 
 
 def _lint(path):
@@ -131,6 +204,112 @@ def test_lint_accepts_generic_flat_archon_and_rejects_malformed_nodes(
         "requires must be a non-empty list" in problem
         for problem in lint_manifest.lint(manifest)
     )
+
+
+def test_static_sidecar_validation_is_one_way_compatible_with_real_hermes(
+    tmp_path, monkeypatch
+):
+    workflow = {
+        "name": "example",
+        "description": "Example flat workflow",
+        "requires": ["example-tools"],
+        "nodes": [
+            {
+                "id": "read",
+                "prompt": "Use the example_read tool.",
+                "allowed_tools": ["example_read"],
+            },
+            {
+                "id": "approve",
+                "depends_on": ["read"],
+                "approval": {"message": "Review the outward action."},
+            },
+            {
+                "id": "write",
+                "depends_on": ["approve"],
+                "prompt": "Use the example_write tool.",
+                "allowed_tools": ["example_write"],
+            },
+        ],
+    }
+    manifest = _minimal_lint_repo(tmp_path, workflow)
+    monkeypatch.setattr(lint_manifest, "REPO", tmp_path)
+    sidecar_path = tmp_path / "workflows/example.hermes.yaml"
+    cases = {"valid": VALID_ARCHON_SIDECAR} | {
+        name: VALID_ARCHON_SIDECAR | override
+        for name, override in INVALID_ARCHON_SIDECARS.items()
+    }
+    source_valid = {}
+    for name, sidecar in cases.items():
+        sidecar_path.write_text(yaml.safe_dump(sidecar, sort_keys=False))
+        source_valid[name] = lint_manifest.lint(manifest) == []
+    assert source_valid == {name: name == "valid" for name in cases}
+
+    workspace = Path(__file__).resolve().parents[4]
+    candidates = [
+        Path(value) for value in [os.environ.get("HERMES_AGENT_DIR")] if value
+    ] + [
+        workspace / "hermes-agent/.worktrees/ericsson-gitlab-connector",
+        workspace / "hermes-agent",
+    ]
+    hermes = next(
+        candidate
+        for candidate in candidates
+        if (candidate / "plugins/workflow/schema.py").is_file()
+    )
+    script = r"""
+import json
+from pathlib import Path
+import sys
+import yaml
+from jsonschema import Draft202012Validator
+from plugins.workflow.compilation import WorkflowCatalogSnapshot, compile_workflow
+from plugins.workflow.language_schema import sidecar_json_schema
+from plugins.workflow.models import WorkflowLanguageProfile
+from plugins.workflow.schema import parse_workflow_source_bytes
+
+path = Path(sys.argv[1])
+cases = json.loads(sys.argv[2])
+schema = sidecar_json_schema(WorkflowLanguageProfile.ARCHON_2026_07)
+results = {}
+for name, sidecar in cases.items():
+    schema_valid = not list(Draft202012Validator(schema).iter_errors(sidecar))
+    try:
+        source = parse_workflow_source_bytes(
+            path,
+            workflow_bytes=path.read_bytes(),
+            sidecar_bytes=yaml.safe_dump(sidecar, sort_keys=False).encode(),
+            source="differential",
+            precedence=1,
+        )
+        compile_workflow(source, WorkflowCatalogSnapshot.capture((source,)))
+    except Exception:
+        compiler_valid = False
+    else:
+        compiler_valid = True
+    results[name] = {"schema": schema_valid, "compiler": compiler_valid}
+print(json.dumps(results, sort_keys=True))
+"""
+    result = subprocess.run(
+        [
+            str(hermes / ".venv/bin/python"),
+            "-c",
+            script,
+            str(tmp_path / "workflows/example.yml"),
+            json.dumps(cases),
+        ],
+        cwd=hermes,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    authority = json.loads(result.stdout)
+    for name, accepted in source_valid.items():
+        if accepted:
+            assert authority[name] == {"schema": True, "compiler": True}
+    for name in COMPILER_LENIENT_SCHEMA_INVALID:
+        assert authority[name] == {"schema": False, "compiler": True}, name
 
 
 def test_manifest_content():

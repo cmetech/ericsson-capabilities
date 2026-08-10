@@ -679,6 +679,40 @@ def test_two_denied_ancestor_variable_reads_keep_fixed_identity_records():
     assert "private-" not in repr(result)
 
 
+def test_denied_project_variable_read_keeps_one_fixed_safe_identity_record():
+    # GL-CI-09 legacy: gitlab_cicd_collector.py:_fetch_project_variables
+    operations = _operations(max_retries=0)
+    with respx.mock:
+        _mock_project()
+        _mock_pipeline_window()
+        _mock_ci_file("main")
+        respx.get(f"{PROJECT_API}/variables").mock(
+            return_value=httpx.Response(
+                403, text="private-project-variable-body arbitrary-error-detail"
+            )
+        )
+        respx.get(f"{ORIGIN}/api/v4/groups/division").mock(
+            return_value=httpx.Response(200, json={"id": 10})
+        )
+        respx.get(f"{ORIGIN}/api/v4/groups/10/variables").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+        )
+        result = operations.inspect_ci(
+            "42", branch_spec="main", max_groups=1, max_variables=10
+        )
+    assert result["variables"]["permission_records"] == [
+        {
+            "category": "permission",
+            "scope": "project",
+            "source": "division/platform/team/repo",
+        }
+    ]
+    rendered = repr(result)
+    assert "private-project-variable-body" not in rendered
+    assert "arbitrary-error-detail" not in rendered
+    assert "fixture-token" not in rendered
+
+
 def test_one_normalized_result_is_not_cached_and_partial_failures_do_not_abort():
     # GL-CI-11 legacy: gitlab_cicd_collector.py:_collect_all/get_combined and six output methods
     operations = _operations()

@@ -1227,6 +1227,14 @@ class GitLabOperations:
         except GitLabError as exc:
             if exc.category in {"cancelled", "deadline"}:
                 raise
+            if exc.category == "permission":
+                permission_records.append(
+                    {
+                        "category": "permission",
+                        "scope": "project",
+                        "source": project_source,
+                    }
+                )
             self._add_warning(
                 warnings,
                 "project_variable_permission"

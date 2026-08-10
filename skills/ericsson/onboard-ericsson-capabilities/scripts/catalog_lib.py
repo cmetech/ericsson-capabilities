@@ -179,9 +179,11 @@ _WORKFLOW_RESOURCE_LIMITS = frozenset(
     }
 )
 # Match the repository's bounded onboarding JSON-tree capacity convention.
+_WORKFLOW_SIDECAR_MAX_BYTES = 64 * 1024
 _WORKFLOW_SIDECAR_MAX_DEPTH = 24
 _WORKFLOW_SIDECAR_MAX_ENTRIES = 2048
 _WORKFLOW_SIDECAR_CYCLE_ERROR = "workflow sidecar structure must not contain cycles"
+_WORKFLOW_SIDECAR_BYTE_ERROR = "workflow sidecar exceeds safe byte limit"
 _WORKFLOW_SIDECAR_LIMIT_ERROR = "workflow sidecar exceeds safe structure limits"
 
 
@@ -211,8 +213,6 @@ def _require_string_mapping_keys(value: object) -> None:
         if depth > _WORKFLOW_SIDECAR_MAX_DEPTH:
             raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
         if isinstance(item, dict):
-            if any(not isinstance(field, str) for field in item):
-                raise CatalogError("workflow sidecar field names must be strings")
             child_count = len(item)
         elif isinstance(item, list):
             child_count = len(item)
@@ -226,9 +226,12 @@ def _require_string_mapping_keys(value: object) -> None:
             continue
         if child_count and depth >= _WORKFLOW_SIDECAR_MAX_DEPTH:
             raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
-        if entries + child_count > _WORKFLOW_SIDECAR_MAX_ENTRIES:
+        remaining_entries = _WORKFLOW_SIDECAR_MAX_ENTRIES - entries
+        if child_count > remaining_entries:
             raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
         entries += child_count
+        if isinstance(item, dict) and any(not isinstance(field, str) for field in item):
+            raise CatalogError("workflow sidecar field names must be strings")
         active.add(identity)
         stack.append((item, depth, True))
         nested_values = tuple(item.values()) if isinstance(item, dict) else tuple(item)
@@ -359,7 +362,16 @@ def _relative_label(path: Path) -> str:
 
 def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, Any]:
     try:
-        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if label == "workflow sidecar":
+            if path.stat().st_size > _WORKFLOW_SIDECAR_MAX_BYTES:
+                raise CatalogError(_WORKFLOW_SIDECAR_BYTE_ERROR)
+            content = path.read_bytes()
+            if len(content) > _WORKFLOW_SIDECAR_MAX_BYTES:
+                raise CatalogError(_WORKFLOW_SIDECAR_BYTE_ERROR)
+            text = content.decode("utf-8")
+        else:
+            text = path.read_text(encoding="utf-8")
+        value = yaml.safe_load(text)
     except RecursionError:
         if label == "workflow sidecar":
             raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR) from None
@@ -381,7 +393,10 @@ def _workflow_language_profile(
     try:
         metadata = _load_yaml_mapping(sidecar, label="workflow sidecar")
     except CatalogError as exc:
-        if str(exc) == _WORKFLOW_SIDECAR_LIMIT_ERROR:
+        if str(exc) in {
+            _WORKFLOW_SIDECAR_BYTE_ERROR,
+            _WORKFLOW_SIDECAR_LIMIT_ERROR,
+        }:
             raise
         problems.append(f"invalid workflow sidecar: {relative}")
         return "invalid"

@@ -1940,6 +1940,37 @@ def test_catalog_library_bounds_sidecar_depth_and_entries() -> None:
         assert str(exc.value) == "workflow sidecar exceeds safe structure limits"
 
 
+def test_catalog_library_rejects_oversized_mapping_before_key_or_value_iteration() -> (
+    None
+):
+    # The remaining entry budget is knowable from len(); scanning any key or
+    # materializing values first defeats the capacity boundary.
+    class InstrumentedMapping(dict[str, object]):
+        key_iterations = 0
+        value_iterations = 0
+
+        def __iter__(self):
+            self.key_iterations += 1
+            return super().__iter__()
+
+        def values(self):
+            self.value_iterations += 1
+            return super().values()
+
+    oversized = InstrumentedMapping({f"field-{index}": "x" for index in range(2046)})
+    sidecar = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": oversized,
+    }
+
+    with pytest.raises(CatalogError) as exc:
+        validate_workflow_sidecar(sidecar, node_ids=set())
+
+    assert str(exc.value) == "workflow sidecar exceeds safe structure limits"
+    assert oversized.key_iterations == 0
+    assert oversized.value_iterations == 0
+
+
 def test_catalog_library_allows_acyclic_shared_aliases() -> None:
     # Completed container identities may be reused; only an identity on the
     # active traversal path is a cycle.
@@ -1991,6 +2022,97 @@ def test_validate_catalog_cli_bounds_very_deep_sidecar_without_traceback(
     assert json.loads(result.stdout) == {
         "ok": False,
         "problems": ["workflow sidecar exceeds safe structure limits"],
+    }
+
+
+def _configure_flat_archon_fixture(repo_fixture: RepoFixture) -> Path:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "description": "Example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the example_tool tool.",
+                    "allowed_tools": ["example_tool"],
+                }
+            ],
+        },
+    )
+    repo_fixture.write_complete_entry()
+    return repo_fixture.root / "workflows/example.hermes.yaml"
+
+
+def _sidecar_bytes(size: int) -> bytes:
+    prefix = b"language_compatibility: archon-2026-07\n"
+    assert size >= len(prefix) + 2
+    return prefix + b"#" + (b"x" * (size - len(prefix) - 2)) + b"\n"
+
+
+def test_catalog_library_enforces_sidecar_byte_boundary_before_read(
+    repo_fixture: RepoFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024))
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024 + 1))
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+    reads: list[str] = []
+
+    def tracked_read_bytes(path: Path) -> bytes:
+        if path == sidecar:
+            reads.append("bytes")
+        return original_read_bytes(path)
+
+    def tracked_read_text(path: Path, *args, **kwargs) -> str:
+        if path == sidecar:
+            reads.append("text")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read_bytes)
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar exceeds safe byte limit"
+    assert reads == []
+
+
+def test_validate_catalog_cli_enforces_exact_sidecar_byte_boundary(
+    repo_fixture: RepoFixture,
+) -> None:
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    script = SCRIPTS_DIR / "validate_catalog.py"
+
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024))
+    exact = subprocess.run(
+        [sys.executable, str(script), "--repo", str(repo_fixture.root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert exact.returncode == 0
+    assert exact.stderr == ""
+    assert json.loads(exact.stdout) == {"ok": True, "problems": []}
+
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024 + 1))
+    overflow = subprocess.run(
+        [sys.executable, str(script), "--repo", str(repo_fixture.root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert overflow.returncode == 1
+    assert overflow.stderr == ""
+    assert json.loads(overflow.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar exceeds safe byte limit"],
     }
 
 

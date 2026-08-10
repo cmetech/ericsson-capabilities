@@ -118,14 +118,22 @@ SCHEMAS = {
     ),
     "gitlab_create_branch": _schema(
         "gitlab_create_branch",
-        "Create or reuse one normalized GitLab branch after host approval.",
+        "Create or reuse one bounded ticket branch after host approval.",
         {
             "project": _PROJECT,
-            "branch": _REF,
+            "prefix": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "default": "fix",
+                "description": "Branch prefix; defaults to fix.",
+            },
+            "ticket_key": {"type": "string", "minLength": 1, "maxLength": 128},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 2048},
             "source_ref": _REF,
             "dry_run": {"type": "boolean"},
         },
-        ["project", "branch"],
+        ["project", "ticket_key", "summary"],
     ),
     "gitlab_commit_changes": _schema(
         "gitlab_commit_changes",
@@ -234,7 +242,9 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         if name == "gitlab_create_branch":
             return operations.create_branch(
                 values["project"],
-                values["branch"],
+                prefix=values.get("prefix", "fix"),
+                ticket_key=values["ticket_key"],
+                summary=values["summary"],
                 source_ref=values.get("source_ref"),
                 dry_run=values.get("dry_run", False),
             )

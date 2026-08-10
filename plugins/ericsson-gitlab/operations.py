@@ -41,7 +41,8 @@ _MAX_CI_YAML_ALIASES = 128
 _MAX_WRITE_ACTIONS = 100
 _MAX_WRITE_BYTES = 512 * 1024
 _MAX_COMMIT_MESSAGE = 4096
-_MAX_MR_TITLE = 1024
+_MAX_MR_TITLE = 255
+_MAX_MR_TITLE_INPUT = 1024
 _MAX_MR_DESCRIPTION = 64 * 1024
 _DUPLICATE_MR_MESSAGE = "another open merge request already exists"
 
@@ -92,25 +93,36 @@ def _validate_path(path: str, *, allow_empty: bool = True) -> str:
     return path
 
 
+def _git_ref_is_valid(ref: Any) -> bool:
+    if not isinstance(ref, str) or not ref or len(ref) > _MAX_REF:
+        return False
+    if ref == "@" or ref.startswith(("/", "-")) or ref.endswith(("/", ".")):
+        return False
+    if "//" in ref or ".." in ref or "@{" in ref:
+        return False
+    if any(
+        character.isspace()
+        or ord(character) < 32
+        or ord(character) == 127
+        or character in "~^:?*[\\"
+        for character in ref
+    ):
+        return False
+    parts = ref.split("/")
+    return all(
+        part and not part.startswith(".") and not part.endswith(".lock")
+        for part in parts
+    )
+
+
 def _validate_ref(ref: str) -> str:
-    ref = _bounded_string(ref, _MAX_REF)
-    if ref.startswith("/") or ref.endswith("/"):
+    if not _git_ref_is_valid(ref):
         raise GitLabError("invalid_input")
     return ref
 
 
 def _validate_remote_ref(ref: Any) -> str:
-    if (
-        not isinstance(ref, str)
-        or not ref
-        or len(ref) > _MAX_REF
-        or ref.startswith("/")
-        or ref.endswith("/")
-        or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
-            for character in ref
-        )
-    ):
+    if not _git_ref_is_valid(ref):
         raise GitLabError("invalid_remote_data")
     return ref
 
@@ -155,6 +167,14 @@ def _same_origin_url(value: Any, origin: str) -> str:
     return value
 
 
+def _canonical_remote_url(value: Any, origin: str, expected_path: str) -> str:
+    _same_origin_url(value, origin)
+    parsed = urlsplit(value)
+    if unquote(parsed.path) != expected_path:
+        raise GitLabError("invalid_remote_data")
+    return f"{origin}{quote(expected_path, safe='/')}"
+
+
 def _project_endpoint(project: str | int) -> str:
     if isinstance(project, bool):
         raise GitLabError("invalid_input")
@@ -172,31 +192,17 @@ def _project_endpoint(project: str | int) -> str:
     return quote(value, safe="")
 
 
-def _normalize_branch_name(value: Any) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > _MAX_REF
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
+def _build_branch_name(prefix: Any, ticket_key: Any, summary: Any) -> str:
+    prefix = _bounded_string(prefix, _MAX_REF).rstrip("/")
+    ticket_key = _bounded_string(ticket_key, 128)
+    summary = _bounded_string(summary, 2048)
+    if not prefix or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", ticket_key):
         raise GitLabError("invalid_input")
-    normalized = value.strip().lower()
-    normalized = re.sub(r"[\s_]+", "-", normalized)
-    normalized = re.sub(r"[^a-z0-9./-]+", "-", normalized)
-    normalized = re.sub(r"-+", "-", normalized)
-    segments = [segment.strip("-.") for segment in normalized.split("/")]
-    normalized = "/".join(segments)
-    if (
-        not normalized
-        or len(normalized) > _MAX_REF
-        or normalized.startswith("/")
-        or normalized.endswith("/")
-        or "//" in normalized
-        or any(segment in {"", ".", ".."} for segment in normalized.split("/"))
-        or normalized.endswith(".lock")
-    ):
+    slug = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")
+    slug = slug[:30].rstrip("-")
+    if not slug:
         raise GitLabError("invalid_input")
-    return normalized
+    return _validate_ref(f"{prefix}/{ticket_key}-{slug}")
 
 
 class GitLabOperations:
@@ -730,6 +736,7 @@ class GitLabOperations:
         payload: Any,
         *,
         project: str | int,
+        project_result: Mapping[str, Any],
         branch: str,
         source_ref: str,
         created: bool,
@@ -740,10 +747,26 @@ class GitLabOperations:
         web_url = item.get("web_url")
         if name != branch or not isinstance(commit, Mapping):
             raise GitLabError("invalid_remote_data")
-        commit_id = commit.get("id")
-        if not isinstance(commit_id, str) or not commit_id or len(commit_id) > 512:
+        commit_id = _validate_remote_ref(commit.get("id"))
+        commit_short_id = commit.get("short_id")
+        if "short_id" in commit and (
+            not isinstance(commit_short_id, str)
+            or not commit_short_id
+            or len(commit_short_id) > 64
+            or not commit_id.startswith(commit_short_id)
+        ):
             raise GitLabError("invalid_remote_data")
-        _same_origin_url(web_url, self.client.auth.origin)
+        if "project_id" in item and item.get("project_id") != project_result["id"]:
+            raise GitLabError("invalid_remote_data")
+        project_path = project_result["path_with_namespace"]
+        branch_path = f"/{project_path}/-/tree/{branch}"
+        web_url = _canonical_remote_url(web_url, self.client.auth.origin, branch_path)
+        if "web_url" in commit:
+            _canonical_remote_url(
+                commit.get("web_url"),
+                self.client.auth.origin,
+                f"/{project_path}/-/commit/{commit_id}",
+            )
         return {
             "project": str(project),
             "branch": branch,
@@ -755,15 +778,56 @@ class GitLabOperations:
             "dry_run": False,
         }
 
+    def _validate_partial_branch_identity(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        project_result: Mapping[str, Any],
+        branch: str,
+    ) -> None:
+        if "name" in payload and payload.get("name") != branch:
+            raise GitLabError("invalid_remote_data")
+        if (
+            "project_id" in payload
+            and payload.get("project_id") != project_result["id"]
+        ):
+            raise GitLabError("invalid_remote_data")
+        project_path = project_result["path_with_namespace"]
+        if "web_url" in payload:
+            _canonical_remote_url(
+                payload.get("web_url"),
+                self.client.auth.origin,
+                f"/{project_path}/-/tree/{branch}",
+            )
+        if "commit" in payload:
+            commit = _as_object(payload.get("commit"))
+            commit_id = _validate_remote_ref(commit.get("id"))
+            commit_short_id = commit.get("short_id")
+            if "short_id" in commit and (
+                not isinstance(commit_short_id, str)
+                or not commit_short_id
+                or len(commit_short_id) > 64
+                or not commit_id.startswith(commit_short_id)
+            ):
+                raise GitLabError("invalid_remote_data")
+            if "web_url" in commit:
+                _canonical_remote_url(
+                    commit.get("web_url"),
+                    self.client.auth.origin,
+                    f"/{project_path}/-/commit/{commit_id}",
+                )
+
     def create_branch(
         self,
         project: str | int,
-        branch: str,
         *,
+        ticket_key: str,
+        summary: str,
+        prefix: str = "fix",
         source_ref: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        branch = _normalize_branch_name(branch)
+        branch = _build_branch_name(prefix, ticket_key, summary)
         if source_ref is not None:
             source_ref = _validate_ref(source_ref)
         if not isinstance(dry_run, bool):
@@ -793,6 +857,7 @@ class GitLabOperations:
             return self._branch_result(
                 existing,
                 project=project,
+                project_result=project_result,
                 branch=branch,
                 source_ref=selected_source,
                 created=False,
@@ -812,6 +877,7 @@ class GitLabOperations:
             return self._branch_result(
                 reconciled,
                 project=project,
+                project_result=project_result,
                 branch=branch,
                 source_ref=selected_source,
                 created=False,
@@ -825,16 +891,19 @@ class GitLabOperations:
             return self._branch_result(
                 created_payload,
                 project=project,
+                project_result=project_result,
                 branch=branch,
                 source_ref=selected_source,
                 created=True,
             )
-        if created_item.get("name") != branch:
-            raise GitLabError("invalid_remote_data")
+        self._validate_partial_branch_identity(
+            created_item, project_result=project_result, branch=branch
+        )
         reconciled = self.client.get_json(branch_path, deadline=deadline)
         return self._branch_result(
             reconciled,
             project=project,
+            project_result=project_result,
             branch=branch,
             source_ref=selected_source,
             created=True,
@@ -879,16 +948,98 @@ class GitLabOperations:
                     raise GitLabError("capacity")
                 item["content"] = content
             if "last_commit_id" in raw:
-                item["last_commit_id"] = _bounded_string(raw["last_commit_id"], 512)
+                item["last_commit_id"] = _validate_ref(raw["last_commit_id"])
             normalized.append(item)
             projected.append({"action": action, "file_path": path})
         return normalized, projected
+
+    def _head_file_last_commit(
+        self,
+        endpoint: str,
+        *,
+        branch: str,
+        file_path: str,
+        deadline: float,
+    ) -> str | None:
+        path = (
+            f"/api/v4/projects/{endpoint}/repository/files/{quote(file_path, safe='')}"
+        )
+        self.client._validate_path(path)
+        self.client._check_cancelled(deadline)
+        try:
+            with self.client._client.stream(
+                "HEAD",
+                path,
+                params={"ref": branch},
+                timeout=self.client._request_timeout(deadline),
+            ) as response:
+                self.client._check_cancelled(deadline)
+                if 300 <= response.status_code < 400:
+                    raise GitLabError("invalid_remote_data")
+                if response.status_code == 404:
+                    return None
+                if response.status_code >= 400:
+                    raise self.client._error_for_status(response.status_code)
+                if response.status_code != 200:
+                    raise GitLabError("invalid_remote_data")
+                raw_identity = response.headers.get("x-gitlab-last-commit-id")
+                if raw_identity is None:
+                    raise GitLabError("conflict")
+                try:
+                    return _validate_ref(raw_identity)
+                except GitLabError:
+                    raise GitLabError("conflict") from None
+        except GitLabError:
+            raise
+        except (httpx.TimeoutException, httpx.TransportError):
+            self.client._check_cancelled(deadline)
+            raise GitLabError("transient") from None
+
+    def _reconcile_commit_actions(
+        self,
+        actions: list[dict[str, Any]],
+        *,
+        endpoint: str,
+        branch: str,
+        deadline: float,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        reconciled: list[dict[str, Any]] = []
+        projected: list[dict[str, str]] = []
+        for requested in actions:
+            item = dict(requested)
+            remote_identity = self._head_file_last_commit(
+                endpoint,
+                branch=branch,
+                file_path=item["file_path"],
+                deadline=deadline,
+            )
+            action = item["action"]
+            if action == "update" and remote_identity is None:
+                item["action"] = "create"
+                item.pop("last_commit_id", None)
+            elif action == "create" and remote_identity is not None:
+                item["action"] = "update"
+                item["last_commit_id"] = remote_identity
+            elif action == "delete" and remote_identity is None:
+                raise GitLabError("conflict")
+            elif remote_identity is not None:
+                requested_identity = item.get("last_commit_id")
+                if (
+                    requested_identity is not None
+                    and requested_identity != remote_identity
+                ):
+                    raise GitLabError("conflict")
+                item["last_commit_id"] = remote_identity
+            reconciled.append(item)
+            projected.append({"action": item["action"], "file_path": item["file_path"]})
+        return reconciled, projected
 
     def _commit_result(
         self,
         payload: Any,
         *,
         project: str | int,
+        project_result: Mapping[str, Any] | None = None,
         branch: str,
         commit_message: str,
         actions: list[dict[str, str]],
@@ -904,22 +1055,31 @@ class GitLabOperations:
                 "dry_run": True,
             }
         item = _as_object(payload)
-        commit_id = item.get("id")
+        commit_id = _validate_remote_ref(item.get("id"))
         short_id = item.get("short_id")
         title = item.get("title")
         web_url = item.get("web_url")
         expected_title = commit_message.splitlines()[0]
         if (
-            not isinstance(commit_id, str)
-            or not commit_id
-            or len(commit_id) > 512
-            or not isinstance(short_id, str)
+            not isinstance(short_id, str)
             or not short_id
             or len(short_id) > 64
+            or not commit_id.startswith(short_id)
             or title != expected_title
+            or ("message" in item and item.get("message") != commit_message)
         ):
             raise GitLabError("invalid_remote_data")
-        _same_origin_url(web_url, self.client.auth.origin)
+        if project_result is None:
+            raise GitLabError("invalid_remote_data")
+        if "project_id" in item and item.get("project_id") != project_result["id"]:
+            raise GitLabError("invalid_remote_data")
+        if "branch" in item and item.get("branch") != branch:
+            raise GitLabError("invalid_remote_data")
+        web_url = _canonical_remote_url(
+            web_url,
+            self.client.auth.origin,
+            f"/{project_result['path_with_namespace']}/-/commit/{commit_id}",
+        )
         return {
             "project": str(project),
             "branch": branch,
@@ -931,6 +1091,44 @@ class GitLabOperations:
             "actions": actions,
             "dry_run": False,
         }
+
+    def _validate_partial_commit_identity(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        project_result: Mapping[str, Any],
+        branch: str,
+        commit_message: str,
+    ) -> str:
+        commit_id = _validate_remote_ref(payload.get("id"))
+        expected_title = commit_message.splitlines()[0]
+        if "title" in payload and payload.get("title") != expected_title:
+            raise GitLabError("invalid_remote_data")
+        if "message" in payload and payload.get("message") != commit_message:
+            raise GitLabError("invalid_remote_data")
+        if "short_id" in payload:
+            short_id = payload.get("short_id")
+            if (
+                not isinstance(short_id, str)
+                or not short_id
+                or len(short_id) > 64
+                or not commit_id.startswith(short_id)
+            ):
+                raise GitLabError("invalid_remote_data")
+        if (
+            "project_id" in payload
+            and payload.get("project_id") != project_result["id"]
+        ):
+            raise GitLabError("invalid_remote_data")
+        if "branch" in payload and payload.get("branch") != branch:
+            raise GitLabError("invalid_remote_data")
+        if "web_url" in payload:
+            _canonical_remote_url(
+                payload.get("web_url"),
+                self.client.auth.origin,
+                f"/{project_result['path_with_namespace']}/-/commit/{commit_id}",
+            )
+        return commit_id
 
     @staticmethod
     def _remote_messages(payload: Any) -> list[str]:
@@ -965,9 +1163,19 @@ class GitLabOperations:
         endpoint = _project_endpoint(project)
         branch = _validate_ref(branch)
         commit_message = _bounded_string(commit_message, _MAX_COMMIT_MESSAGE)
-        normalized, projected = self._commit_actions(actions)
+        normalized, _requested_projection = self._commit_actions(actions)
         if not isinstance(dry_run, bool):
             raise GitLabError("invalid_input")
+        deadline = self.client.operation_deadline()
+        project_result = None
+        if not dry_run:
+            project_result = self._write_project(project, deadline=deadline)
+        normalized, projected = self._reconcile_commit_actions(
+            normalized,
+            endpoint=endpoint,
+            branch=branch,
+            deadline=deadline,
+        )
         if dry_run:
             return self._commit_result(
                 {},
@@ -977,7 +1185,6 @@ class GitLabOperations:
                 actions=projected,
                 dry_run=True,
             )
-        deadline = self.client.operation_deadline()
         status, payload = self._write_json(
             "POST",
             f"/api/v4/projects/{endpoint}/repository/commits",
@@ -1000,19 +1207,19 @@ class GitLabOperations:
             return self._commit_result(
                 payload,
                 project=project,
+                project_result=project_result,
                 branch=branch,
                 commit_message=commit_message,
                 actions=projected,
             )
-        commit_id = item.get("id")
-        expected_title = commit_message.splitlines()[0]
-        if (
-            not isinstance(commit_id, str)
-            or not commit_id
-            or len(commit_id) > 512
-            or ("title" in item and item.get("title") != expected_title)
-        ):
-            raise GitLabError("invalid_remote_data") from None
+        if project_result is None:
+            raise GitLabError("invalid_remote_data")
+        commit_id = self._validate_partial_commit_identity(
+            item,
+            project_result=project_result,
+            branch=branch,
+            commit_message=commit_message,
+        )
         reconciled = self.client.get_json(
             f"/api/v4/projects/{endpoint}/repository/commits/"
             f"{quote(commit_id, safe='')}",
@@ -1021,6 +1228,7 @@ class GitLabOperations:
         return self._commit_result(
             reconciled,
             project=project,
+            project_result=project_result,
             branch=branch,
             commit_message=commit_message,
             actions=projected,
@@ -1032,6 +1240,7 @@ class GitLabOperations:
         *,
         project: str | int,
         project_id: int,
+        project_path: str,
         source_branch: str,
         target_branch: str,
         created: bool,
@@ -1060,7 +1269,11 @@ class GitLabOperations:
             or target != target_branch
         ):
             raise GitLabError("invalid_remote_data")
-        _same_origin_url(web_url, self.client.auth.origin)
+        web_url = _canonical_remote_url(
+            web_url,
+            self.client.auth.origin,
+            f"/{project_path}/-/merge_requests/{iid}",
+        )
         return {
             "project": str(project),
             "iid": iid,
@@ -1074,10 +1287,42 @@ class GitLabOperations:
             "dry_run": False,
         }
 
+    def _validate_partial_merge_request_identity(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        project_id: int,
+        project_path: str,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+    ) -> int:
+        iid = payload.get("iid")
+        if isinstance(iid, bool) or not isinstance(iid, int) or iid <= 0:
+            raise GitLabError("invalid_remote_data")
+        expected = {
+            "project_id": project_id,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "title": title,
+            "state": "opened",
+        }
+        for field, expected_value in expected.items():
+            if field in payload and payload.get(field) != expected_value:
+                raise GitLabError("invalid_remote_data")
+        if "web_url" in payload:
+            _canonical_remote_url(
+                payload.get("web_url"),
+                self.client.auth.origin,
+                f"/{project_path}/-/merge_requests/{iid}",
+            )
+        return iid
+
     def _existing_merge_request(
         self,
         project: str | int,
         project_id: int,
+        project_path: str,
         endpoint: str,
         source_branch: str,
         target_branch: str,
@@ -1103,6 +1348,7 @@ class GitLabOperations:
                 payload[0],
                 project=project,
                 project_id=project_id,
+                project_path=project_path,
                 source_branch=source_branch,
                 target_branch=target_branch,
                 created=False,
@@ -1128,7 +1374,7 @@ class GitLabOperations:
             if target_branch == source_branch:
                 raise GitLabError("invalid_input")
         if title is not None:
-            title = _bounded_string(title, _MAX_MR_TITLE)
+            title = _bounded_string(title, _MAX_MR_TITLE_INPUT)[:_MAX_MR_TITLE]
         description = _bounded_string(
             description, _MAX_MR_DESCRIPTION, allow_empty=True
         )
@@ -1141,7 +1387,9 @@ class GitLabOperations:
         selected_target = target_branch or project_result["default_branch"]
         if selected_target == source_branch:
             raise GitLabError("invalid_input")
-        selected_title = title or re.sub(r"[-_/]+", " ", source_branch).capitalize()
+        selected_title = (title or re.sub(r"[-_/]+", " ", source_branch).capitalize())[
+            :_MAX_MR_TITLE
+        ]
         if not selected_title or len(selected_title) > _MAX_MR_TITLE:
             raise GitLabError("invalid_input")
         if dry_run:
@@ -1177,6 +1425,7 @@ class GitLabOperations:
                 return self._existing_merge_request(
                     project,
                     project_result["id"],
+                    project_result["path_with_namespace"],
                     endpoint,
                     source_branch,
                     selected_target,
@@ -1199,23 +1448,20 @@ class GitLabOperations:
                 payload,
                 project=project,
                 project_id=project_result["id"],
+                project_path=project_result["path_with_namespace"],
                 source_branch=source_branch,
                 target_branch=selected_target,
                 created=True,
                 expected_title=selected_title,
             )
-        iid = item.get("iid")
-        if (
-            isinstance(iid, bool)
-            or not isinstance(iid, int)
-            or iid <= 0
-            or ("project_id" in item and item.get("project_id") != project_result["id"])
-            or ("source_branch" in item and item.get("source_branch") != source_branch)
-            or (
-                "target_branch" in item and item.get("target_branch") != selected_target
-            )
-        ):
-            raise GitLabError("invalid_remote_data") from None
+        iid = self._validate_partial_merge_request_identity(
+            item,
+            project_id=project_result["id"],
+            project_path=project_result["path_with_namespace"],
+            source_branch=source_branch,
+            target_branch=selected_target,
+            title=selected_title,
+        )
         reconciled = self.client.get_json(
             f"/api/v4/projects/{endpoint}/merge_requests/{iid}",
             deadline=deadline,
@@ -1224,6 +1470,7 @@ class GitLabOperations:
             reconciled,
             project=project,
             project_id=project_result["id"],
+            project_path=project_result["path_with_namespace"],
             source_branch=source_branch,
             target_branch=selected_target,
             created=True,

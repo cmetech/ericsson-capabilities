@@ -7,6 +7,7 @@ import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -67,6 +68,20 @@ def _branch(name="feature/abc-123-safe-change", sha="source-sha"):
         "web_url": f"{ORIGIN}/division/platform/repo/-/tree/{name}",
         "commit": {"id": sha},
     }
+
+
+def _head_file(path, *, status=200, last_commit_id="previous-sha"):
+    headers = {"X-Gitlab-Last-Commit-Id": last_commit_id} if last_commit_id else {}
+    encoded = quote(path, safe="")
+    return respx.head(f"{PROJECT_API}/repository/files/{encoded}").mock(
+        return_value=httpx.Response(status, headers=headers)
+    )
+
+
+def _mock_project(default_branch="main"):
+    return respx.get(PROJECT_API).mock(
+        return_value=httpx.Response(200, json=_project(default_branch))
+    )
 
 
 def _commit(identifier="commit-sha", *, title="Apply safe change"):
@@ -147,9 +162,9 @@ def _admission(name):
 
 
 def test_branch_name_source_default_reuse_and_error_classification():
-    # GL-WRITE-01/02/03 legacy: gitlab_branch_creator.py:GitLabBranchCreator._normalize_branch_name/create_branch
+    # GL-WRITE-01/02/03 legacy: gitlab_branch_creator.py:GitLabBranchCreator._slugify/create_branch
     operations = _operations(max_retries=0)
-    created = _branch()
+    created = _branch("feature/ABC-123-safe-change")
     seen = []
 
     def create_response(request):
@@ -164,7 +179,7 @@ def test_branch_name_source_default_reuse_and_error_classification():
             httpx.Response(200, json=_project("release/2026")),
         ]
         branch_route = respx.get(
-            f"{PROJECT_API}/repository/branches/feature%2Fabc-123-safe-change"
+            f"{PROJECT_API}/repository/branches/feature%2FABC-123-safe-change"
         )
         branch_route.side_effect = [
             httpx.Response(404, json={"message": "missing"}),
@@ -176,21 +191,34 @@ def test_branch_name_source_default_reuse_and_error_classification():
         )
 
         made = operations.create_branch(
-            "42", " Feature / ABC_123 -- Safe Change ", source_ref=None
+            "42",
+            prefix="feature/",
+            ticket_key="ABC-123",
+            summary="Safe Change",
+            source_ref=None,
         )
         reused = operations.create_branch(
-            "42", "Feature / ABC_123 -- Safe Change", source_ref="release/2026"
+            "42",
+            prefix="feature",
+            ticket_key="ABC-123",
+            summary="Safe Change",
+            source_ref="release/2026",
         )
         with pytest.raises(Exception) as caught:
-            operations.create_branch("42", "Feature / ABC_123 -- Safe Change")
+            operations.create_branch(
+                "42",
+                prefix="feature",
+                ticket_key="ABC-123",
+                summary="Safe Change",
+            )
 
-    assert seen == [{"branch": "feature/abc-123-safe-change", "ref": "release/2026"}]
+    assert seen == [{"branch": "feature/ABC-123-safe-change", "ref": "release/2026"}]
     assert made == {
         "project": "42",
-        "branch": "feature/abc-123-safe-change",
+        "branch": "feature/ABC-123-safe-change",
         "source_ref": "release/2026",
         "commit_id": "source-sha",
-        "web_url": f"{ORIGIN}/division/platform/repo/-/tree/feature/abc-123-safe-change",
+        "web_url": f"{ORIGIN}/division/platform/repo/-/tree/feature/ABC-123-safe-change",
         "created": True,
         "reused": False,
         "dry_run": False,
@@ -206,12 +234,16 @@ def test_branch_dry_run_requires_no_mutating_request_and_returns_bounded_preview
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
         result = operations.create_branch(
-            "42", "ABC 123 dry run", source_ref=None, dry_run=True
+            "42",
+            ticket_key="ABC-123",
+            summary="Dry run",
+            source_ref=None,
+            dry_run=True,
         )
         assert not any(call.request.method != "GET" for call in respx.calls)
     assert result == {
         "project": "42",
-        "branch": "abc-123-dry-run",
+        "branch": "fix/ABC-123-dry-run",
         "source_ref": "main",
         "created": False,
         "reused": False,
@@ -219,18 +251,141 @@ def test_branch_dry_run_requires_no_mutating_request_and_returns_bounded_preview
     }
 
 
+def test_branch_public_contract_builds_exact_legacy_slug_and_does_not_accept_full_branch():
+    # GL-WRITE-01 legacy: gitlab_branch_creator.py:GitLabBranchCreator._slugify/create_branch
+    _auth, _client, models, _operations_module, tools = _modules()
+    schema = tools.SCHEMAS["gitlab_create_branch"]["parameters"]
+    assert schema["required"] == ["project", "ticket_key", "summary"]
+    assert set(schema["properties"]) == {
+        "project",
+        "prefix",
+        "ticket_key",
+        "summary",
+        "source_ref",
+        "dry_run",
+    }
+    assert schema["properties"]["prefix"]["default"] == "fix"
+    operations = _operations()
+    with respx.mock:
+        respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
+        result = operations.create_branch(
+            "42",
+            prefix="fix///",
+            ticket_key="ABC-123",
+            summary="  This IS a very long summary!! with tail  ",
+            source_ref="main",
+            dry_run=True,
+        )
+        with pytest.raises(models.GitLabError) as caught:
+            tools.invoke(
+                "gitlab_create_branch",
+                {"project": "42", "branch": "caller/composed"},
+                _Configuration(),
+            )
+    assert result["branch"] == "fix/ABC-123-this-is-a-very-long-summary-wi"
+    assert not result["branch"].endswith("-")
+    assert caught.value.category == "invalid_input"
+
+
 @pytest.mark.parametrize(
-    "branch",
-    ["", "///", "../main", "main.lock", "feature\nsecret", "a" * 513],
+    ("prefix", "ticket_key", "summary"),
+    [
+        ("", "ABC-123", "safe"),
+        ("../fix", "ABC-123", "safe"),
+        ("fix", "ABC 123", "safe"),
+        ("fix", "ABC-123", "---"),
+        ("fix\nsecret", "ABC-123", "safe"),
+        ("a" * 513, "ABC-123", "safe"),
+    ],
 )
-def test_branch_validation_rejects_invalid_names_before_transport(branch):
-    # GL-WRITE-01 legacy: gitlab_branch_creator.py:GitLabBranchCreator._normalize_branch_name
+def test_branch_validation_rejects_invalid_parts_before_transport(
+    prefix, ticket_key, summary
+):
+    # GL-WRITE-01 legacy: gitlab_branch_creator.py:GitLabBranchCreator._slugify/create_branch
     operations = _operations()
     with respx.mock:
         with pytest.raises(Exception) as caught:
-            operations.create_branch("42", branch, source_ref="main")
+            operations.create_branch(
+                "42",
+                prefix=prefix,
+                ticket_key=ticket_key,
+                summary=summary,
+                source_ref="main",
+            )
         assert respx.calls.call_count == 0
     assert getattr(caught.value, "category", None) == "invalid_input"
+
+
+@pytest.mark.parametrize(
+    "invalid_ref",
+    [
+        "bad ref",
+        "bad..ref",
+        "bad@{ref",
+        ".hidden",
+        "refs/heads/topic.lock",
+        "bad\\ref",
+        "bad~1",
+        "bad^ref",
+        "bad:ref",
+        "bad?ref",
+        "bad*ref",
+        "bad[ref",
+        "bad//ref",
+        "bad.",
+        "@",
+    ],
+)
+def test_commit_branch_rejects_git_check_ref_format_violations_before_transport(
+    invalid_ref,
+):
+    # GL-WRITE-05/06 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    operations = _operations()
+    with respx.mock:
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch=invalid_ref,
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x", "content": "x"}],
+            )
+        assert respx.calls.call_count == 0
+    assert getattr(caught.value, "category", None) == "invalid_input"
+
+
+def test_source_target_and_last_commit_refs_are_strictly_validated_before_transport():
+    # GL-WRITE-02/06/08 legacy: gitlab_branch_creator.py:GitLabBranchCreator.create_branch; gitlab_commit_pusher.py:GitLabCommitPusher.push_commit; gitlab_mr_creator.py:GitLabMRCreator.create_mr
+    operations = _operations()
+    calls = (
+        lambda: operations.create_branch(
+            "42",
+            ticket_key="ABC-123",
+            summary="safe",
+            source_ref="release bad",
+        ),
+        lambda: operations.commit_changes(
+            "42",
+            branch="feature/ABC-123-safe",
+            commit_message="Safe",
+            actions=[
+                {
+                    "action": "update",
+                    "file_path": "x",
+                    "content": "x",
+                    "last_commit_id": "bad sha",
+                }
+            ],
+        ),
+        lambda: operations.create_merge_request(
+            "42", source_branch="feature/ABC-123-safe", target_branch="bad target"
+        ),
+    )
+    with respx.mock:
+        for invoke in calls:
+            with pytest.raises(Exception) as caught:
+                invoke()
+            assert getattr(caught.value, "category", None) == "invalid_input"
+        assert respx.calls.call_count == 0
 
 
 def test_branch_create_partial_response_reconciles_exact_identity_once():
@@ -238,17 +393,25 @@ def test_branch_create_partial_response_reconciles_exact_identity_once():
     operations = _operations(max_retries=2)
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
-        branch_route = respx.get(f"{PROJECT_API}/repository/branches/feature%2Fsafe")
+        branch_route = respx.get(
+            f"{PROJECT_API}/repository/branches/feature%2FABC-123-safe"
+        )
         branch_route.side_effect = [
             httpx.Response(404, json={"message": "missing"}),
-            httpx.Response(200, json=_branch("feature/safe", "source-sha")),
+            httpx.Response(200, json=_branch("feature/ABC-123-safe", "source-sha")),
         ]
         post = respx.post(f"{PROJECT_API}/repository/branches").mock(
-            return_value=httpx.Response(201, json={"name": "feature/safe"})
+            return_value=httpx.Response(201, json={"name": "feature/ABC-123-safe"})
         )
-        result = operations.create_branch("42", "feature/safe", source_ref="main")
+        result = operations.create_branch(
+            "42",
+            prefix="feature",
+            ticket_key="ABC-123",
+            summary="safe",
+            source_ref="main",
+        )
     assert post.call_count == 1
-    assert result["branch"] == "feature/safe"
+    assert result["branch"] == "feature/ABC-123-safe"
     assert result["commit_id"] == "source-sha"
     assert result["created"] is True
 
@@ -258,14 +421,57 @@ def test_branch_contradictory_response_is_not_reconciled_as_partial():
     operations = _operations(max_retries=0)
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
-        respx.get(f"{PROJECT_API}/repository/branches/feature%2Fsafe").mock(
+        respx.get(f"{PROJECT_API}/repository/branches/feature%2FABC-123-safe").mock(
             return_value=httpx.Response(404, json={"message": "missing"})
         )
         respx.post(f"{PROJECT_API}/repository/branches").mock(
             return_value=httpx.Response(201, json=_branch("feature/other"))
         )
         with pytest.raises(Exception) as caught:
-            operations.create_branch("42", "feature/safe", source_ref="main")
+            operations.create_branch(
+                "42",
+                prefix="feature",
+                ticket_key="ABC-123",
+                summary="safe",
+                source_ref="main",
+            )
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        {"commit": {"id": ""}},
+        {"commit": {"id": "source-sha", "short_id": "different"}},
+        {"web_url": f"{ORIGIN}/other/project/-/tree/feature/ABC-123-safe"},
+        {"project_id": 99},
+    ],
+)
+def test_branch_partial_response_rejects_every_present_contradictory_identity(
+    contradiction,
+):
+    # GL-WRITE-02/10 legacy: gitlab_branch_creator.py:GitLabBranchCreator.create_branch
+    operations = _operations(max_retries=0)
+    with respx.mock:
+        get_branch = respx.get(
+            f"{PROJECT_API}/repository/branches/feature%2FABC-123-safe"
+        ).mock(return_value=httpx.Response(404, json={"message": "missing"}))
+        respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
+        respx.post(f"{PROJECT_API}/repository/branches").mock(
+            return_value=httpx.Response(
+                201,
+                json={"name": "feature/ABC-123-safe", **contradiction},
+            )
+        )
+        with pytest.raises(Exception) as caught:
+            operations.create_branch(
+                "42",
+                prefix="feature",
+                ticket_key="ABC-123",
+                summary="safe",
+                source_ref="main",
+            )
+    assert get_branch.call_count == 1
     assert getattr(caught.value, "category", None) == "invalid_remote_data"
 
 
@@ -274,21 +480,29 @@ def test_branch_duplicate_race_reconciles_without_repeating_mutation():
     operations = _operations(max_retries=4)
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
-        branch_route = respx.get(f"{PROJECT_API}/repository/branches/feature%2Fsafe")
+        branch_route = respx.get(
+            f"{PROJECT_API}/repository/branches/feature%2FABC-123-safe"
+        )
         branch_route.side_effect = [
             httpx.Response(404, json={"message": "missing"}),
-            httpx.Response(200, json=_branch("feature/safe", "source-sha")),
+            httpx.Response(200, json=_branch("feature/ABC-123-safe", "source-sha")),
         ]
         post = respx.post(f"{PROJECT_API}/repository/branches").mock(
             return_value=httpx.Response(409, json={"message": "Branch already exists"})
         )
-        result = operations.create_branch("42", "feature/safe", source_ref="main")
+        result = operations.create_branch(
+            "42",
+            prefix="feature",
+            ticket_key="ABC-123",
+            summary="safe",
+            source_ref="main",
+        )
     assert post.call_count == 1
     assert result["created"] is False and result["reused"] is True
 
 
 def test_atomic_commit_projects_create_update_delete_without_content():
-    # GL-WRITE-04/05/06 legacy: gitlab_commit_pusher.py:GitLabCommitPusher._build_actions/push_commit
+    # GL-WRITE-05/06 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit (inline action loop)
     operations = _operations(max_retries=0)
     actions = [
         {"action": "create", "file_path": "src/new.py", "content": "new secret"},
@@ -311,6 +525,10 @@ def test_atomic_commit_projects_create_update_delete_without_content():
         return httpx.Response(201, json=_commit())
 
     with respx.mock:
+        _mock_project()
+        _head_file("src/new.py", status=404)
+        _head_file("src/current.py", last_commit_id="previous-sha")
+        _head_file("src/old.py", last_commit_id="previous-sha")
         route = respx.post(f"{PROJECT_API}/repository/commits").mock(
             side_effect=response
         )
@@ -360,7 +578,7 @@ def test_atomic_commit_projects_create_update_delete_without_content():
 def test_atomic_commit_validates_action_count_shape_paths_and_aggregate_bytes_before_transport(
     actions,
 ):
-    # GL-WRITE-04/05 legacy: gitlab_commit_pusher.py:GitLabCommitPusher._build_actions
+    # GL-WRITE-04/05 replacement: gitlab_code_context_builder.py:GitLabCodeContextBuilder.build_context is replaced by structured inputs validated against gitlab_commit_pusher.py:GitLabCommitPusher.push_commit's inline action loop.
     operations = _operations()
     with respx.mock:
         with pytest.raises(Exception) as caught:
@@ -371,10 +589,154 @@ def test_atomic_commit_validates_action_count_shape_paths_and_aggregate_bytes_be
     assert getattr(caught.value, "category", None) in {"invalid_input", "capacity"}
 
 
+def test_atomic_commit_head_reconciliation_is_deterministic_and_matches_dry_run_preview():
+    # GL-WRITE-06 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit (inline HEAD/action loop)
+    operations = _operations(max_retries=0)
+    requested = [
+        {
+            "action": "update",
+            "file_path": "new.txt",
+            "content": "new",
+        },
+        {
+            "action": "create",
+            "file_path": "existing.txt",
+            "content": "updated",
+        },
+        {"action": "delete", "file_path": "old.txt"},
+    ]
+    expected_actions = [
+        {"action": "create", "file_path": "new.txt"},
+        {"action": "update", "file_path": "existing.txt"},
+        {"action": "delete", "file_path": "old.txt"},
+    ]
+    seen = []
+
+    def response(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json=_commit())
+
+    with respx.mock:
+        _head_file("new.txt", status=404)
+        _head_file("existing.txt", last_commit_id="existing-sha")
+        _head_file("old.txt", last_commit_id="old-sha")
+        preview = operations.commit_changes(
+            "42",
+            branch="feature/ABC-123-safe",
+            commit_message="Apply safe change",
+            actions=requested,
+            dry_run=True,
+        )
+        _mock_project()
+        respx.post(f"{PROJECT_API}/repository/commits").mock(side_effect=response)
+        result = operations.commit_changes(
+            "42",
+            branch="feature/ABC-123-safe",
+            commit_message="Apply safe change",
+            actions=requested,
+        )
+    assert preview["actions"] == expected_actions
+    assert result["actions"] == expected_actions
+    assert seen == [
+        {
+            "branch": "feature/ABC-123-safe",
+            "commit_message": "Apply safe change",
+            "actions": [
+                {"action": "create", "file_path": "new.txt", "content": "new"},
+                {
+                    "action": "update",
+                    "file_path": "existing.txt",
+                    "content": "updated",
+                    "last_commit_id": "existing-sha",
+                },
+                {
+                    "action": "delete",
+                    "file_path": "old.txt",
+                    "last_commit_id": "old-sha",
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("action", "head_status", "expected_category"),
+    [
+        ({"action": "delete", "file_path": "gone.txt"}, 404, "conflict"),
+        (
+            {"action": "update", "file_path": "denied.txt", "content": "x"},
+            403,
+            "permission",
+        ),
+        (
+            {"action": "create", "file_path": "busy.txt", "content": "x"},
+            503,
+            "transient",
+        ),
+    ],
+)
+def test_atomic_commit_head_reconciliation_fails_closed_before_post(
+    action, head_status, expected_category
+):
+    # GL-WRITE-06/07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit (inline HEAD/action loop)
+    operations = _operations(max_retries=0)
+    with respx.mock:
+        _mock_project()
+        head = _head_file(action["file_path"], status=head_status)
+        post = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, json=_commit())
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/ABC-123-safe",
+                commit_message="Apply safe change",
+                actions=[action],
+            )
+    assert head.call_count == 1
+    assert post.call_count == 0
+    assert getattr(caught.value, "category", None) == expected_category
+
+
+def test_atomic_commit_rejects_missing_or_malformed_head_identity_before_post():
+    # GL-WRITE-06 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit (inline HEAD/action loop)
+    operations = _operations(max_retries=0)
+    failures = []
+    with respx.mock:
+        _mock_project()
+        head = respx.head(f"{PROJECT_API}/repository/files/existing.txt")
+        head.side_effect = [
+            httpx.Response(200),
+            httpx.Response(200, headers={"X-Gitlab-Last-Commit-Id": "bad sha"}),
+        ]
+        post = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, json=_commit())
+        )
+        for _case in range(2):
+            with pytest.raises(Exception) as caught:
+                operations.commit_changes(
+                    "42",
+                    branch="feature/ABC-123-safe",
+                    commit_message="Apply safe change",
+                    actions=[
+                        {
+                            "action": "create",
+                            "file_path": "existing.txt",
+                            "content": "x",
+                        }
+                    ],
+                )
+            failures.append(getattr(caught.value, "category", None))
+    assert failures == ["conflict", "conflict"]
+    assert post.call_count == 0
+
+
 def test_atomic_commit_last_commit_mismatch_is_conflict_and_remote_body_is_hidden():
-    # GL-WRITE-06/08 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-06/07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=2)
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", last_commit_id="actual-sha")
         route = respx.post(f"{PROJECT_API}/repository/commits").mock(
             return_value=httpx.Response(
                 400,
@@ -398,15 +760,17 @@ def test_atomic_commit_last_commit_mismatch_is_conflict_and_remote_body_is_hidde
                     }
                 ],
             )
-    assert route.call_count == 1
+    assert route.call_count == 0
     assert getattr(caught.value, "category", None) == "conflict"
     assert "secret" not in str(caught.value) and "remote" not in str(caught.value)
 
 
 def test_write_http_error_category_does_not_depend_on_remote_json_shape():
-    # GL-WRITE-08 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=0)
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
         respx.post(f"{PROJECT_API}/repository/commits").mock(
             return_value=httpx.Response(401, text="private non-json write-secret-token")
         )
@@ -422,9 +786,11 @@ def test_write_http_error_category_does_not_depend_on_remote_json_shape():
 
 
 def test_write_conflict_category_does_not_require_a_remote_json_body():
-    # GL-WRITE-08 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=0)
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
         respx.post(f"{PROJECT_API}/repository/commits").mock(
             return_value=httpx.Response(409, text="private non-json conflict")
         )
@@ -440,9 +806,10 @@ def test_write_conflict_category_does_not_require_a_remote_json_body():
 
 
 def test_atomic_commit_dry_run_is_admission_gated_but_never_mutates_or_projects_content():
-    # GL-WRITE-07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-05/06/07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations()
     with respx.mock:
+        _head_file("x.txt", status=404)
         result = operations.commit_changes(
             "42",
             branch="feature/safe",
@@ -450,7 +817,7 @@ def test_atomic_commit_dry_run_is_admission_gated_but_never_mutates_or_projects_
             actions=[{"action": "create", "file_path": "x.txt", "content": "private"}],
             dry_run=True,
         )
-        assert respx.calls.call_count == 0
+        assert not any(call.request.method == "POST" for call in respx.calls)
     assert result == {
         "project": "42",
         "branch": "feature/safe",
@@ -463,9 +830,11 @@ def test_atomic_commit_dry_run_is_admission_gated_but_never_mutates_or_projects_
 
 
 def test_ambiguous_commit_transport_is_never_retried():
-    # GL-WRITE-08/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-06/07/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=4)
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
         route = respx.post(f"{PROJECT_API}/repository/commits").mock(
             side_effect=httpx.ReadTimeout("outcome unknown")
         )
@@ -482,9 +851,11 @@ def test_ambiguous_commit_transport_is_never_retried():
 
 
 def test_commit_partial_response_reconciles_only_proven_commit_identity():
-    # GL-WRITE-08/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-06/07/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=0)
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
         respx.post(f"{PROJECT_API}/repository/commits").mock(
             return_value=httpx.Response(201, json={"id": "commit-sha"})
         )
@@ -501,10 +872,48 @@ def test_commit_partial_response_reconciles_only_proven_commit_identity():
     assert result["title"] == "Apply safe change"
 
 
-def test_commit_contradictory_response_is_not_reconciled_as_partial():
-    # GL-WRITE-08/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        {"title": "Different title"},
+        {"message": "Different full commit message"},
+        {"short_id": "different"},
+        {"web_url": f"{ORIGIN}/other/project/-/commit/commit-sha"},
+        {"project_id": 99},
+        {"branch": "other/ref"},
+    ],
+)
+def test_commit_partial_response_rejects_every_present_contradictory_identity(
+    contradiction,
+):
+    # GL-WRITE-06/07/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=0)
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, json={"id": "commit-sha", **contradiction})
+        )
+        reconcile = respx.get(f"{PROJECT_API}/repository/commits/commit-sha").mock(
+            return_value=httpx.Response(200, json=_commit())
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/ABC-123-safe",
+                commit_message="Apply safe change",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert reconcile.call_count == 0
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+def test_commit_contradictory_response_is_not_reconciled_as_partial():
+    # GL-WRITE-06/07/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    operations = _operations(max_retries=0)
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
         respx.post(f"{PROJECT_API}/repository/commits").mock(
             return_value=httpx.Response(201, json=_commit(title="Different title"))
         )
@@ -519,9 +928,11 @@ def test_commit_contradictory_response_is_not_reconciled_as_partial():
 
 
 def test_write_success_requires_the_documented_created_status():
-    # GL-WRITE-08 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=0)
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
         respx.post(f"{PROJECT_API}/repository/commits").mock(
             return_value=httpx.Response(200, json=_commit())
         )
@@ -536,10 +947,12 @@ def test_write_success_requires_the_documented_created_status():
 
 
 def test_multiline_commit_message_reconciles_against_gitlab_title_semantics():
-    # GL-WRITE-04/08 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    # GL-WRITE-05/07 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
     operations = _operations(max_retries=0)
     message = "Apply safe change\n\nBounded detail"
     with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
         respx.post(f"{PROJECT_API}/repository/commits").mock(
             return_value=httpx.Response(201, json=_commit(title="Apply safe change"))
         )
@@ -553,7 +966,7 @@ def test_multiline_commit_message_reconciles_against_gitlab_title_semantics():
 
 
 def test_merge_request_defaults_and_safe_normalized_result():
-    # GL-WRITE-09 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator.create_merge_request
+    # GL-WRITE-08 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     operations = _operations(max_retries=0)
     seen = []
 
@@ -591,7 +1004,7 @@ def test_merge_request_defaults_and_safe_normalized_result():
 
 @pytest.mark.parametrize("status", [409, 400])
 def test_merge_request_duplicate_409_and_proven_400_recover_one_exact_open_mr(status):
-    # GL-WRITE-09/10 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator.create_merge_request/_find_existing_mr
+    # GL-WRITE-09/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     operations = _operations(max_retries=2)
     duplicate = (
         "Another open merge request already exists for this source branch"
@@ -621,7 +1034,7 @@ def test_merge_request_duplicate_409_and_proven_400_recover_one_exact_open_mr(st
 
 
 def test_merge_request_duplicate_recovery_rejects_ambiguous_or_mismatched_identity():
-    # GL-WRITE-09/10 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator._find_existing_mr
+    # GL-WRITE-09/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     operations = _operations(max_retries=0)
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
@@ -647,7 +1060,7 @@ def test_merge_request_duplicate_recovery_rejects_ambiguous_or_mismatched_identi
 
 
 def test_merge_request_response_must_prove_current_project_identity():
-    # GL-WRITE-09/10 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator.create_merge_request
+    # GL-WRITE-08/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     operations = _operations(max_retries=0)
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
@@ -662,7 +1075,7 @@ def test_merge_request_response_must_prove_current_project_identity():
 
 
 def test_new_merge_request_response_must_preserve_requested_title_identity():
-    # GL-WRITE-09/10 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator.create_merge_request
+    # GL-WRITE-08/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     operations = _operations(max_retries=0)
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
@@ -676,8 +1089,63 @@ def test_new_merge_request_response_must_preserve_requested_title_identity():
     assert getattr(caught.value, "category", None) == "invalid_remote_data"
 
 
+def test_merge_request_title_preserves_255_and_deterministically_caps_256():
+    # GL-WRITE-08 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
+    operations = _operations(max_retries=0)
+    title_255 = "x" * 255
+    title_256 = title_255 + "y"
+    with respx.mock:
+        respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
+        exact = operations.create_merge_request(
+            "42",
+            source_branch="feature/ABC-123-safe",
+            title=title_255,
+            dry_run=True,
+        )
+        capped = operations.create_merge_request(
+            "42",
+            source_branch="feature/ABC-123-safe",
+            title=title_256,
+            dry_run=True,
+        )
+    assert exact["title"] == title_255
+    assert capped["title"] == title_255
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        {"project_id": 99},
+        {"source_branch": "other/source"},
+        {"target_branch": "other/target"},
+        {"title": "Different title"},
+        {"state": "closed"},
+        {"web_url": f"{ORIGIN}/other/project/-/merge_requests/7"},
+    ],
+)
+def test_merge_request_partial_response_rejects_every_present_contradictory_identity(
+    contradiction,
+):
+    # GL-WRITE-08/09/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
+    operations = _operations(max_retries=0)
+    with respx.mock:
+        respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
+        respx.post(f"{PROJECT_API}/merge_requests").mock(
+            return_value=httpx.Response(201, json={"iid": 7, **contradiction})
+        )
+        reconcile = respx.get(f"{PROJECT_API}/merge_requests/7").mock(
+            return_value=httpx.Response(200, json=_mr())
+        )
+        with pytest.raises(Exception) as caught:
+            operations.create_merge_request(
+                "42", source_branch="feature/abc-123", title="ABC-123"
+            )
+    assert reconcile.call_count == 0
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
 def test_merge_request_partial_response_reconciles_by_iid_and_ambiguous_transport_is_not_retried():
-    # GL-WRITE-09/10 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator.create_merge_request
+    # GL-WRITE-08/09/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     operations = _operations(max_retries=4)
     with respx.mock:
         respx.get(PROJECT_API).mock(return_value=httpx.Response(200, json=_project()))
@@ -703,7 +1171,7 @@ def test_merge_request_partial_response_reconciles_by_iid_and_ambiguous_transpor
 
 
 def test_merge_request_dry_run_never_mutates_and_has_no_caller_approval_field():
-    # GL-WRITE-09 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator.create_merge_request
+    # GL-WRITE-08/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     _auth, _client, _models, _operations_module, tools = _modules()
     schema = tools.SCHEMAS["gitlab_create_merge_request"]["parameters"]
     assert "approved" not in schema["properties"]
@@ -720,7 +1188,7 @@ def test_merge_request_dry_run_never_mutates_and_has_no_caller_approval_field():
 
 
 def test_merge_request_rejects_identical_source_and_target_before_transport():
-    # GL-WRITE-09 legacy: gitlab_mr_creator.py:GitLabMergeRequestCreator.create_merge_request
+    # GL-WRITE-08 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
     operations = _operations()
     with respx.mock:
         with pytest.raises(Exception) as caught:
@@ -808,7 +1276,7 @@ def test_registered_write_hook_requests_host_approval_and_delivers_reserved_admi
 def test_direct_invoke_rejects_missing_unknown_and_caller_auth_fields_before_transport(
     monkeypatch,
 ):
-    # GL-WRITE-04/09/10 legacy: commit/MR public inputs; replacement admission boundary.
+    # GL-WRITE-04/08/10 replacement: gitlab_code_context_builder.py:GitLabCodeContextBuilder.build_context; gitlab_mr_creator.py:GitLabMRCreator.create_mr; legacy mutators lacked host admission.
     _auth, _client, models, _operations_module, tools = _modules()
     monkeypatch.setattr(
         tools,
@@ -816,7 +1284,15 @@ def test_direct_invoke_rejects_missing_unknown_and_caller_auth_fields_before_tra
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no transport")),
     )
     for name, args in (
-        ("gitlab_create_branch", {"project": "42", "branch": "safe", "approved": True}),
+        (
+            "gitlab_create_branch",
+            {
+                "project": "42",
+                "ticket_key": "ABC-123",
+                "summary": "safe",
+                "approved": True,
+            },
+        ),
         ("gitlab_commit_changes", {"project": "42"}),
         (
             "gitlab_create_merge_request",

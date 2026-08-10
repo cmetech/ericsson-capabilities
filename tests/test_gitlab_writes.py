@@ -51,9 +51,9 @@ def _operations(**client_options):
     )
 
 
-def _project(default_branch="main"):
+def _project(default_branch="main", *, project_id=42):
     return {
-        "id": 42,
+        "id": project_id,
         "name": "repo",
         "path_with_namespace": "division/platform/repo",
         "default_branch": default_branch,
@@ -453,6 +453,49 @@ def test_branch_partial_post_identity_must_match_reconciliation_get_identity():
                     },
                 },
             )
+        )
+        with pytest.raises(Exception) as caught:
+            operations.create_branch(
+                "42",
+                prefix="feature",
+                ticket_key="ABC-123",
+                summary="safe",
+                source_ref="main",
+            )
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+@pytest.mark.parametrize("malformed_project_id", [True, 1.0])
+@pytest.mark.parametrize("partial", [False, True])
+def test_branch_full_and_partial_project_identity_require_an_exact_integer(
+    malformed_project_id, partial
+):
+    # GL-WRITE-02/10 legacy: gitlab_branch_creator.py:GitLabBranchCreator.create_branch
+    operations = _operations(max_retries=0)
+    branch = "feature/ABC-123-safe"
+    branch_api = (
+        f"{ORIGIN}/api/v4/projects/1/repository/branches/feature%2FABC-123-safe"
+    )
+    post_payload = {
+        **_branch(branch, "sha-A"),
+        "project_id": malformed_project_id,
+    }
+    if partial:
+        post_payload.pop("web_url")
+    with respx.mock:
+        respx.get(PROJECT_API).mock(
+            return_value=httpx.Response(200, json=_project(project_id=1))
+        )
+        branch_route = respx.get(branch_api)
+        branch_route.side_effect = [
+            httpx.Response(404, json={"message": "missing"}),
+            httpx.Response(
+                200,
+                json={**_branch(branch, "sha-A"), "project_id": 1},
+            ),
+        ]
+        respx.post(f"{ORIGIN}/api/v4/projects/1/repository/branches").mock(
+            return_value=httpx.Response(201, json=post_payload)
         )
         with pytest.raises(Exception) as caught:
             operations.create_branch(
@@ -952,6 +995,42 @@ def test_commit_partial_post_identity_must_match_reconciliation_get_identity():
     assert getattr(caught.value, "category", None) == "invalid_remote_data"
 
 
+@pytest.mark.parametrize("malformed_project_id", [True, 1.0])
+@pytest.mark.parametrize("partial", [False, True])
+def test_commit_full_and_partial_project_identity_require_an_exact_integer(
+    malformed_project_id, partial
+):
+    # GL-WRITE-06/07/10 legacy: gitlab_commit_pusher.py:GitLabCommitPusher.push_commit
+    operations = _operations(max_retries=0)
+    post_payload = {
+        **_commit("commit-A"),
+        "project_id": malformed_project_id,
+    }
+    if partial:
+        post_payload.pop("title")
+    with respx.mock:
+        respx.get(PROJECT_API).mock(
+            return_value=httpx.Response(200, json=_project(project_id=1))
+        )
+        _head_file("x.txt", status=404)
+        respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, json=post_payload)
+        )
+        respx.get(f"{PROJECT_API}/repository/commits/commit-A").mock(
+            return_value=httpx.Response(
+                200, json={**_commit("commit-A"), "project_id": 1}
+            )
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/ABC-123-safe",
+                commit_message="Apply safe change",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
 @pytest.mark.parametrize(
     "contradiction",
     [
@@ -1270,6 +1349,33 @@ def test_merge_request_partial_post_identity_must_match_reconciliation_get_ident
         )
         respx.get(f"{PROJECT_API}/merge_requests/7").mock(
             return_value=httpx.Response(200, json=_mr(iid=8))
+        )
+        with pytest.raises(Exception) as caught:
+            operations.create_merge_request(
+                "42", source_branch="feature/abc-123", title="ABC-123"
+            )
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+@pytest.mark.parametrize("malformed_project_id", [True, 1.0])
+@pytest.mark.parametrize("partial", [False, True])
+def test_merge_request_full_and_partial_project_identity_require_an_exact_integer(
+    malformed_project_id, partial
+):
+    # GL-WRITE-08/09/10 legacy: gitlab_mr_creator.py:GitLabMRCreator.create_mr
+    operations = _operations(max_retries=0)
+    post_payload = _mr(project_id=malformed_project_id)
+    if partial:
+        post_payload.pop("web_url")
+    with respx.mock:
+        respx.get(PROJECT_API).mock(
+            return_value=httpx.Response(200, json=_project(project_id=1))
+        )
+        respx.post(f"{ORIGIN}/api/v4/projects/1/merge_requests").mock(
+            return_value=httpx.Response(201, json=post_payload)
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/1/merge_requests/7").mock(
+            return_value=httpx.Response(200, json=_mr(project_id=1))
         )
         with pytest.raises(Exception) as caught:
             operations.create_merge_request(

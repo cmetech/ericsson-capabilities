@@ -137,6 +137,12 @@ def _positive_bound(value: int, maximum: int) -> int:
     return value
 
 
+def _remote_positive_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise GitLabError("invalid_remote_data")
+    return value
+
+
 def _as_object(value: Any) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise GitLabError("invalid_remote_data")
@@ -736,7 +742,9 @@ class GitLabOperations:
         partial: Mapping[str, Any], reconciled: Mapping[str, Any]
     ) -> None:
         if any(
-            field not in reconciled or reconciled[field] != value
+            field not in reconciled
+            or type(reconciled[field]) is not type(value)
+            or reconciled[field] != value
             for field, value in partial.items()
         ):
             raise GitLabError("invalid_remote_data")
@@ -766,8 +774,10 @@ class GitLabOperations:
             or not commit_id.startswith(commit_short_id)
         ):
             raise GitLabError("invalid_remote_data")
-        if "project_id" in item and item.get("project_id") != project_result["id"]:
-            raise GitLabError("invalid_remote_data")
+        if "project_id" in item:
+            remote_project_id = _remote_positive_int(item.get("project_id"))
+            if remote_project_id != project_result["id"]:
+                raise GitLabError("invalid_remote_data")
         project_path = project_result["path_with_namespace"]
         branch_path = f"/{project_path}/-/tree/{branch}"
         web_url = _canonical_remote_url(web_url, self.client.auth.origin, branch_path)
@@ -800,13 +810,11 @@ class GitLabOperations:
             raise GitLabError("invalid_remote_data")
         if "name" in payload:
             identity["name"] = branch
-        if (
-            "project_id" in payload
-            and payload.get("project_id") != project_result["id"]
-        ):
-            raise GitLabError("invalid_remote_data")
         if "project_id" in payload:
-            identity["project_id"] = project_result["id"]
+            remote_project_id = _remote_positive_int(payload.get("project_id"))
+            if remote_project_id != project_result["id"]:
+                raise GitLabError("invalid_remote_data")
+            identity["project_id"] = remote_project_id
         project_path = project_result["path_with_namespace"]
         if "web_url" in payload:
             identity["web_url"] = _canonical_remote_url(
@@ -1095,8 +1103,10 @@ class GitLabOperations:
             raise GitLabError("invalid_remote_data")
         if project_result is None:
             raise GitLabError("invalid_remote_data")
-        if "project_id" in item and item.get("project_id") != project_result["id"]:
-            raise GitLabError("invalid_remote_data")
+        if "project_id" in item:
+            remote_project_id = _remote_positive_int(item.get("project_id"))
+            if remote_project_id != project_result["id"]:
+                raise GitLabError("invalid_remote_data")
         if "branch" in item and item.get("branch") != branch:
             raise GitLabError("invalid_remote_data")
         web_url = _canonical_remote_url(
@@ -1145,13 +1155,11 @@ class GitLabOperations:
             ):
                 raise GitLabError("invalid_remote_data")
             identity["short_id"] = short_id
-        if (
-            "project_id" in payload
-            and payload.get("project_id") != project_result["id"]
-        ):
-            raise GitLabError("invalid_remote_data")
         if "project_id" in payload:
-            identity["project_id"] = project_result["id"]
+            remote_project_id = _remote_positive_int(payload.get("project_id"))
+            if remote_project_id != project_result["id"]:
+                raise GitLabError("invalid_remote_data")
+            identity["project_id"] = remote_project_id
         if "branch" in payload and payload.get("branch") != branch:
             raise GitLabError("invalid_remote_data")
         if "branch" in payload:
@@ -1290,19 +1298,15 @@ class GitLabOperations:
         expected_title: str | None = None,
     ) -> dict[str, Any]:
         item = _as_object(payload)
-        iid = item.get("iid")
-        remote_project_id = item.get("project_id")
+        iid = _remote_positive_int(item.get("iid"))
+        remote_project_id = _remote_positive_int(item.get("project_id"))
         title = item.get("title")
         state = item.get("state")
         source = item.get("source_branch")
         target = item.get("target_branch")
         web_url = item.get("web_url")
         if (
-            isinstance(iid, bool)
-            or not isinstance(iid, int)
-            or iid <= 0
-            or isinstance(remote_project_id, bool)
-            or remote_project_id != project_id
+            remote_project_id != project_id
             or not isinstance(title, str)
             or not title
             or len(title) > _MAX_MR_TITLE
@@ -1340,12 +1344,9 @@ class GitLabOperations:
         target_branch: str,
         title: str,
     ) -> dict[str, Any]:
-        iid = payload.get("iid")
-        if isinstance(iid, bool) or not isinstance(iid, int) or iid <= 0:
-            raise GitLabError("invalid_remote_data")
+        iid = _remote_positive_int(payload.get("iid"))
         identity: dict[str, Any] = {"iid": iid}
         expected = {
-            "project_id": project_id,
             "source_branch": source_branch,
             "target_branch": target_branch,
             "title": title,
@@ -1356,6 +1357,11 @@ class GitLabOperations:
                 raise GitLabError("invalid_remote_data")
             if field in payload:
                 identity[field] = expected_value
+        if "project_id" in payload:
+            remote_project_id = _remote_positive_int(payload.get("project_id"))
+            if remote_project_id != project_id:
+                raise GitLabError("invalid_remote_data")
+            identity["project_id"] = remote_project_id
         if "web_url" in payload:
             identity["web_url"] = _canonical_remote_url(
                 payload.get("web_url"),

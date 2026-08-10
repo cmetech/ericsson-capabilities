@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -2113,6 +2114,201 @@ def test_validate_catalog_cli_enforces_exact_sidecar_byte_boundary(
     assert json.loads(overflow.stdout) == {
         "ok": False,
         "problems": ["workflow sidecar exceeds safe byte limit"],
+    }
+
+
+def test_catalog_library_bounds_read_when_sidecar_grows_after_open(
+    repo_fixture: RepoFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A path-size check cannot authorize the later read: the same open file may
+    # grow before its first read. The loader must request and retain at most one
+    # byte beyond the 64 KiB boundary so overflow can be classified safely.
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(1024))
+    replacement = _sidecar_bytes(256 * 1024)
+    original_open = Path.open
+    requests: list[int] = []
+    returned: list[int] = []
+
+    class GrowingReader:
+        def __init__(self, stream) -> None:
+            self.stream = stream
+            self.grown = False
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def __getattr__(self, name: str):
+            return getattr(self.stream, name)
+
+        def read(self, size: int = -1) -> bytes:
+            if not self.grown:
+                self.grown = True
+                with original_open(sidecar, "wb") as replacement_file:
+                    replacement_file.write(replacement)
+            requests.append(size)
+            content = self.stream.read(size)
+            returned.append(len(content))
+            return content
+
+    def tracked_open(path: Path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path == sidecar and mode == "rb":
+            return GrowingReader(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar exceeds safe byte limit"
+    assert requests == [64 * 1024 + 1]
+    assert returned == [64 * 1024 + 1]
+
+
+def test_catalog_library_accumulates_bounded_short_reads_after_sidecar_growth(
+    repo_fixture: RepoFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A regular-file read is usually complete, but the loader's capacity
+    # contract must remain correct when the underlying stream returns early.
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(1024))
+    replacement = _sidecar_bytes(64 * 1024 + 1)
+    original_open = Path.open
+    requests: list[int] = []
+    total_returned = 0
+
+    class ShortGrowingReader:
+        def __init__(self, stream) -> None:
+            self.stream = stream
+            self.grown = False
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def __getattr__(self, name: str):
+            return getattr(self.stream, name)
+
+        def read(self, size: int = -1) -> bytes:
+            nonlocal total_returned
+            if not self.grown:
+                self.grown = True
+                with original_open(sidecar, "wb") as replacement_file:
+                    replacement_file.write(replacement)
+            requests.append(size)
+            content = self.stream.read(min(size, 997))
+            total_returned += len(content)
+            return content
+
+    def tracked_open(path: Path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path == sidecar and mode == "rb":
+            return ShortGrowingReader(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar exceeds safe byte limit"
+    assert all(0 < request <= 64 * 1024 + 1 for request in requests)
+    assert total_returned == 64 * 1024 + 1
+
+
+def test_validate_catalog_cli_bounds_growth_race_read_before_yaml(
+    repo_fixture: RepoFixture,
+    tmp_path: Path,
+) -> None:
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(1024))
+    marker = tmp_path / "read.json"
+    hook_dir = tmp_path / "hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        """\
+import json
+import os
+from pathlib import Path
+
+target = Path(os.environ["SIDECAR_RACE_TARGET"])
+marker = Path(os.environ["SIDECAR_RACE_MARKER"])
+original_open = Path.open
+replacement = (b"language_compatibility: archon-2026-07\\n#" + b"x" * (256 * 1024))
+
+class GrowingReader:
+    def __init__(self, stream):
+        self.stream = stream
+        self.grown = False
+    def __enter__(self):
+        self.stream.__enter__()
+        return self
+    def __exit__(self, *args):
+        return self.stream.__exit__(*args)
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+    def read(self, size=-1):
+        if not self.grown:
+            self.grown = True
+            with original_open(target, "wb") as output:
+                output.write(replacement)
+        content = self.stream.read(size)
+        marker.write_text(json.dumps({"requested": size, "returned": len(content)}))
+        return content
+
+def tracked_open(path, *args, **kwargs):
+    stream = original_open(path, *args, **kwargs)
+    mode = args[0] if args else kwargs.get("mode", "r")
+    if path == target and mode == "rb":
+        return GrowingReader(stream)
+    return stream
+
+Path.open = tracked_open
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(hook_dir), environment.get("PYTHONPATH", "")])
+    )
+    environment["SIDECAR_RACE_TARGET"] = str(sidecar)
+    environment["SIDECAR_RACE_MARKER"] = str(marker)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "validate_catalog.py"),
+            "--repo",
+            str(repo_fixture.root),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar exceeds safe byte limit"],
+    }
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "requested": 64 * 1024 + 1,
+        "returned": 64 * 1024 + 1,
     }
 
 

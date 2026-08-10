@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import json
 import math
+import os
 import re
+import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -363,9 +365,21 @@ def _relative_label(path: Path) -> str:
 def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, Any]:
     try:
         if label == "workflow sidecar":
-            if path.stat().st_size > _WORKFLOW_SIDECAR_MAX_BYTES:
-                raise CatalogError(_WORKFLOW_SIDECAR_BYTE_ERROR)
-            content = path.read_bytes()
+            with path.open("rb") as stream:
+                metadata = os.fstat(stream.fileno())
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise OSError("workflow sidecar is not a regular file")
+                if metadata.st_size > _WORKFLOW_SIDECAR_MAX_BYTES:
+                    raise CatalogError(_WORKFLOW_SIDECAR_BYTE_ERROR)
+                remaining = _WORKFLOW_SIDECAR_MAX_BYTES + 1
+                chunks: list[bytes] = []
+                while remaining:
+                    chunk = stream.read(remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                content = b"".join(chunks)
             if len(content) > _WORKFLOW_SIDECAR_MAX_BYTES:
                 raise CatalogError(_WORKFLOW_SIDECAR_BYTE_ERROR)
             text = content.decode("utf-8")

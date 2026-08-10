@@ -1794,12 +1794,23 @@ def test_catalog_rejects_every_schema_invalid_or_uncompilable_archon_sidecar(
         assert any("invalid workflow sidecar" in problem for problem in problems)
 
 
-def test_catalog_library_rejects_mixed_sidecar_key_types_with_fixed_error(
+@pytest.mark.parametrize(
+    "nested_mapping",
+    [
+        {"delivery_defaults": {"inputs": {7: {"kind": "text"}}}},
+        {"retention": {7: 1}},
+        {"limits": {"max_parallel_nodes": 2, 7: 1}},
+        {"resource_limits": {"max_descendants": 2, 7: 1}},
+        {"scheduling": {"cron": {7: "daily"}}},
+    ],
+)
+def test_catalog_library_rejects_nested_mixed_sidecar_key_types_with_fixed_error(
     repo_fixture: RepoFixture,
+    nested_mapping: dict[str, object],
 ) -> None:
     repo_fixture._write_yaml(
         "workflows/example.hermes.yaml",
-        {"language_compatibility": "archon-2026-07", 7: "unknown"},
+        {"language_compatibility": "archon-2026-07"} | nested_mapping,
     )
     repo_fixture.write_complete_entry()
 
@@ -1814,7 +1825,10 @@ def test_validate_catalog_cli_reports_mixed_sidecar_keys_without_traceback(
 ) -> None:
     repo_fixture._write_yaml(
         "workflows/example.hermes.yaml",
-        {"language_compatibility": "archon-2026-07", 7: "unknown"},
+        {
+            "language_compatibility": "archon-2026-07",
+            "limits": {"max_parallel_nodes": 2, 7: 1},
+        },
     )
     repo_fixture.write_complete_entry()
     script = SCRIPTS_DIR / "validate_catalog.py"

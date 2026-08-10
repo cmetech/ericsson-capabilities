@@ -184,14 +184,24 @@ class CatalogError(ValueError):
     """Raised when catalog source data violates the authoring contract."""
 
 
+def _require_string_mapping_keys(value: object) -> None:
+    if isinstance(value, dict):
+        if any(not isinstance(field, str) for field in value):
+            raise CatalogError("workflow sidecar field names must be strings")
+        for nested in value.values():
+            _require_string_mapping_keys(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _require_string_mapping_keys(nested)
+
+
 def validate_workflow_sidecar(
     metadata: object, *, node_ids: set[str] | frozenset[str]
 ) -> list[str]:
     """Statically enforce the published Archon companion compatibility shape."""
     if not isinstance(metadata, dict):
         return ["root"]
-    if any(not isinstance(field, str) for field in metadata):
-        raise CatalogError("workflow sidecar field names must be strings")
+    _require_string_mapping_keys(metadata)
     problems: list[str] = []
     for field in sorted(set(metadata) - _WORKFLOW_SIDECAR_FIELDS):
         problems.append(field)

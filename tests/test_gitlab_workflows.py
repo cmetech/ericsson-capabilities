@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 
 from jsonschema import Draft202012Validator
+import pytest
 import yaml
 
 
@@ -147,6 +148,46 @@ ALL_FAILURE_STATUSES = {
 }
 FAILURE_STATUSES = {node_id: ALL_FAILURE_STATUSES for node_id in SUCCESS_OUTPUTS}
 
+FAILURE_TERMINALS = {
+    "report-ticket-failure": ["read-ticket"],
+    "report-project-failure": ["resolve-project"],
+    "report-research-failure": ["research-repository"],
+    "report-proposal-failure": ["reason-about-fix"],
+    "report-branch-failure": ["create-branch", "reason-about-fix"],
+    "report-commit-failure": ["commit-changes"],
+    "report-merge-request-failure": ["create-merge-request"],
+    "report-review-failure": ["review-merge-request"],
+    "report-jira-failure": ["update-jira"],
+}
+SCHEDULER_CASES = [
+    ("read-ticket", "read-ticket", "report-ticket-failure", False),
+    ("resolve-project", "resolve-project", "report-project-failure", False),
+    (
+        "research-repository",
+        "research-repository",
+        "report-research-failure",
+        False,
+    ),
+    ("reason-about-fix", "reason-about-fix", "report-proposal-failure", False),
+    ("create-branch", "create-branch", "report-branch-failure", False),
+    ("commit-changes", "commit-changes", "report-commit-failure", False),
+    (
+        "create-merge-request",
+        "create-merge-request",
+        "report-merge-request-failure",
+        False,
+    ),
+    (
+        "review-merge-request",
+        "review-merge-request",
+        "report-review-failure",
+        False,
+    ),
+    ("update-jira", "update-jira", "report-jira-failure", False),
+    ("branch-mismatch", None, "report-branch-failure", True),
+    ("all-success", None, "report-completion-status", False),
+]
+
 TASK10_BOUNDS = {
     "ticket_key": {"maxLength": 128},
     "ticket_summary": {"maxLength": 2048},
@@ -251,7 +292,7 @@ def test_jira_to_gitlab_is_flat_archon_source_with_exact_dependencies() -> None:
         "review-merge-request",
         "approve-jira-update",
         "update-jira",
-        "report-status",
+        *FAILURE_TERMINALS,
         "report-completion-status",
     }
     assert nodes["resolve-project"]["depends_on"] == ["read-ticket"]
@@ -286,7 +327,8 @@ def test_jira_to_gitlab_is_flat_archon_source_with_exact_dependencies() -> None:
         "review-merge-request",
         "reason-about-fix",
     ]
-    assert nodes["report-status"]["depends_on"] == ["reason-about-fix"]
+    for terminal, dependencies in FAILURE_TERMINALS.items():
+        assert nodes[terminal]["depends_on"] == dependencies
     assert nodes["report-completion-status"]["depends_on"] == [
         "update-jira",
         "review-merge-request",
@@ -314,7 +356,7 @@ def test_each_reasoning_node_has_an_exact_least_privilege_tool_contract() -> Non
             "gitlab_read_file",
         ],
         "update-jira": ["jira_add_comment"],
-        "report-status": [],
+        **{terminal: [] for terminal in FAILURE_TERMINALS},
         "report-completion-status": [],
     }
     for node_id, tools in expected.items():
@@ -331,7 +373,7 @@ def test_each_reasoning_node_has_an_exact_least_privilege_tool_contract() -> Non
         assert schema.get("type") == "object"
         assert schema.get("additionalProperties") is False
         assert set(schema.get("required", ())) == set(schema.get("properties", {}))
-        if node_id == "report-status":
+        if node_id in FAILURE_TERMINALS:
             assert schema["properties"]["status"]["enum"] == sorted(
                 ALL_FAILURE_STATUSES
             )
@@ -366,16 +408,20 @@ def test_every_prompt_output_has_success_identity_and_truthful_failure_variants(
                 failure_status,
             )
 
-    failure_schema = nodes["report-status"]["output_format"]
-    failure_validator = Draft202012Validator(failure_schema)
-    for status in ALL_FAILURE_STATUSES:
-        failure = {field: None for field in failure_schema["properties"]}
-        failure.update(
-            status=status,
-            warnings=[f"{status}: bounded"],
-            attention_needed=True,
-        )
-        assert list(failure_validator.iter_errors(failure)) == [], status
+    for terminal in FAILURE_TERMINALS:
+        failure_schema = nodes[terminal]["output_format"]
+        failure_validator = Draft202012Validator(failure_schema)
+        for status in ALL_FAILURE_STATUSES:
+            failure = {field: None for field in failure_schema["properties"]}
+            failure.update(
+                status=status,
+                warnings=[f"{status}: bounded"],
+                attention_needed=True,
+            )
+            assert list(failure_validator.iter_errors(failure)) == [], (
+                terminal,
+                status,
+            )
 
 
 def test_workflow_output_contracts_apply_exact_task10_identity_bounds() -> None:
@@ -418,8 +464,23 @@ def test_workflow_output_contracts_apply_exact_task10_identity_bounds() -> None:
     assert actions["maxItems"] == 100
     action_properties = actions["items"]["properties"]
     assert action_properties["file_path"]["maxLength"] == 4096
+    assert action_properties["file_path"]["minLength"] == 1
     assert action_properties["content"]["maxLength"] == 524288
     assert action_properties["last_commit_id"]["maxLength"] == 512
+    assert action_properties["last_commit_id"]["minLength"] == 1
+
+    proposal = SUCCESS_OUTPUTS["reason-about-fix"]
+    validator = Draft202012Validator(nodes["reason-about-fix"]["output_format"])
+    boundary_action = {
+        "action": "update",
+        "file_path": "x",
+        "content": "",
+        "last_commit_id": "a",
+    }
+    assert list(validator.iter_errors(proposal | {"actions": [boundary_action]})) == []
+    for field in ("file_path", "last_commit_id"):
+        invalid = boundary_action | {field: ""}
+        assert list(validator.iter_errors(proposal | {"actions": [invalid]})), field
 
 
 def test_each_node_binds_required_direct_predecessor_provenance() -> None:
@@ -509,15 +570,6 @@ def test_each_node_binds_required_direct_predecessor_provenance() -> None:
             "$review-merge-request.output.jira_comment",
             "$review-merge-request.output.status",
         },
-        "report-status": {
-            "$reason-about-fix.output.ticket_key",
-            "$reason-about-fix.output.ticket_summary",
-            "$reason-about-fix.output.project_id",
-            "$reason-about-fix.output.project_path",
-            "$reason-about-fix.output.status",
-            "$reason-about-fix.output.warnings",
-            "$reason-about-fix.output.attention_needed",
-        },
         "report-completion-status": {
             "$reason-about-fix.output.status",
             "$review-merge-request.output.ticket_key",
@@ -535,6 +587,23 @@ def test_each_node_binds_required_direct_predecessor_provenance() -> None:
     for node_id, references in required_references.items():
         prompt = nodes[node_id]["prompt"]
         assert references <= {token for token in references if token in prompt}, node_id
+
+    terminal_sources = {
+        "report-ticket-failure": "read-ticket",
+        "report-project-failure": "resolve-project",
+        "report-research-failure": "research-repository",
+        "report-proposal-failure": "reason-about-fix",
+        "report-branch-failure": "create-branch",
+        "report-commit-failure": "commit-changes",
+        "report-merge-request-failure": "create-merge-request",
+        "report-review-failure": "review-merge-request",
+        "report-jira-failure": "update-jira",
+    }
+    for terminal, source in terminal_sources.items():
+        prompt = nodes[terminal]["prompt"]
+        assert f"${source}.output.status" in prompt
+        assert f"${source}.output.warnings" in prompt
+        assert f"${source}.output.attention_needed" in prompt
 
 
 def test_every_write_is_downstream_of_visible_approval_and_uses_preview_semantics() -> (
@@ -560,6 +629,41 @@ def test_application_status_conditions_gate_approvals_writes_and_terminal_lanes(
     # GL-JIRA-05/08/09/10/13: application failures do not pause for irrelevant
     # approvals or claim outward writes; exactly one truthful terminal remains.
     nodes = _node_map(_document())
+    expected_conditions = {
+        "resolve-project": "$read-ticket.output.status == 'success'",
+        "research-repository": "$resolve-project.output.status == 'success'",
+        "reason-about-fix": "$research-repository.output.status == 'success'",
+        "create-branch": "$reason-about-fix.output.status == 'success'",
+        "commit-changes": (
+            "$reason-about-fix.output.status == 'success' && "
+            "$create-branch.output.status == 'success' && "
+            "$create-branch.output.branch_name == "
+            "$reason-about-fix.output.proposed_branch"
+        ),
+        "create-merge-request": (
+            "$reason-about-fix.output.status == 'success' && "
+            "$create-branch.output.status == 'success' && "
+            "$create-branch.output.branch_name == "
+            "$reason-about-fix.output.proposed_branch && "
+            "$commit-changes.output.status == 'success'"
+        ),
+        "review-merge-request": (
+            "$create-merge-request.output.status == 'success' && "
+            "$commit-changes.output.status == 'success'"
+        ),
+        "update-jira": (
+            "$reason-about-fix.output.status == 'success' && "
+            "$review-merge-request.output.status == 'success' && "
+            "$review-merge-request.output.jira_comment != ''"
+        ),
+        "report-completion-status": (
+            "$reason-about-fix.output.status == 'success' && "
+            "$review-merge-request.output.status == 'success' && "
+            "$update-jira.output.status == 'success'"
+        ),
+    }
+    for node_id, condition in expected_conditions.items():
+        assert nodes[node_id]["when"] == condition
     assert nodes["approve-code-writes"]["when"] == (
         "$read-ticket.output.status == 'success' && "
         "$resolve-project.output.status == 'success' && "
@@ -570,24 +674,42 @@ def test_application_status_conditions_gate_approvals_writes_and_terminal_lanes(
         "$review-merge-request.output.status == 'success' && "
         "$review-merge-request.output.jira_comment != ''"
     )
-    assert nodes["update-jira"]["trigger_rule"] == "all_done"
-    assert (
-        nodes["update-jira"]["when"] == "$reason-about-fix.output.status == 'success'"
-    )
-    assert nodes["report-status"]["when"] == (
-        "$reason-about-fix.output.status != 'success'"
-    )
-    assert nodes["report-completion-status"]["trigger_rule"] == "all_done"
-    assert nodes["report-completion-status"]["when"] == (
-        "$reason-about-fix.output.status == 'success'"
-    )
+    assert "trigger_rule" not in nodes["update-jira"]
+    assert "trigger_rule" not in nodes["report-completion-status"]
+    failure_conditions = {
+        "report-ticket-failure": "$read-ticket.output.status != 'success'",
+        "report-project-failure": "$resolve-project.output.status != 'success'",
+        "report-research-failure": "$research-repository.output.status != 'success'",
+        "report-proposal-failure": "$reason-about-fix.output.status != 'success'",
+        "report-branch-failure": (
+            "$create-branch.output.status != 'success' || "
+            "$create-branch.output.branch_name != "
+            "$reason-about-fix.output.proposed_branch"
+        ),
+        "report-commit-failure": "$commit-changes.output.status != 'success'",
+        "report-merge-request-failure": (
+            "$create-merge-request.output.status != 'success'"
+        ),
+        "report-review-failure": "$review-merge-request.output.status != 'success'",
+        "report-jira-failure": "$update-jira.output.status != 'success'",
+    }
+    for terminal, condition in failure_conditions.items():
+        assert nodes[terminal]["when"] == condition
 
 
-def test_real_scheduler_bypasses_failure_approvals_and_outward_write_claims(
+@pytest.mark.parametrize(
+    ("case_name", "failure_node", "terminal", "mismatch"),
+    SCHEDULER_CASES,
+)
+def test_real_scheduler_makes_every_application_terminal_state_total(
     tmp_path: Path,
+    case_name: str,
+    failure_node: str | None,
+    terminal: str,
+    mismatch: bool,
 ) -> None:
-    # GL-JIRA-05/08/09/10/13: exercise the committed package with Hermes' real
-    # v5 compiler, condition evaluator, scheduler, store, and executor boundary.
+    # GL-JIRA-05/08/09/10/13: real v5 conditions stop after the earliest
+    # application failure or branch mismatch and publish exactly one terminal.
     hermes = _hermes_checkout()
     python = hermes / ".venv/bin/python"
     script = r"""
@@ -595,6 +717,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import time
 
 from hermes_cli.plugin_configuration import ConnectorCapabilitySnapshot
 from plugins.workflow import scheduler as scheduler_module
@@ -644,24 +767,104 @@ assessment = assess_workflow_admission(
 )
 assert assessment.compatibility.runnable
 scheduler_module.connector_capability_snapshot = lambda: capabilities
-failure_statuses = (
-    "not_found",
-)
+success = {
+    "read-ticket": {
+        "ticket_key": "ERIC-123", "ticket_summary": "Fix", "project_path": "group/project",
+        "status": "success", "warnings": [], "attention_needed": False,
+    },
+    "resolve-project": {
+        "ticket_key": "ERIC-123", "ticket_summary": "Fix", "project_id": 42,
+        "project_path": "group/project", "default_branch": "main",
+        "status": "success", "warnings": [], "attention_needed": False,
+    },
+    "research-repository": {
+        "ticket_key": "ERIC-123", "ticket_summary": "Fix", "project_id": 42,
+        "project_path": "group/project", "default_branch": "main",
+        "evidence_summary": "bounded", "status": "success", "warnings": [],
+        "attention_needed": False,
+    },
+    "reason-about-fix": {
+        "ticket_key": "ERIC-123", "ticket_summary": "Fix", "project_id": 42,
+        "project_path": "group/project", "default_branch": "main", "branch_prefix": "fix",
+        "proposed_branch": "fix/ERIC-123-fix", "branch_summary": "bounded",
+        "commit_message": "Fix ERIC-123",
+        "actions": [{"action": "update", "file_path": "a.py", "content": "fixed"}],
+        "actions_digest": "sha256:abcd", "mr_title": "ERIC-123: Fix",
+        "mr_description": "bounded", "mr_target_branch": "main",
+        "remove_source_branch": True, "squash": False, "status": "success",
+        "warnings": [], "attention_needed": False,
+    },
+    "create-branch": {
+        "ticket_key": "ERIC-123", "project_id": 42, "project_path": "group/project",
+        "branch_name": "fix/ERIC-123-fix", "source_branch": "main",
+        "web_url": "https://gitlab.example/group/project/-/tree/fix",
+        "status": "success", "warnings": [], "attention_needed": False,
+    },
+    "commit-changes": {
+        "ticket_key": "ERIC-123", "project_id": 42, "branch_name": "fix/ERIC-123-fix",
+        "commit_id": "a" * 40, "web_url": "https://gitlab.example/commit/a",
+        "status": "success", "warnings": [], "attention_needed": False,
+    },
+    "create-merge-request": {
+        "ticket_key": "ERIC-123", "project_id": 42, "iid": 7,
+        "source_branch": "fix/ERIC-123-fix", "target_branch": "main",
+        "title": "ERIC-123: Fix", "state": "opened",
+        "web_url": "https://gitlab.example/group/project/-/merge_requests/7",
+        "status": "success", "warnings": [], "attention_needed": False,
+    },
+    "review-merge-request": {
+        "ticket_key": "ERIC-123", "project_id": 42, "iid": 7,
+        "merge_request_url": "https://gitlab.example/group/project/-/merge_requests/7",
+        "verdict": "approved", "review_summary": "bounded",
+        "jira_comment": "MR 7 reviewed", "status": "success", "warnings": [],
+        "attention_needed": False,
+    },
+    "update-jira": {
+        "ticket_key": "ERIC-123", "project_id": 42, "iid": 7,
+        "merge_request_url": "https://gitlab.example/group/project/-/merge_requests/7",
+        "comment_status": "created", "status": "success", "warnings": [],
+        "attention_needed": False,
+    },
+    "report-completion-status": {
+        "ticket_key": "ERIC-123", "project_id": 42, "iid": 7,
+        "merge_request_url": "https://gitlab.example/group/project/-/merge_requests/7",
+        "jira_status": "created", "review_status": "approved", "status": "success",
+        "warnings": [], "attention_needed": False,
+    },
+}
+failure_terminals = {
+    "read-ticket": "report-ticket-failure",
+    "resolve-project": "report-project-failure",
+    "research-repository": "report-research-failure",
+    "reason-about-fix": "report-proposal-failure",
+    "create-branch": "report-branch-failure",
+    "commit-changes": "report-commit-failure",
+    "create-merge-request": "report-merge-request-failure",
+    "review-merge-request": "report-review-failure",
+    "update-jira": "report-jira-failure",
+}
+cases = (json.loads(sys.argv[3]),)
 rows = []
 
-for status in failure_statuses:
+for case in cases:
     calls = []
+    approvals = []
 
     class OutputExecutor:
         def execute(self, context):
-            calls.append(context.node.id)
+            node_id = context.node.id
+            calls.append(node_id)
             properties = context.node.options["output_format"]["properties"]
-            value = {field: None for field in properties}
-            value.update(
-                status=status,
-                warnings=[f"{status}: bounded"],
-                attention_needed=True,
-            )
+            if node_id == case["terminal"] and node_id != "report-completion-status":
+                value = {field: None for field in properties}
+                value.update(status="failed", warnings=[f"{case['name']}: bounded"], attention_needed=True)
+            elif node_id == case["failure"]:
+                value = {field: None for field in properties}
+                value.update(status="failed", warnings=[f"{node_id}: bounded"], attention_needed=True)
+            else:
+                value = dict(success[node_id])
+                if node_id == "create-branch" and case["mismatch"]:
+                    value["branch_name"] = "fix/ERIC-123-different"
             data = json.dumps(
                 value,
                 sort_keys=True,
@@ -694,7 +897,7 @@ for status in failure_statuses:
                 ),
             )
 
-    store = RunStore(home / status)
+    store = RunStore(home / case["name"])
     prepared = store.prepare_run_snapshot(
         package,
         compilation=compilation,
@@ -709,8 +912,9 @@ for status in failure_statuses:
             policy_digest=prepared.policy_digest,
             input_manifest_digest=prepared.input_manifest_digest,
             trigger_source="cli",
-            idempotency_key=f"failure-{status}",
-            concurrency_key=f"failure-{status}",
+            idempotency_key=f"case-{case['name']}",
+            concurrency_key=f"case-{case['name']}",
+            foreground_lease_seconds=300,
             run_metadata=execution_context.structured_output_run_metadata(package),
         ),
         immutable_snapshot=prepared,
@@ -718,27 +922,59 @@ for status in failure_statuses:
     scheduler = RunScheduler(store, max_parallel_nodes=1)
     scheduler.executors["prompt"] = OutputExecutor()
     try:
-        result = scheduler.advance(admitted.run_id, max_nodes=64)
+        deadline = time.monotonic() + 100
+        while True:
+            result = scheduler.advance(admitted.run_id, max_nodes=128)
+            if result["status"] == "running":
+                if time.monotonic() >= deadline:
+                    raise AssertionError(json.dumps({
+                        "error": "scheduler did not reach a bounded terminal state",
+                        "case": case,
+                        "run_status": result["status"],
+                        "calls": calls,
+                        "approvals": approvals,
+                        "nodes": result["nodes"],
+                    }, sort_keys=True, default=str))
+                time.sleep(0.01)
+                continue
+            if result["status"] != "paused":
+                break
+            pending = [
+                (node_id, state["pending_interaction"])
+                for node_id, state in result["nodes"].items()
+                if isinstance(state.get("pending_interaction"), dict)
+            ]
+            assert len(pending) == 1, pending
+            approval_node, interaction = pending[0]
+            approvals.append(approval_node)
+            decision = store.approve_run(
+                admitted.run_id,
+                comment="approved",
+                expected_state_version=result["state_version"],
+                interaction_id=interaction["interaction_id"],
+            )
+            assert decision.outcome == "applied"
     finally:
         scheduler.shutdown(deadline_seconds=2)
     resolved_outputs = scheduler._output_values(
         result,
         store.run_directory(admitted.run_id),
-        node_ids=("report-status",),
+        node_ids=tuple(failure_terminals.values()) + ("report-completion-status",),
     )
-    if "report-status" not in resolved_outputs:
+    if case["terminal"] not in resolved_outputs:
         raise AssertionError(json.dumps({
-            "status": status,
+            "case": case,
             "run_status": result["status"],
             "last_error": result.get("last_error"),
             "calls": calls,
             "nodes": result["nodes"],
         }, sort_keys=True, default=str))
-    resolved = resolved_outputs["report-status"]
+    resolved = resolved_outputs[case["terminal"]]
     rows.append({
-        "status": status,
+        "case": case,
         "run_status": result["status"],
         "calls": calls,
+        "approvals": approvals,
         "report": json.loads(resolved.text),
         "states": {
             node_id: {
@@ -753,44 +989,74 @@ print(json.dumps(rows, sort_keys=True))
 """
     try:
         result = subprocess.run(
-            [str(python), "-c", script, str(WORKFLOW), str(tmp_path / "runs")],
+            [
+                str(python),
+                "-c",
+                script,
+                str(WORKFLOW),
+                str(tmp_path / "runs"),
+                json.dumps(
+                    {
+                        "name": case_name,
+                        "failure": failure_node,
+                        "terminal": terminal,
+                        "mismatch": mismatch,
+                    }
+                ),
+            ],
             cwd=hermes,
             text=True,
             capture_output=True,
             check=False,
-            timeout=30,
+            timeout=120,
         )
     except subprocess.TimeoutExpired as exc:
         raise AssertionError(exc.stderr) from exc
     assert result.returncode == 0, result.stderr
     rows = json.loads(result.stdout)
-    expected_calls = {
+    application_order = [
         "read-ticket",
         "resolve-project",
         "research-repository",
         "reason-about-fix",
-        "report-status",
-    }
-    skipped_without_claim = {
-        "approve-code-writes",
-        "create-branch",
         "commit-changes",
         "create-merge-request",
         "review-merge-request",
-        "approve-jira-update",
         "update-jira",
-        "report-completion-status",
-    }
-    # Every other bounded failure value follows the same exact `!= success`
-    # condition and is covered by the complete schema matrix above.
-    assert {row["status"] for row in rows} == {"not_found"}
+    ]
+    application_order.insert(4, "create-branch")
+    terminal_ids = {*FAILURE_TERMINALS, "report-completion-status"}
+    assert len(rows) == 1
     for row in rows:
+        case = row["case"]
+        if case["name"] == "all-success":
+            expected_calls = application_order + ["report-completion-status"]
+            expected_approvals = ["approve-code-writes", "approve-jira-update"]
+        else:
+            stop = "create-branch" if case["mismatch"] else case["failure"]
+            expected_calls = application_order[: application_order.index(stop) + 1]
+            expected_calls.append(case["terminal"])
+            expected_approvals = []
+            if application_order.index(stop) >= application_order.index(
+                "create-branch"
+            ):
+                expected_approvals.append("approve-code-writes")
+            if application_order.index(stop) >= application_order.index("update-jira"):
+                expected_approvals.append("approve-jira-update")
         assert row["run_status"] == "succeeded", row
-        assert set(row["calls"]) == expected_calls, row
-        assert row["report"]["status"] == row["status"]
-        assert row["report"]["attention_needed"] is True
-        assert row["states"]["report-status"]["state"] == "succeeded"
-        for node_id in skipped_without_claim:
+        assert row["calls"] == expected_calls, row
+        assert row["approvals"] == expected_approvals, row
+        assert row["report"]["status"] == (
+            "success" if case["name"] == "all-success" else "failed"
+        )
+        assert row["report"]["attention_needed"] is (case["name"] != "all-success")
+        succeeded_terminals = {
+            node_id
+            for node_id in terminal_ids
+            if row["states"][node_id]["state"] == "succeeded"
+        }
+        assert succeeded_terminals == {case["terminal"]}, row
+        for node_id in terminal_ids - {case["terminal"]}:
             assert row["states"][node_id] == {"state": "skipped", "attempts": 0}
 
 
@@ -1098,10 +1364,12 @@ print(json.dumps(rendered, sort_keys=True))
             "create-branch",
             "commit-changes",
             "create-merge-request",
+            "report-branch-failure",
         },
         "RETURNED_BRANCH_MISMATCH_SENTINEL": {
             "commit-changes",
             "create-merge-request",
+            "report-branch-failure",
         },
         "COMMIT_SENTINEL": {"create-merge-request", "review-merge-request"},
         "MR_SENTINEL": {"review-merge-request"},
@@ -1118,7 +1386,7 @@ print(json.dumps(rendered, sort_keys=True))
             node_id for node_id, prompt in rendered.items() if sentinel in prompt
         } == consumers
     assert "ERIC-123" in rendered["read-ticket"]
-    assert "not_found" in rendered["report-status"]
+    assert "not_found" in rendered["report-proposal-failure"]
     code_approval = rendered["approve-code-writes"]
     for exact_fact in (
         "ERIC-123-TICKET_SENTINEL",

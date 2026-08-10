@@ -116,6 +116,66 @@ SCHEMAS = {
         },
         ["project"],
     ),
+    "gitlab_create_branch": _schema(
+        "gitlab_create_branch",
+        "Create or reuse one normalized GitLab branch after host approval.",
+        {
+            "project": _PROJECT,
+            "branch": _REF,
+            "source_ref": _REF,
+            "dry_run": {"type": "boolean"},
+        },
+        ["project", "branch"],
+    ),
+    "gitlab_commit_changes": _schema(
+        "gitlab_commit_changes",
+        "Apply one bounded atomic GitLab commit after host approval.",
+        {
+            "project": _PROJECT,
+            "branch": _REF,
+            "commit_message": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "actions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["create", "update", "delete"],
+                        },
+                        "file_path": {**_PATH, "minLength": 1},
+                        "content": {"type": "string", "maxLength": 524288},
+                        "last_commit_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                        },
+                    },
+                    "required": ["action", "file_path"],
+                    "additionalProperties": False,
+                },
+            },
+            "dry_run": {"type": "boolean"},
+        },
+        ["project", "branch", "commit_message", "actions"],
+    ),
+    "gitlab_create_merge_request": _schema(
+        "gitlab_create_merge_request",
+        "Create or reuse one open GitLab merge request after host approval.",
+        {
+            "project": _PROJECT,
+            "source_branch": _REF,
+            "target_branch": _REF,
+            "title": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "description": {"type": "string", "maxLength": 65536},
+            "remove_source_branch": {"type": "boolean"},
+            "squash": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+        },
+        ["project", "source_branch"],
+    ),
 }
 
 
@@ -170,6 +230,32 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 max_include_bytes=values.get("max_include_bytes", 128 * 1024),
                 max_groups=values.get("max_groups", 10),
                 max_variables=values.get("max_variables", 500),
+            )
+        if name == "gitlab_create_branch":
+            return operations.create_branch(
+                values["project"],
+                values["branch"],
+                source_ref=values.get("source_ref"),
+                dry_run=values.get("dry_run", False),
+            )
+        if name == "gitlab_commit_changes":
+            return operations.commit_changes(
+                values["project"],
+                branch=values["branch"],
+                commit_message=values["commit_message"],
+                actions=values["actions"],
+                dry_run=values.get("dry_run", False),
+            )
+        if name == "gitlab_create_merge_request":
+            return operations.create_merge_request(
+                values["project"],
+                source_branch=values["source_branch"],
+                target_branch=values.get("target_branch"),
+                title=values.get("title"),
+                description=values.get("description", ""),
+                remove_source_branch=values.get("remove_source_branch", True),
+                squash=values.get("squash", False),
+                dry_run=values.get("dry_run", False),
             )
         return operations.list_pipelines(
             values["project"],

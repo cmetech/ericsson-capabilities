@@ -8,6 +8,15 @@ from . import tools as gitlab_tools  # noqa: E402
 from .models import GitLabError, SAFE_ERROR_MESSAGES  # noqa: E402
 
 
+_WRITE_TOOLS = frozenset(
+    {
+        "gitlab_create_branch",
+        "gitlab_commit_changes",
+        "gitlab_create_merge_request",
+    }
+)
+
+
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -20,8 +29,19 @@ def _interrupt_authority():
     return is_interrupted
 
 
+def _has_write_admission(admission, tool_name: str) -> bool:
+    try:
+        return (
+            getattr(admission, "approved", None) is True
+            and getattr(admission, "policy", None) == "plugin_approve"
+            and getattr(admission, "tool_name", None) == tool_name
+        )
+    except Exception:
+        return False
+
+
 def register(ctx) -> None:
-    """Register the connector's current read tools under one gated toolset."""
+    """Register the connector's bounded read and approval-gated write tools."""
 
     def available() -> bool:
         try:
@@ -33,6 +53,18 @@ def register(ctx) -> None:
 
     def handler(name):
         def invoke(args: dict, **kwargs) -> str:
+            if name in _WRITE_TOOLS:
+                admission = kwargs.get("tool_admission")
+                if not _has_write_admission(admission, name):
+                    return _json(
+                        {
+                            "success": False,
+                            "error": {
+                                "category": "permission",
+                                "message": SAFE_ERROR_MESSAGES["permission"],
+                            },
+                        }
+                    )
             try:
                 # Resolve the opaque host accessor and its values for this call.
                 # Never retain either object across profile generations.
@@ -87,6 +119,17 @@ def register(ctx) -> None:
                 )
 
         return invoke
+
+    def require_write_approval(tool_name: str, args: dict, **kwargs):
+        if tool_name not in _WRITE_TOOLS:
+            return None
+        return {
+            "action": "approve",
+            "message": "Approve Ericsson GitLab mutation",
+            "rule_key": tool_name,
+        }
+
+    ctx.register_hook("pre_tool_call", require_write_approval)
 
     for name, schema in gitlab_tools.SCHEMAS.items():
         ctx.register_tool(

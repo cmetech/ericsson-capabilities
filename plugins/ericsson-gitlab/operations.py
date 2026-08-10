@@ -5,11 +5,14 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from urllib.parse import quote, unquote, urlsplit
 
 import yaml
+import httpx
 
 if __package__:
     from .client import GitLabClient
@@ -35,6 +38,12 @@ _MAX_CI_VARIABLES = 2000
 _MAX_CI_YAML_NODES = 4096
 _MAX_CI_YAML_DEPTH = 64
 _MAX_CI_YAML_ALIASES = 128
+_MAX_WRITE_ACTIONS = 100
+_MAX_WRITE_BYTES = 512 * 1024
+_MAX_COMMIT_MESSAGE = 4096
+_MAX_MR_TITLE = 1024
+_MAX_MR_DESCRIPTION = 64 * 1024
+_DUPLICATE_MR_MESSAGE = "another open merge request already exists"
 
 
 class _YamlCapacityError(Exception):
@@ -161,6 +170,33 @@ def _project_endpoint(project: str | int) -> str:
     if any(part in {"", ".", ".."} for part in value.split("/")):
         raise GitLabError("invalid_input")
     return quote(value, safe="")
+
+
+def _normalize_branch_name(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_REF
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise GitLabError("invalid_input")
+    normalized = value.strip().lower()
+    normalized = re.sub(r"[\s_]+", "-", normalized)
+    normalized = re.sub(r"[^a-z0-9./-]+", "-", normalized)
+    normalized = re.sub(r"-+", "-", normalized)
+    segments = [segment.strip("-.") for segment in normalized.split("/")]
+    normalized = "/".join(segments)
+    if (
+        not normalized
+        or len(normalized) > _MAX_REF
+        or normalized.startswith("/")
+        or normalized.endswith("/")
+        or "//" in normalized
+        or any(segment in {"", ".", ".."} for segment in normalized.split("/"))
+        or normalized.endswith(".lock")
+    ):
+        raise GitLabError("invalid_input")
+    return normalized
 
 
 class GitLabOperations:
@@ -639,6 +675,560 @@ class GitLabOperations:
             "truncated": pages.truncated,
             "continuation": self._continuation(pages),
         }
+
+    def _write_json(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        deadline: float,
+    ) -> tuple[int, Any]:
+        """Perform exactly one bounded mutating request without retrying."""
+
+        self.client._validate_path(path)
+        self.client._check_cancelled(deadline)
+        try:
+            with self.client._client.stream(
+                method,
+                path,
+                json=dict(payload),
+                timeout=self.client._request_timeout(deadline),
+            ) as response:
+                if 300 <= response.status_code < 400:
+                    raise GitLabError("invalid_remote_data")
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    self.client._check_cancelled(deadline)
+                    if len(body) + len(chunk) > self.client.max_response_bytes:
+                        raise GitLabError("capacity")
+                    body.extend(chunk)
+                if response.status_code >= 400 and response.status_code not in {
+                    400,
+                    409,
+                }:
+                    raise self.client._error_for_status(response.status_code)
+                try:
+                    decoded = json.loads(bytes(body))
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    if response.status_code in {400, 409}:
+                        decoded = None
+                    else:
+                        raise GitLabError("invalid_remote_data") from None
+                return response.status_code, decoded
+        except GitLabError:
+            raise
+        except (httpx.TimeoutException, httpx.TransportError):
+            self.client._check_cancelled(deadline)
+            raise GitLabError("transient") from None
+
+    def _write_project(self, project: str | int, *, deadline: float) -> dict[str, Any]:
+        return self._ci_project(project, deadline=deadline)
+
+    def _branch_result(
+        self,
+        payload: Any,
+        *,
+        project: str | int,
+        branch: str,
+        source_ref: str,
+        created: bool,
+    ) -> dict[str, Any]:
+        item = _as_object(payload)
+        name = item.get("name")
+        commit = item.get("commit")
+        web_url = item.get("web_url")
+        if name != branch or not isinstance(commit, Mapping):
+            raise GitLabError("invalid_remote_data")
+        commit_id = commit.get("id")
+        if not isinstance(commit_id, str) or not commit_id or len(commit_id) > 512:
+            raise GitLabError("invalid_remote_data")
+        _same_origin_url(web_url, self.client.auth.origin)
+        return {
+            "project": str(project),
+            "branch": branch,
+            "source_ref": source_ref,
+            "commit_id": commit_id,
+            "web_url": web_url,
+            "created": created,
+            "reused": not created,
+            "dry_run": False,
+        }
+
+    def create_branch(
+        self,
+        project: str | int,
+        branch: str,
+        *,
+        source_ref: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        branch = _normalize_branch_name(branch)
+        if source_ref is not None:
+            source_ref = _validate_ref(source_ref)
+        if not isinstance(dry_run, bool):
+            raise GitLabError("invalid_input")
+        deadline = self.client.operation_deadline()
+        project_result = self._write_project(project, deadline=deadline)
+        selected_source = source_ref or project_result["default_branch"]
+        if dry_run:
+            return {
+                "project": str(project),
+                "branch": branch,
+                "source_ref": selected_source,
+                "created": False,
+                "reused": False,
+                "dry_run": True,
+            }
+        endpoint = _project_endpoint(project_result["id"])
+        branch_path = (
+            f"/api/v4/projects/{endpoint}/repository/branches/{quote(branch, safe='')}"
+        )
+        try:
+            existing = self.client.get_json(branch_path, deadline=deadline)
+        except GitLabError as exc:
+            if exc.category != "not_found":
+                raise
+        else:
+            return self._branch_result(
+                existing,
+                project=project,
+                branch=branch,
+                source_ref=selected_source,
+                created=False,
+            )
+        status, created_payload = self._write_json(
+            "POST",
+            f"/api/v4/projects/{endpoint}/repository/branches",
+            {"branch": branch, "ref": selected_source},
+            deadline=deadline,
+        )
+        if (
+            status in {400, 409}
+            and "branch already exists"
+            in " ".join(self._remote_messages(created_payload)).lower()
+        ):
+            reconciled = self.client.get_json(branch_path, deadline=deadline)
+            return self._branch_result(
+                reconciled,
+                project=project,
+                branch=branch,
+                source_ref=selected_source,
+                created=False,
+            )
+        if status >= 400:
+            raise self.client._error_for_status(status)
+        if status != 201:
+            raise GitLabError("invalid_remote_data")
+        created_item = _as_object(created_payload)
+        if {"name", "commit", "web_url"}.issubset(created_item):
+            return self._branch_result(
+                created_payload,
+                project=project,
+                branch=branch,
+                source_ref=selected_source,
+                created=True,
+            )
+        if created_item.get("name") != branch:
+            raise GitLabError("invalid_remote_data")
+        reconciled = self.client.get_json(branch_path, deadline=deadline)
+        return self._branch_result(
+            reconciled,
+            project=project,
+            branch=branch,
+            source_ref=selected_source,
+            created=True,
+        )
+
+    @staticmethod
+    def _commit_actions(
+        actions: Any,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        if not isinstance(actions, list) or not actions:
+            raise GitLabError("invalid_input")
+        if len(actions) > _MAX_WRITE_ACTIONS:
+            raise GitLabError("capacity")
+        normalized: list[dict[str, Any]] = []
+        projected: list[dict[str, str]] = []
+        aggregate_bytes = 0
+        seen_paths: set[str] = set()
+        for raw in actions:
+            if not isinstance(raw, Mapping):
+                raise GitLabError("invalid_input")
+            action = raw.get("action")
+            if action not in {"create", "update", "delete"}:
+                raise GitLabError("invalid_input")
+            allowed = {"action", "file_path"}
+            if action in {"create", "update"}:
+                allowed.add("content")
+            if action in {"update", "delete"}:
+                allowed.add("last_commit_id")
+            if set(raw) - allowed:
+                raise GitLabError("invalid_input")
+            path = _validate_path(raw.get("file_path"), allow_empty=False)
+            if path in seen_paths:
+                raise GitLabError("invalid_input")
+            seen_paths.add(path)
+            item: dict[str, Any] = {"action": action, "file_path": path}
+            if action in {"create", "update"}:
+                content = raw.get("content")
+                if not isinstance(content, str):
+                    raise GitLabError("invalid_input")
+                aggregate_bytes += len(content.encode("utf-8"))
+                if aggregate_bytes > _MAX_WRITE_BYTES:
+                    raise GitLabError("capacity")
+                item["content"] = content
+            if "last_commit_id" in raw:
+                item["last_commit_id"] = _bounded_string(raw["last_commit_id"], 512)
+            normalized.append(item)
+            projected.append({"action": action, "file_path": path})
+        return normalized, projected
+
+    def _commit_result(
+        self,
+        payload: Any,
+        *,
+        project: str | int,
+        branch: str,
+        commit_message: str,
+        actions: list[dict[str, str]],
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        if dry_run:
+            return {
+                "project": str(project),
+                "branch": branch,
+                "commit_message": commit_message,
+                "action_count": len(actions),
+                "actions": actions,
+                "dry_run": True,
+            }
+        item = _as_object(payload)
+        commit_id = item.get("id")
+        short_id = item.get("short_id")
+        title = item.get("title")
+        web_url = item.get("web_url")
+        expected_title = commit_message.splitlines()[0]
+        if (
+            not isinstance(commit_id, str)
+            or not commit_id
+            or len(commit_id) > 512
+            or not isinstance(short_id, str)
+            or not short_id
+            or len(short_id) > 64
+            or title != expected_title
+        ):
+            raise GitLabError("invalid_remote_data")
+        _same_origin_url(web_url, self.client.auth.origin)
+        return {
+            "project": str(project),
+            "branch": branch,
+            "commit_id": commit_id,
+            "short_id": short_id,
+            "title": title,
+            "web_url": web_url,
+            "action_count": len(actions),
+            "actions": actions,
+            "dry_run": False,
+        }
+
+    @staticmethod
+    def _remote_messages(payload: Any) -> list[str]:
+        if not isinstance(payload, Mapping):
+            return []
+        message = payload.get("message")
+        if isinstance(message, str):
+            return [message[:4096]]
+        if isinstance(message, list) and len(message) <= 20:
+            return [value[:4096] for value in message if isinstance(value, str)]
+        if isinstance(message, Mapping) and len(message) <= 20:
+            values: list[str] = []
+            for nested in message.values():
+                if isinstance(nested, str):
+                    values.append(nested[:4096])
+                elif isinstance(nested, list) and len(nested) <= 20:
+                    values.extend(
+                        value[:4096] for value in nested if isinstance(value, str)
+                    )
+            return values
+        return []
+
+    def commit_changes(
+        self,
+        project: str | int,
+        *,
+        branch: str,
+        commit_message: str,
+        actions: Any,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        endpoint = _project_endpoint(project)
+        branch = _validate_ref(branch)
+        commit_message = _bounded_string(commit_message, _MAX_COMMIT_MESSAGE)
+        normalized, projected = self._commit_actions(actions)
+        if not isinstance(dry_run, bool):
+            raise GitLabError("invalid_input")
+        if dry_run:
+            return self._commit_result(
+                {},
+                project=project,
+                branch=branch,
+                commit_message=commit_message,
+                actions=projected,
+                dry_run=True,
+            )
+        deadline = self.client.operation_deadline()
+        status, payload = self._write_json(
+            "POST",
+            f"/api/v4/projects/{endpoint}/repository/commits",
+            {
+                "branch": branch,
+                "commit_message": commit_message,
+                "actions": normalized,
+            },
+            deadline=deadline,
+        )
+        if status >= 400:
+            messages = " ".join(self._remote_messages(payload)).lower()
+            if status in {400, 409} and "last_commit_id" in messages:
+                raise GitLabError("conflict")
+            raise self.client._error_for_status(status)
+        if status != 201:
+            raise GitLabError("invalid_remote_data")
+        item = _as_object(payload)
+        if {"id", "short_id", "title", "web_url"}.issubset(item):
+            return self._commit_result(
+                payload,
+                project=project,
+                branch=branch,
+                commit_message=commit_message,
+                actions=projected,
+            )
+        commit_id = item.get("id")
+        expected_title = commit_message.splitlines()[0]
+        if (
+            not isinstance(commit_id, str)
+            or not commit_id
+            or len(commit_id) > 512
+            or ("title" in item and item.get("title") != expected_title)
+        ):
+            raise GitLabError("invalid_remote_data") from None
+        reconciled = self.client.get_json(
+            f"/api/v4/projects/{endpoint}/repository/commits/"
+            f"{quote(commit_id, safe='')}",
+            deadline=deadline,
+        )
+        return self._commit_result(
+            reconciled,
+            project=project,
+            branch=branch,
+            commit_message=commit_message,
+            actions=projected,
+        )
+
+    def _merge_request_result(
+        self,
+        payload: Any,
+        *,
+        project: str | int,
+        project_id: int,
+        source_branch: str,
+        target_branch: str,
+        created: bool,
+        expected_title: str | None = None,
+    ) -> dict[str, Any]:
+        item = _as_object(payload)
+        iid = item.get("iid")
+        remote_project_id = item.get("project_id")
+        title = item.get("title")
+        state = item.get("state")
+        source = item.get("source_branch")
+        target = item.get("target_branch")
+        web_url = item.get("web_url")
+        if (
+            isinstance(iid, bool)
+            or not isinstance(iid, int)
+            or iid <= 0
+            or isinstance(remote_project_id, bool)
+            or remote_project_id != project_id
+            or not isinstance(title, str)
+            or not title
+            or len(title) > _MAX_MR_TITLE
+            or (expected_title is not None and title != expected_title)
+            or state != "opened"
+            or source != source_branch
+            or target != target_branch
+        ):
+            raise GitLabError("invalid_remote_data")
+        _same_origin_url(web_url, self.client.auth.origin)
+        return {
+            "project": str(project),
+            "iid": iid,
+            "title": title,
+            "state": state,
+            "source_branch": source,
+            "target_branch": target,
+            "web_url": web_url,
+            "created": created,
+            "reused": not created,
+            "dry_run": False,
+        }
+
+    def _existing_merge_request(
+        self,
+        project: str | int,
+        project_id: int,
+        endpoint: str,
+        source_branch: str,
+        target_branch: str,
+        *,
+        deadline: float,
+    ) -> dict[str, Any]:
+        payload = _as_list(
+            self.client.get_json(
+                f"/api/v4/projects/{endpoint}/merge_requests",
+                params={
+                    "scope": "all",
+                    "state": "opened",
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                },
+                deadline=deadline,
+            )
+        )
+        if len(payload) != 1:
+            raise GitLabError("conflict")
+        try:
+            return self._merge_request_result(
+                payload[0],
+                project=project,
+                project_id=project_id,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                created=False,
+            )
+        except GitLabError:
+            raise GitLabError("conflict") from None
+
+    def create_merge_request(
+        self,
+        project: str | int,
+        *,
+        source_branch: str,
+        target_branch: str | None = None,
+        title: str | None = None,
+        description: str = "",
+        remove_source_branch: bool = True,
+        squash: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        source_branch = _validate_ref(source_branch)
+        if target_branch is not None:
+            target_branch = _validate_ref(target_branch)
+            if target_branch == source_branch:
+                raise GitLabError("invalid_input")
+        if title is not None:
+            title = _bounded_string(title, _MAX_MR_TITLE)
+        description = _bounded_string(
+            description, _MAX_MR_DESCRIPTION, allow_empty=True
+        )
+        if not all(
+            isinstance(value, bool) for value in (remove_source_branch, squash, dry_run)
+        ):
+            raise GitLabError("invalid_input")
+        deadline = self.client.operation_deadline()
+        project_result = self._write_project(project, deadline=deadline)
+        selected_target = target_branch or project_result["default_branch"]
+        if selected_target == source_branch:
+            raise GitLabError("invalid_input")
+        selected_title = title or re.sub(r"[-_/]+", " ", source_branch).capitalize()
+        if not selected_title or len(selected_title) > _MAX_MR_TITLE:
+            raise GitLabError("invalid_input")
+        if dry_run:
+            return {
+                "project": str(project),
+                "source_branch": source_branch,
+                "target_branch": selected_target,
+                "title": selected_title,
+                "description_present": bool(description),
+                "remove_source_branch": remove_source_branch,
+                "squash": squash,
+                "created": False,
+                "reused": False,
+                "dry_run": True,
+            }
+        endpoint = _project_endpoint(project_result["id"])
+        status, payload = self._write_json(
+            "POST",
+            f"/api/v4/projects/{endpoint}/merge_requests",
+            {
+                "source_branch": source_branch,
+                "target_branch": selected_target,
+                "title": selected_title,
+                "description": description,
+                "remove_source_branch": remove_source_branch,
+                "squash": squash,
+            },
+            deadline=deadline,
+        )
+        if status in {400, 409}:
+            messages = " ".join(self._remote_messages(payload)).lower()
+            if _DUPLICATE_MR_MESSAGE in messages:
+                return self._existing_merge_request(
+                    project,
+                    project_result["id"],
+                    endpoint,
+                    source_branch,
+                    selected_target,
+                    deadline=deadline,
+                )
+            raise self.client._error_for_status(status)
+        if status != 201:
+            raise GitLabError("invalid_remote_data")
+        item = _as_object(payload)
+        if {
+            "iid",
+            "project_id",
+            "title",
+            "state",
+            "source_branch",
+            "target_branch",
+            "web_url",
+        }.issubset(item):
+            return self._merge_request_result(
+                payload,
+                project=project,
+                project_id=project_result["id"],
+                source_branch=source_branch,
+                target_branch=selected_target,
+                created=True,
+                expected_title=selected_title,
+            )
+        iid = item.get("iid")
+        if (
+            isinstance(iid, bool)
+            or not isinstance(iid, int)
+            or iid <= 0
+            or ("project_id" in item and item.get("project_id") != project_result["id"])
+            or ("source_branch" in item and item.get("source_branch") != source_branch)
+            or (
+                "target_branch" in item and item.get("target_branch") != selected_target
+            )
+        ):
+            raise GitLabError("invalid_remote_data") from None
+        reconciled = self.client.get_json(
+            f"/api/v4/projects/{endpoint}/merge_requests/{iid}",
+            deadline=deadline,
+        )
+        return self._merge_request_result(
+            reconciled,
+            project=project,
+            project_id=project_result["id"],
+            source_branch=source_branch,
+            target_branch=selected_target,
+            created=True,
+            expected_title=selected_title,
+        )
 
     @staticmethod
     def _add_warning(warnings: list[str], code: str) -> None:

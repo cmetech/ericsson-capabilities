@@ -23,6 +23,9 @@ EXPECTED_TOOLS = {
     "gitlab_read_merge_request",
     "gitlab_list_pipelines",
     "gitlab_inspect_ci",
+    "gitlab_create_branch",
+    "gitlab_commit_changes",
+    "gitlab_create_merge_request",
 }
 
 
@@ -79,8 +82,11 @@ class Context:
     def register_tool(self, **registration):
         self.registrations[registration["name"]] = registration
 
+    def register_hook(self, name, callback):
+        pass
 
-def test_descriptor_is_standalone_static_and_declares_only_current_read_tools():
+
+def test_descriptor_is_standalone_static_and_declares_exact_current_tools():
     # GL-AUTH-03/GL-REVIEW-03 legacy: ericsson_gitlab/README.md:Requirements; ericsson_gitlab/__init__.py:__all__
     _load_plugin()
     manifest = yaml.safe_load((PLUGIN / "plugin.yaml").read_text(encoding="utf-8"))
@@ -107,7 +113,7 @@ def test_descriptor_is_standalone_static_and_declares_only_current_read_tools():
     assert "enabled" not in descriptor
 
 
-def test_register_exposes_exact_six_json_native_bounded_schemas():
+def test_register_exposes_exact_nine_json_native_bounded_schemas():
     # GL-READ-07/08 legacy: gitlab_file_reader.py:read_files
     plugin = _load_plugin()
     context = Context()
@@ -135,7 +141,18 @@ def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
     plugin.register(context)
 
     for name in sorted(plugin.gitlab_tools.SCHEMAS):
-        result = json.loads(context.registrations[name]["handler"]({}))
+        kwargs = {}
+        if name in {
+            "gitlab_create_branch",
+            "gitlab_commit_changes",
+            "gitlab_create_merge_request",
+        }:
+            kwargs["tool_admission"] = types.SimpleNamespace(
+                approved=True,
+                policy="plugin_approve",
+                tool_name=name,
+            )
+        result = json.loads(context.registrations[name]["handler"]({}, **kwargs))
         assert result == {"success": True, "result": {"invoked": name}}
     assert invoked == sorted(plugin.gitlab_tools.SCHEMAS)
 

@@ -163,6 +163,49 @@ def test_all_and_recent_keep_first_seen_live_pipeline_refs(branch_spec):
     assert ("updated_after" in discovery_request) is (branch_spec == "RECENT")
 
 
+def test_branch_selection_exposes_source_distinguishable_mid_page_and_jump_continuations():
+    # GL-CI-10 legacy: gitlab_cicd_collector.py:_fetch_pipeline_branches/_fetch_live_branch_set
+    operations = _operations()
+
+    def pipelines(request):
+        params = dict(request.url.params)
+        if params.get("per_page") == "1" and "updated_after" in params:
+            return httpx.Response(200, headers={"X-Total": "11"}, json=[])
+        if params.get("per_page") == "1":
+            return httpx.Response(200, json=[{"id": 11, "status": "success"}])
+        return httpx.Response(
+            200,
+            headers={"X-Next-Page": ""},
+            json=[{"id": index, "ref": f"branch-{index}"} for index in range(11)],
+        )
+
+    with respx.mock:
+        _mock_project()
+        respx.get(PIPELINES_API).mock(side_effect=pipelines)
+        respx.get(BRANCHES_API).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": "7"},
+                json=[{"name": "branch-0"}],
+            )
+        )
+        _mock_ci_file("branch-0")
+        result = operations.inspect_ci(
+            "42",
+            branch_spec="ALL",
+            collect_variables=False,
+            max_branches=1,
+            max_pages=2,
+        )
+    assert result["branch_selection"] == {
+        "truncated": True,
+        "continuations": [
+            {"source": "pipelines", "page": 1, "offset": 10},
+            {"source": "live_branches", "next_page": 7},
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     ("total", "status"),
     [(None, "missing"), ("not-a-count", "malformed")],
@@ -342,6 +385,29 @@ def test_include_count_and_cycle_bounds_are_truthful_and_do_not_recurse():
     assert ci_file["includes"][0]["status"] == "cycle"
     assert ci_file["includes_truncated"] is True
     assert "include_limit_reached" in result["warnings"]
+
+
+@pytest.mark.parametrize("include_project", ["42", "division/platform/team/repo"])
+def test_equivalent_current_project_includes_are_canonical_cycles(include_project):
+    # GL-CI-04/10 legacy: gitlab_cicd_collector.py:_resolve_includes_shallow
+    operations = _operations()
+    root = (
+        "include:\n"
+        f"  - project: {include_project}\n"
+        "    file: /.gitlab-ci.yml\n"
+        "    ref: main\n"
+    )
+    with respx.mock:
+        _mock_project()
+        _mock_pipeline_window()
+        root_route = _mock_ci_file("main", root)
+        result = operations.inspect_ci(
+            "42", branch_spec="main", collect_variables=False
+        )
+    include = result["branches"][0]["ci_file"]["includes"][0]
+    assert include["status"] == "cycle"
+    assert include["project"] == "division/platform/team/repo"
+    assert root_route.call_count == 1
 
 
 def test_include_bytes_are_one_aggregate_operation_budget():
@@ -575,6 +641,44 @@ def test_project_and_ancestor_group_variables_are_metadata_only_deduplicated_and
     assert result["variables"]["groups_truncated"] is True
 
 
+def test_two_denied_ancestor_variable_reads_keep_fixed_identity_records():
+    # GL-CI-09 legacy: gitlab_cicd_collector.py:_fetch_group_variables
+    operations = _operations(max_retries=0)
+    with respx.mock:
+        _mock_project()
+        _mock_pipeline_window()
+        _mock_ci_file("main")
+        respx.get(f"{PROJECT_API}/variables").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+        )
+        for ancestor, group_id in (("division", 10), ("division/platform", 11)):
+            encoded = ancestor.replace("/", "%2F")
+            respx.get(f"{ORIGIN}/api/v4/groups/{encoded}").mock(
+                return_value=httpx.Response(200, json={"id": group_id})
+            )
+            respx.get(f"{ORIGIN}/api/v4/groups/{group_id}/variables").mock(
+                return_value=httpx.Response(403, text=f"private-{ancestor}")
+            )
+        result = operations.inspect_ci(
+            "42", branch_spec="main", max_groups=2, max_variables=10
+        )
+    assert result["variables"]["permission_records"] == [
+        {
+            "category": "permission",
+            "scope": "group",
+            "source": "division",
+            "ancestor": "division",
+        },
+        {
+            "category": "permission",
+            "scope": "group",
+            "source": "division/platform",
+            "ancestor": "division/platform",
+        },
+    ]
+    assert "private-" not in repr(result)
+
+
 def test_one_normalized_result_is_not_cached_and_partial_failures_do_not_abort():
     # GL-CI-11 legacy: gitlab_cicd_collector.py:_collect_all/get_combined and six output methods
     operations = _operations()
@@ -590,6 +694,7 @@ def test_one_normalized_result_is_not_cached_and_partial_failures_do_not_abort()
     assert set(first) == {
         "project",
         "branch_spec",
+        "branch_selection",
         "lookback_days",
         "pipeline_window",
         "branches",

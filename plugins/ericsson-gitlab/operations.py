@@ -787,24 +787,24 @@ class GitLabOperations:
         max_pages: int,
         max_branches: int,
         warnings: list[str],
-    ) -> tuple[list[str], bool]:
+    ) -> tuple[list[str], bool, list[dict[str, Any]]]:
         mode = branch_spec.upper()
         if mode not in {"ALL", "RECENT"}:
-            return [_validate_ref(branch_spec)], False
+            return [_validate_ref(branch_spec)], False, []
         pipeline_params: dict[str, Any] = {
             "order_by": "updated_at",
             "sort": "desc",
         }
         if mode == "RECENT":
             pipeline_params["updated_after"] = start.isoformat()
-        pipeline_items, pipeline_truncated, _pipeline_continuation = self._ci_pages(
+        pipeline_items, pipeline_truncated, pipeline_continuation = self._ci_pages(
             f"/api/v4/projects/{project_id}/pipelines",
             params=pipeline_params,
             deadline=deadline,
             max_pages=max_pages,
             max_items=min(_MAX_PIPELINES, max_branches * 10),
         )
-        live_items, live_truncated, _live_continuation = self._ci_pages(
+        live_items, live_truncated, live_continuation = self._ci_pages(
             f"/api/v4/projects/{project_id}/repository/branches",
             params={},
             deadline=deadline,
@@ -828,7 +828,16 @@ class GitLabOperations:
             self._add_warning(warnings, "live_branch_inventory_truncated")
         if len(selected) > max_branches:
             self._add_warning(warnings, "branch_limit_reached")
-        return selected[:max_branches], truncated
+        continuations: list[dict[str, Any]] = []
+        if pipeline_continuation is not None:
+            continuations.append({"source": "pipelines", **pipeline_continuation})
+        if live_continuation is not None:
+            continuations.append({"source": "live_branches", **live_continuation})
+        if len(selected) > max_branches:
+            continuations.append(
+                {"source": "selected_branches", "offset": max_branches}
+            )
+        return selected[:max_branches], truncated, continuations
 
     def _ci_text_file(
         self,
@@ -1001,8 +1010,16 @@ class GitLabOperations:
                     include_project, bool
                 ):
                     raise GitLabError("invalid_remote_data")
-                _project_endpoint(include_project)
-                identity_project = str(include_project)
+                include_endpoint = _project_endpoint(include_project)
+                current_endpoints = {
+                    str(project_id),
+                    quote(project_path, safe=""),
+                }
+                if include_endpoint in current_endpoints:
+                    include_project = project_id
+                    identity_project = project_path
+                else:
+                    identity_project = str(include_project)
                 raw_ref = spec.get("ref", "main")
                 if (
                     raw_ref is None
@@ -1192,6 +1209,7 @@ class GitLabOperations:
         identities: set[tuple[str, str, str, str]] = set()
         warnings: list[str] = []
         continuations: list[dict[str, Any]] = []
+        permission_records: list[dict[str, Any]] = []
         truncated = False
         project_source = project["path_with_namespace"]
         try:
@@ -1253,6 +1271,15 @@ class GitLabOperations:
             except GitLabError as exc:
                 if exc.category in {"cancelled", "deadline"}:
                     raise
+                if exc.category == "permission":
+                    permission_records.append(
+                        {
+                            "category": "permission",
+                            "scope": "group",
+                            "source": ancestor,
+                            "ancestor": ancestor,
+                        }
+                    )
                 self._add_warning(
                     warnings,
                     "group_variable_permission"
@@ -1265,6 +1292,7 @@ class GitLabOperations:
             "truncated": truncated,
             "groups_truncated": groups_truncated,
             "continuations": continuations,
+            "permission_records": permission_records,
             "warnings": warnings,
         }
 
@@ -1300,15 +1328,18 @@ class GitLabOperations:
         pipeline_window = self._pipeline_window(
             project_result["id"], start=start, end=now, deadline=deadline
         )
-        branch_names, truncated = self._select_ci_branches(
-            project_result["id"],
-            branch_spec,
-            start=start,
-            deadline=deadline,
-            max_pages=max_pages,
-            max_branches=max_branches,
-            warnings=warnings,
+        branch_names, branch_selection_truncated, branch_continuations = (
+            self._select_ci_branches(
+                project_result["id"],
+                branch_spec,
+                start=start,
+                deadline=deadline,
+                max_pages=max_pages,
+                max_branches=max_branches,
+                warnings=warnings,
+            )
         )
+        truncated = branch_selection_truncated
         branches: list[dict[str, Any]] = []
         include_budget = {"count": max_includes, "bytes": max_include_bytes}
         for branch in branch_names:
@@ -1378,6 +1409,7 @@ class GitLabOperations:
                 "truncated": False,
                 "groups_truncated": False,
                 "continuations": [],
+                "permission_records": [],
                 "warnings": [],
             }
         )
@@ -1387,6 +1419,10 @@ class GitLabOperations:
             "branch_spec": branch_spec.upper()
             if branch_spec.upper() in {"ALL", "RECENT"}
             else branch_spec,
+            "branch_selection": {
+                "truncated": branch_selection_truncated,
+                "continuations": branch_continuations,
+            },
             "lookback_days": lookback_days,
             "pipeline_window": pipeline_window,
             "branches": branches,

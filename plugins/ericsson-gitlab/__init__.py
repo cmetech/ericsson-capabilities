@@ -21,7 +21,7 @@ def _interrupt_authority():
 
 
 def register(ctx) -> None:
-    """Register exactly the five Task 8 reads under one service-gated toolset."""
+    """Register the connector's current read tools under one gated toolset."""
 
     def available() -> bool:
         try:
@@ -88,19 +88,12 @@ def register(ctx) -> None:
 
         return invoke
 
-    handlers = {
-        "gitlab_resolve_project": handler("gitlab_resolve_project"),
-        "gitlab_list_repository_tree": handler("gitlab_list_repository_tree"),
-        "gitlab_read_file": handler("gitlab_read_file"),
-        "gitlab_read_merge_request": handler("gitlab_read_merge_request"),
-        "gitlab_list_pipelines": handler("gitlab_list_pipelines"),
-    }
     for name, schema in gitlab_tools.SCHEMAS.items():
         ctx.register_tool(
             name=name,
             toolset="ericsson-gitlab",
             schema=schema,
-            handler=handlers[name],
+            handler=handler(name),
             check_fn=available,
             emoji="🦊",
         )

@@ -94,6 +94,28 @@ SCHEMAS = {
         },
         ["project"],
     ),
+    "gitlab_inspect_ci": _schema(
+        "gitlab_inspect_ci",
+        "Inspect bounded GitLab pipeline, CI include, and variable metadata "
+        "without exposing variable values or evaluating CI configuration.",
+        {
+            "project": _PROJECT,
+            "branch_spec": _REF,
+            "lookback_days": {"type": "integer", "minimum": 1, "maximum": 365},
+            "collect_variables": {"type": "boolean"},
+            "max_branches": {"type": "integer", "minimum": 1, "maximum": 100},
+            "max_pages": {"type": "integer", "minimum": 1, "maximum": 10},
+            "max_includes": {"type": "integer", "minimum": 1, "maximum": 100},
+            "max_include_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 524288,
+            },
+            "max_groups": {"type": "integer", "minimum": 1, "maximum": 20},
+            "max_variables": {"type": "integer", "minimum": 1, "maximum": 2000},
+        },
+        ["project"],
+    ),
 }
 
 
@@ -136,6 +158,19 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             )
         if name == "gitlab_read_merge_request":
             return operations.read_merge_request(values["project"], values["iid"])
+        if name == "gitlab_inspect_ci":
+            return operations.inspect_ci(
+                values["project"],
+                branch_spec=values.get("branch_spec", "RECENT"),
+                lookback_days=values.get("lookback_days", 10),
+                collect_variables=values.get("collect_variables", True),
+                max_branches=values.get("max_branches", 20),
+                max_pages=values.get("max_pages", 5),
+                max_includes=values.get("max_includes", 20),
+                max_include_bytes=values.get("max_include_bytes", 128 * 1024),
+                max_groups=values.get("max_groups", 10),
+                max_variables=values.get("max_variables", 500),
+            )
         return operations.list_pipelines(
             values["project"],
             ref=values.get("ref"),

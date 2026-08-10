@@ -10,3 +10,4 @@ provides_tools:
   - gitlab_read_file
   - gitlab_read_merge_request
   - gitlab_list_pipelines
+  - gitlab_inspect_ci

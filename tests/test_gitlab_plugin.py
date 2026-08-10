@@ -22,6 +22,7 @@ EXPECTED_TOOLS = {
     "gitlab_read_file",
     "gitlab_read_merge_request",
     "gitlab_list_pipelines",
+    "gitlab_inspect_ci",
 }
 
 
@@ -106,7 +107,7 @@ def test_descriptor_is_standalone_static_and_declares_only_current_read_tools():
     assert "enabled" not in descriptor
 
 
-def test_register_exposes_exact_five_json_native_bounded_schemas():
+def test_register_exposes_exact_six_json_native_bounded_schemas():
     # GL-READ-07/08 legacy: gitlab_file_reader.py:read_files
     plugin = _load_plugin()
     context = Context()
@@ -118,6 +119,25 @@ def test_register_exposes_exact_five_json_native_bounded_schemas():
         assert schema["name"] == name
         assert schema["parameters"]["type"] == "object"
         assert schema["parameters"]["additionalProperties"] is False
+
+
+def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
+    # GL-CI-11 replacement: gitlab_cicd_collector.py:_collect_all and output methods
+    plugin = _load_plugin()
+    invoked = []
+
+    def invoke(name, args, configuration, **options):
+        invoked.append(name)
+        return {"invoked": name}
+
+    monkeypatch.setattr(plugin.gitlab_tools, "invoke", invoke)
+    context = Context()
+    plugin.register(context)
+
+    for name in sorted(plugin.gitlab_tools.SCHEMAS):
+        result = json.loads(context.registrations[name]["handler"]({}))
+        assert result == {"success": True, "result": {"invoked": name}}
+    assert invoked == sorted(plugin.gitlab_tools.SCHEMAS)
 
 
 def test_handler_resolves_fresh_host_configuration_on_every_invocation_and_never_accepts_pat():

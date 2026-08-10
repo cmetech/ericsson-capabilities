@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import base64
 import binascii
-from typing import Any, Callable, Iterable, Mapping
+import hashlib
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Mapping
 from urllib.parse import quote, unquote, urlsplit
+
+import yaml
 
 if __package__:
     from .client import GitLabClient
@@ -22,6 +26,45 @@ _MAX_PATH = 4096
 _MAX_TREE_ITEMS = 2000
 _MAX_PIPELINES = 500
 _MAX_FILE_BYTES = 512 * 1024
+_MAX_CI_BRANCHES = 100
+_MAX_CI_PAGES = 10
+_MAX_CI_INCLUDES = 100
+_MAX_CI_INCLUDE_BYTES = 512 * 1024
+_MAX_CI_GROUPS = 20
+_MAX_CI_VARIABLES = 2000
+_MAX_CI_YAML_NODES = 4096
+_MAX_CI_YAML_DEPTH = 64
+_MAX_CI_YAML_ALIASES = 128
+
+
+class _YamlCapacityError(Exception):
+    """Raised before a CI YAML document can exhaust local parser capacity."""
+
+
+class _BoundedComposeLoader(yaml.SafeLoader):
+    """Compose YAML nodes without constructing tagged application objects."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._node_count = 0
+        self._depth = 0
+        self._alias_count = 0
+
+    def compose_node(self, parent: Any, index: Any) -> yaml.nodes.Node:
+        self._node_count += 1
+        if self._node_count > _MAX_CI_YAML_NODES:
+            raise _YamlCapacityError
+        if self.check_event(yaml.events.AliasEvent):
+            self._alias_count += 1
+            if self._alias_count > _MAX_CI_YAML_ALIASES:
+                raise _YamlCapacityError
+        self._depth += 1
+        if self._depth > _MAX_CI_YAML_DEPTH:
+            raise _YamlCapacityError
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._depth -= 1
 
 
 def _bounded_string(value: Any, maximum: int, *, allow_empty: bool = False) -> str:
@@ -64,7 +107,11 @@ def _validate_remote_ref(ref: Any) -> str:
 
 
 def _positive_bound(value: int, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= maximum
+    ):
         raise GitLabError("invalid_input")
     return value
 
@@ -127,7 +174,11 @@ class GitLabOperations:
         if value.isdigit():
             return {"project": str(int(value)), "link_kind": "root", "link_suffix": ""}
         if not value.startswith(("http://", "https://")):
-            return {"project": value.removesuffix(".git"), "link_kind": "root", "link_suffix": ""}
+            return {
+                "project": value.removesuffix(".git"),
+                "link_kind": "root",
+                "link_suffix": "",
+            }
 
         parsed = urlsplit(value)
         configured = urlsplit(self.client.auth.origin)
@@ -221,7 +272,9 @@ class GitLabOperations:
         }
         return result
 
-    def _list_named_refs(self, project_id: int, kind: str, *, deadline: float) -> list[str]:
+    def _list_named_refs(
+        self, project_id: int, kind: str, *, deadline: float
+    ) -> list[str]:
         refs: list[str] = []
         page = 1
         while page <= self.client.max_ref_pages:
@@ -263,7 +316,9 @@ class GitLabOperations:
         suffix = _bounded_string(suffix, _MAX_PATH + _MAX_REF)
         refs = self._list_named_refs(project_id, "branches", deadline=deadline)
         refs.extend(self._list_named_refs(project_id, "tags", deadline=deadline))
-        matches = [name for name in refs if suffix == name or suffix.startswith(name + "/")]
+        matches = [
+            name for name in refs if suffix == name or suffix.startswith(name + "/")
+        ]
         if matches:
             selected = max(matches, key=lambda item: (len(item), item))
         else:
@@ -274,7 +329,7 @@ class GitLabOperations:
                 f"/api/v4/projects/{project_id}/repository/commits/{encoded}",
                 deadline=deadline,
             )
-        remainder = suffix[len(selected):].lstrip("/")
+        remainder = suffix[len(selected) :].lstrip("/")
         return selected, _validate_path(remainder, allow_empty=True)
 
     def _paginate(
@@ -397,7 +452,9 @@ class GitLabOperations:
                 params={"ref": ref},
             )
         )
-        if payload.get("encoding") != "base64" or not isinstance(payload.get("content"), str):
+        if payload.get("encoding") != "base64" or not isinstance(
+            payload.get("content"), str
+        ):
             raise GitLabError("invalid_remote_data")
         declared_size = payload.get("size")
         if (
@@ -420,7 +477,9 @@ class GitLabOperations:
             "ref": ref,
             "path": file_path,
             "size": len(decoded),
-            "blob_id": payload.get("blob_id") if isinstance(payload.get("blob_id"), str) else None,
+            "blob_id": payload.get("blob_id")
+            if isinstance(payload.get("blob_id"), str)
+            else None,
         }
         diagnostic = None
         if b"\x00" in decoded:
@@ -516,7 +575,10 @@ class GitLabOperations:
         if result["iid"] != iid:
             raise GitLabError("invalid_remote_data")
         for field in ("title", "state", "source_branch", "target_branch", "web_url"):
-            if not isinstance(result[field], str) or len(result[field]) > _MAX_PROJECT_REFERENCE:
+            if (
+                not isinstance(result[field], str)
+                or len(result[field]) > _MAX_PROJECT_REFERENCE
+            ):
                 raise GitLabError("invalid_remote_data")
         _same_origin_url(result["web_url"], self.client.auth.origin)
         return result
@@ -556,8 +618,7 @@ class GitLabOperations:
             ):
                 value = item.get(field)
                 if value is not None and (
-                    not isinstance(value, str)
-                    or len(value) > _MAX_PROJECT_REFERENCE
+                    not isinstance(value, str) or len(value) > _MAX_PROJECT_REFERENCE
                 ):
                     raise GitLabError("invalid_remote_data")
                 projected[field] = value
@@ -577,4 +638,759 @@ class GitLabOperations:
             "count": len(pages.items),
             "truncated": pages.truncated,
             "continuation": self._continuation(pages),
+        }
+
+    @staticmethod
+    def _add_warning(warnings: list[str], code: str) -> None:
+        if code not in warnings:
+            warnings.append(code)
+
+    def _ci_project(self, project: str | int, *, deadline: float) -> dict[str, Any]:
+        endpoint = _project_endpoint(project)
+        payload = _as_object(
+            self.client.get_json(f"/api/v4/projects/{endpoint}", deadline=deadline)
+        )
+        project_id = payload.get("id")
+        path = payload.get("path_with_namespace")
+        name = payload.get("name")
+        web_url = payload.get("web_url")
+        namespace_value = payload.get("namespace")
+        namespace = (
+            namespace_value.get("full_path")
+            if isinstance(namespace_value, Mapping)
+            else None
+        )
+        if (
+            isinstance(project_id, bool)
+            or not isinstance(project_id, int)
+            or project_id <= 0
+            or not isinstance(path, str)
+            or "/" not in path
+            or len(path) > _MAX_PROJECT_SLUG
+            or not isinstance(name, str)
+            or len(name) > 512
+            or not isinstance(namespace, str)
+            or not namespace
+            or len(namespace) > _MAX_PROJECT_SLUG
+        ):
+            raise GitLabError("invalid_remote_data")
+        _same_origin_url(web_url, self.client.auth.origin)
+        default = payload.get("default_branch")
+        fallback = default is None or default == ""
+        if not fallback and not isinstance(default, str):
+            raise GitLabError("invalid_remote_data")
+        default_branch = "main" if fallback else _validate_remote_ref(default)
+        return {
+            "id": project_id,
+            "name": name,
+            "path_with_namespace": path,
+            "namespace": namespace,
+            "default_branch": default_branch,
+            "default_branch_fallback": fallback,
+            "web_url": f"{self.client.auth.origin}/{quote(path, safe='/')}",
+        }
+
+    def _ci_pages(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, Any],
+        deadline: float,
+        max_pages: int,
+        max_items: int,
+    ) -> tuple[list[Mapping[str, Any]], bool, dict[str, int] | None]:
+        items: list[Mapping[str, Any]] = []
+        page = 1
+        while page <= max_pages:
+            query = dict(params)
+            query.update({"per_page": 100, "page": page})
+            payload, headers = self.client.get_json_page(
+                path, params=query, deadline=deadline
+            )
+            values = _as_list(payload)
+            for offset, raw in enumerate(values):
+                if len(items) >= max_items:
+                    return items, True, {"page": page, "offset": offset}
+                items.append(_as_object(raw))
+            next_header = str(headers.get("x-next-page", "")).strip()
+            if not next_header and len(values) < 100:
+                return items, False, None
+            candidate = page + 1
+            if next_header:
+                try:
+                    candidate = int(next_header)
+                except ValueError:
+                    raise GitLabError("invalid_remote_data") from None
+                if candidate <= page:
+                    raise GitLabError("invalid_remote_data")
+            if candidate > max_pages:
+                return items, True, {"next_page": candidate}
+            page = candidate
+        return items, False, None
+
+    def _pipeline_window(
+        self,
+        project_id: int,
+        *,
+        start: datetime,
+        end: datetime,
+        deadline: float,
+    ) -> dict[str, Any]:
+        path = f"/api/v4/projects/{project_id}/pipelines"
+        _body, count_headers = self.client.get_json_page(
+            path,
+            params={"updated_after": start.isoformat(), "per_page": 1},
+            deadline=deadline,
+        )
+        count_header = count_headers.get("x-total")
+        if count_header is None or str(count_header) == "":
+            count = None
+            count_status = "missing"
+        elif str(count_header).isdigit() and len(str(count_header)) <= 10:
+            count = int(str(count_header))
+            count_status = "reported"
+        else:
+            count = None
+            count_status = "malformed"
+        latest_payload = _as_list(
+            self.client.get_json(
+                path,
+                params={"per_page": 1, "order_by": "updated_at", "sort": "desc"},
+                deadline=deadline,
+            )
+        )
+        latest_status = None
+        if latest_payload:
+            latest = _as_object(latest_payload[0])
+            latest_status = latest.get("status")
+            if (
+                not isinstance(latest_status, str)
+                or not latest_status
+                or len(latest_status) > 64
+            ):
+                raise GitLabError("invalid_remote_data")
+        return {
+            "count": count,
+            "count_status": count_status,
+            "latest_status": latest_status,
+            "start_at": start.isoformat(),
+            "end_at": end.isoformat(),
+        }
+
+    def _select_ci_branches(
+        self,
+        project_id: int,
+        branch_spec: str,
+        *,
+        start: datetime,
+        deadline: float,
+        max_pages: int,
+        max_branches: int,
+        warnings: list[str],
+    ) -> tuple[list[str], bool]:
+        mode = branch_spec.upper()
+        if mode not in {"ALL", "RECENT"}:
+            return [_validate_ref(branch_spec)], False
+        pipeline_params: dict[str, Any] = {
+            "order_by": "updated_at",
+            "sort": "desc",
+        }
+        if mode == "RECENT":
+            pipeline_params["updated_after"] = start.isoformat()
+        pipeline_items, pipeline_truncated, _pipeline_continuation = self._ci_pages(
+            f"/api/v4/projects/{project_id}/pipelines",
+            params=pipeline_params,
+            deadline=deadline,
+            max_pages=max_pages,
+            max_items=min(_MAX_PIPELINES, max_branches * 10),
+        )
+        live_items, live_truncated, _live_continuation = self._ci_pages(
+            f"/api/v4/projects/{project_id}/repository/branches",
+            params={},
+            deadline=deadline,
+            max_pages=max_pages,
+            max_items=_MAX_TREE_ITEMS,
+        )
+        live: set[str] = set()
+        for item in live_items:
+            live.add(_validate_remote_ref(item.get("name")))
+        selected: list[str] = []
+        seen: set[str] = set()
+        for item in pipeline_items:
+            ref = _validate_remote_ref(item.get("ref"))
+            if ref in live and ref not in seen:
+                seen.add(ref)
+                selected.append(ref)
+        truncated = pipeline_truncated or live_truncated or len(selected) > max_branches
+        if pipeline_truncated:
+            self._add_warning(warnings, "pipeline_branch_inventory_truncated")
+        if live_truncated:
+            self._add_warning(warnings, "live_branch_inventory_truncated")
+        if len(selected) > max_branches:
+            self._add_warning(warnings, "branch_limit_reached")
+        return selected[:max_branches], truncated
+
+    def _ci_text_file(
+        self,
+        project: str | int,
+        path: str,
+        ref: str,
+        *,
+        max_bytes: int,
+        deadline: float,
+    ) -> dict[str, Any]:
+        endpoint = _project_endpoint(project)
+        normalized_path = path[1:] if path.startswith("/") else path
+        normalized_path = _validate_path(normalized_path, allow_empty=False)
+        ref = _validate_ref(ref)
+        encoded_path = quote(normalized_path, safe="")
+        payload = _as_object(
+            self.client.get_json(
+                f"/api/v4/projects/{endpoint}/repository/files/{encoded_path}",
+                params={"ref": ref},
+                deadline=deadline,
+            )
+        )
+        content = payload.get("content")
+        size = payload.get("size")
+        if payload.get("encoding") != "base64" or not isinstance(content, str):
+            raise GitLabError("invalid_remote_data")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise GitLabError("invalid_remote_data")
+        if size > max_bytes:
+            raise GitLabError("capacity")
+        try:
+            decoded = base64.b64decode("".join(content.split()), validate=True)
+        except (binascii.Error, ValueError):
+            raise GitLabError("invalid_remote_data") from None
+        if len(decoded) > max_bytes:
+            raise GitLabError("capacity")
+        try:
+            text = decoded.decode("utf-8")
+        except UnicodeDecodeError:
+            raise GitLabError("invalid_remote_data") from None
+        return {
+            "path": normalized_path,
+            "text": text,
+            "size": len(decoded),
+            "sha256": hashlib.sha256(decoded).hexdigest(),
+        }
+
+    @staticmethod
+    def _include_specs(text: str) -> tuple[list[dict[str, Any]], str]:
+        loader = _BoundedComposeLoader(text)
+        try:
+            root = loader.get_single_node()
+        except _YamlCapacityError:
+            return [], "capacity"
+        except yaml.YAMLError:
+            return [], "invalid"
+        finally:
+            loader.dispose()
+        if root is None:
+            return [], "ok"
+        if not isinstance(root, yaml.nodes.MappingNode):
+            return [], "invalid"
+        include_node: yaml.nodes.Node | None = None
+        for key_node, value_node in root.value:
+            if (
+                isinstance(key_node, yaml.nodes.ScalarNode)
+                and key_node.value == "include"
+            ):
+                include_node = value_node
+                break
+        if include_node is None:
+            return [], "ok"
+        raw_nodes = (
+            include_node.value
+            if isinstance(include_node, yaml.nodes.SequenceNode)
+            else [include_node]
+        )
+        specs: list[dict[str, Any]] = []
+        for item in raw_nodes:
+            if isinstance(item, yaml.nodes.ScalarNode):
+                specs.append({"type": "local", "file": item.value})
+                continue
+            if not isinstance(item, yaml.nodes.MappingNode):
+                return [], "invalid"
+            fields: dict[str, str] = {}
+            for key_node, value_node in item.value:
+                if not isinstance(key_node, yaml.nodes.ScalarNode) or not isinstance(
+                    value_node, yaml.nodes.ScalarNode
+                ):
+                    return [], "invalid"
+                fields[key_node.value] = value_node.value
+            if "local" in fields:
+                specs.append({"type": "local", "file": fields["local"]})
+            elif "project" in fields and "file" in fields:
+                specs.append(
+                    {
+                        "type": "project",
+                        "project": fields["project"],
+                        "file": fields["file"],
+                        "ref": fields.get("ref", "main"),
+                    }
+                )
+            elif "remote" in fields:
+                specs.append({"type": "remote", "location": fields["remote"]})
+            elif "template" in fields:
+                specs.append({"type": "template", "location": fields["template"]})
+        return specs, "ok"
+
+    def _resolve_ci_includes(
+        self,
+        text: str,
+        *,
+        project_id: int,
+        project_path: str,
+        branch: str,
+        deadline: float,
+        budget: dict[str, int],
+        warnings: list[str],
+    ) -> tuple[list[dict[str, Any]], bool, str]:
+        specs, parse_status = self._include_specs(text)
+        if parse_status != "ok":
+            self._add_warning(warnings, f"ci_yaml_{parse_status}")
+            return [], parse_status == "capacity", parse_status
+        available_count = budget["count"]
+        truncated = len(specs) > available_count
+        if truncated:
+            self._add_warning(warnings, "include_limit_reached")
+        root_identity = (project_path, ".gitlab-ci.yml", branch)
+        results: list[dict[str, Any]] = []
+        selected_specs = specs[:available_count]
+        budget["count"] -= len(selected_specs)
+        for spec in selected_specs:
+            kind = spec["type"]
+            if kind in {"remote", "template"}:
+                location = spec.get("location")
+                if (
+                    not isinstance(location, str)
+                    or not location
+                    or len(location) > _MAX_PATH
+                ):
+                    raise GitLabError("invalid_remote_data")
+                results.append(
+                    {
+                        "type": kind,
+                        "location": location,
+                        "status": "unsupported",
+                        "warning": "unsupported_include",
+                    }
+                )
+                self._add_warning(warnings, "unsupported_include")
+                continue
+            include_warnings: list[str] = []
+            file_value = spec.get("file")
+            if (
+                not isinstance(file_value, str)
+                or not file_value
+                or len(file_value) > _MAX_PATH
+            ):
+                raise GitLabError("invalid_remote_data")
+            file_path = file_value[1:] if file_value.startswith("/") else file_value
+            file_path = _validate_path(file_path, allow_empty=False)
+            include_project: str | int
+            if kind == "local":
+                include_project = project_id
+                identity_project = project_path
+                include_ref = branch
+            else:
+                include_project = spec.get("project")
+                if not isinstance(include_project, (str, int)) or isinstance(
+                    include_project, bool
+                ):
+                    raise GitLabError("invalid_remote_data")
+                _project_endpoint(include_project)
+                identity_project = str(include_project)
+                raw_ref = spec.get("ref", "main")
+                if (
+                    raw_ref is None
+                    or raw_ref == ""
+                    or (isinstance(raw_ref, str) and raw_ref.startswith("$"))
+                ):
+                    include_ref = "main"
+                    include_warnings.append("include_ref_not_interpolated")
+                elif isinstance(raw_ref, str):
+                    include_ref = _validate_ref(raw_ref)
+                else:
+                    raise GitLabError("invalid_remote_data")
+            identity = (identity_project, file_path, include_ref)
+            base_result: dict[str, Any] = {
+                "type": kind,
+                "project": identity_project,
+                "file": file_path,
+                "ref": include_ref,
+                "warnings": include_warnings,
+            }
+            if identity == root_identity:
+                results.append(
+                    {**base_result, "status": "cycle", "sha256": None, "size": 0}
+                )
+                self._add_warning(warnings, "include_cycle")
+                continue
+            if budget["bytes"] == 0:
+                results.append(
+                    {**base_result, "status": "capacity", "sha256": None, "size": 0}
+                )
+                self._add_warning(warnings, "include_capacity")
+                truncated = True
+                continue
+            try:
+                fetched = self._ci_text_file(
+                    include_project,
+                    file_path,
+                    include_ref,
+                    max_bytes=budget["bytes"],
+                    deadline=deadline,
+                )
+                budget["bytes"] -= fetched["size"]
+                results.append(
+                    {
+                        **base_result,
+                        "status": "success",
+                        "sha256": fetched["sha256"],
+                        "size": fetched["size"],
+                    }
+                )
+            except GitLabError as exc:
+                status = {
+                    "not_found": "not_found",
+                    "permission": "permission",
+                    "capacity": "capacity",
+                    "cancelled": "cancelled",
+                    "deadline": "deadline",
+                }.get(exc.category, "transient")
+                if exc.category in {"cancelled", "deadline"}:
+                    raise
+                results.append(
+                    {**base_result, "status": status, "sha256": None, "size": 0}
+                )
+                self._add_warning(warnings, f"include_{status}")
+                if status == "capacity":
+                    truncated = True
+        return results, truncated, parse_status
+
+    @staticmethod
+    def _variable_metadata(
+        raw: Mapping[str, Any], *, scope: str, source: str
+    ) -> dict[str, Any]:
+        key = raw.get("key")
+        variable_type = raw.get("variable_type", "env_var")
+        environment_scope = raw.get("environment_scope", "*")
+        description = raw.get("description")
+        if (
+            not isinstance(key, str)
+            or not key
+            or len(key) > 512
+            or not isinstance(variable_type, str)
+            or not variable_type
+            or len(variable_type) > 64
+            or not isinstance(environment_scope, str)
+            or not environment_scope
+            or len(environment_scope) > 512
+            or (
+                description is not None
+                and (not isinstance(description, str) or len(description) > 2048)
+            )
+        ):
+            raise GitLabError("invalid_remote_data")
+        flags = {}
+        for source_name, target_name in (
+            ("protected", "protected"),
+            ("masked", "masked"),
+            ("hidden", "hidden"),
+            ("raw", "raw"),
+        ):
+            value = raw.get(source_name, False)
+            if not isinstance(value, bool):
+                raise GitLabError("invalid_remote_data")
+            flags[target_name] = value
+        return {
+            "key": key,
+            "type": variable_type,
+            **flags,
+            "environment_scope": environment_scope,
+            "description": description,
+            "scope": scope,
+            "source": source,
+        }
+
+    def _collect_variable_endpoint(
+        self,
+        path: str,
+        *,
+        scope: str,
+        source: str,
+        deadline: float,
+        max_pages: int,
+        max_variables: int,
+        items: list[dict[str, Any]],
+        identities: set[tuple[str, str, str, str]],
+        continuations: list[dict[str, Any]],
+    ) -> bool:
+        page = 1
+        while page <= max_pages:
+            payload, headers = self.client.get_json_page(
+                path,
+                params={"per_page": 100, "page": page},
+                deadline=deadline,
+            )
+            values = _as_list(payload)
+            for offset, raw in enumerate(values):
+                if len(items) >= max_variables:
+                    continuations.append(
+                        {
+                            "scope": scope,
+                            "source": source,
+                            "page": page,
+                            "offset": offset,
+                        }
+                    )
+                    return True
+                metadata = self._variable_metadata(
+                    _as_object(raw), scope=scope, source=source
+                )
+                identity = (
+                    metadata["key"],
+                    metadata["environment_scope"],
+                    scope,
+                    source,
+                )
+                if identity not in identities:
+                    identities.add(identity)
+                    items.append(metadata)
+            next_header = str(headers.get("x-next-page", "")).strip()
+            if not next_header and len(values) < 100:
+                return False
+            candidate = page + 1
+            if next_header:
+                try:
+                    candidate = int(next_header)
+                except ValueError:
+                    raise GitLabError("invalid_remote_data") from None
+                if candidate <= page:
+                    raise GitLabError("invalid_remote_data")
+            if candidate > max_pages:
+                continuations.append(
+                    {"scope": scope, "source": source, "next_page": candidate}
+                )
+                return True
+            page = candidate
+        return False
+
+    def _collect_ci_variables(
+        self,
+        project: Mapping[str, Any],
+        *,
+        deadline: float,
+        max_pages: int,
+        max_groups: int,
+        max_variables: int,
+    ) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        identities: set[tuple[str, str, str, str]] = set()
+        warnings: list[str] = []
+        continuations: list[dict[str, Any]] = []
+        truncated = False
+        project_source = project["path_with_namespace"]
+        try:
+            truncated = self._collect_variable_endpoint(
+                f"/api/v4/projects/{project['id']}/variables",
+                scope="project",
+                source=project_source,
+                deadline=deadline,
+                max_pages=max_pages,
+                max_variables=max_variables,
+                items=items,
+                identities=identities,
+                continuations=continuations,
+            )
+        except GitLabError as exc:
+            if exc.category in {"cancelled", "deadline"}:
+                raise
+            self._add_warning(
+                warnings,
+                "project_variable_permission"
+                if exc.category == "permission"
+                else "project_variable_error",
+            )
+        ancestors = [
+            "/".join(project["namespace"].split("/")[:index])
+            for index in range(1, len(project["namespace"].split("/")) + 1)
+        ]
+        groups_truncated = len(ancestors) > max_groups
+        if groups_truncated:
+            truncated = True
+        for ancestor in ancestors[:max_groups]:
+            if len(items) >= max_variables:
+                truncated = True
+                break
+            encoded = quote(ancestor, safe="")
+            try:
+                group = _as_object(
+                    self.client.get_json(f"/api/v4/groups/{encoded}", deadline=deadline)
+                )
+                group_id = group.get("id")
+                if (
+                    isinstance(group_id, bool)
+                    or not isinstance(group_id, int)
+                    or group_id <= 0
+                ):
+                    raise GitLabError("invalid_remote_data")
+                endpoint_truncated = self._collect_variable_endpoint(
+                    f"/api/v4/groups/{group_id}/variables",
+                    scope="group",
+                    source=ancestor,
+                    deadline=deadline,
+                    max_pages=max_pages,
+                    max_variables=max_variables,
+                    items=items,
+                    identities=identities,
+                    continuations=continuations,
+                )
+                truncated = truncated or endpoint_truncated
+            except GitLabError as exc:
+                if exc.category in {"cancelled", "deadline"}:
+                    raise
+                self._add_warning(
+                    warnings,
+                    "group_variable_permission"
+                    if exc.category == "permission"
+                    else "group_variable_error",
+                )
+        return {
+            "items": items,
+            "count": len(items),
+            "truncated": truncated,
+            "groups_truncated": groups_truncated,
+            "continuations": continuations,
+            "warnings": warnings,
+        }
+
+    def inspect_ci(
+        self,
+        project: str | int,
+        *,
+        branch_spec: str = "RECENT",
+        lookback_days: int = 10,
+        collect_variables: bool = True,
+        max_branches: int = 20,
+        max_pages: int = 5,
+        max_includes: int = 20,
+        max_include_bytes: int = 128 * 1024,
+        max_groups: int = 10,
+        max_variables: int = 500,
+    ) -> dict[str, Any]:
+        branch_spec = _bounded_string(branch_spec, _MAX_REF)
+        lookback_days = _positive_bound(lookback_days, 365)
+        max_branches = _positive_bound(max_branches, _MAX_CI_BRANCHES)
+        max_pages = _positive_bound(max_pages, _MAX_CI_PAGES)
+        max_includes = _positive_bound(max_includes, _MAX_CI_INCLUDES)
+        max_include_bytes = _positive_bound(max_include_bytes, _MAX_CI_INCLUDE_BYTES)
+        max_groups = _positive_bound(max_groups, _MAX_CI_GROUPS)
+        max_variables = _positive_bound(max_variables, _MAX_CI_VARIABLES)
+        if not isinstance(collect_variables, bool):
+            raise GitLabError("invalid_input")
+        deadline = self.client.operation_deadline()
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=lookback_days)
+        warnings: list[str] = []
+        project_result = self._ci_project(project, deadline=deadline)
+        pipeline_window = self._pipeline_window(
+            project_result["id"], start=start, end=now, deadline=deadline
+        )
+        branch_names, truncated = self._select_ci_branches(
+            project_result["id"],
+            branch_spec,
+            start=start,
+            deadline=deadline,
+            max_pages=max_pages,
+            max_branches=max_branches,
+            warnings=warnings,
+        )
+        branches: list[dict[str, Any]] = []
+        include_budget = {"count": max_includes, "bytes": max_include_bytes}
+        for branch in branch_names:
+            fetched_at = datetime.now(timezone.utc).isoformat()
+            try:
+                fetched = self._ci_text_file(
+                    project_result["id"],
+                    ".gitlab-ci.yml",
+                    branch,
+                    max_bytes=_MAX_FILE_BYTES,
+                    deadline=deadline,
+                )
+                includes, includes_truncated, include_parse_status = (
+                    self._resolve_ci_includes(
+                        fetched["text"],
+                        project_id=project_result["id"],
+                        project_path=project_result["path_with_namespace"],
+                        branch=branch,
+                        deadline=deadline,
+                        budget=include_budget,
+                        warnings=warnings,
+                    )
+                )
+                truncated = truncated or includes_truncated
+                ci_file = {
+                    "status": "success",
+                    "path": ".gitlab-ci.yml",
+                    "sha256": fetched["sha256"],
+                    "size": fetched["size"],
+                    "fetched_at": fetched_at,
+                    "includes": includes,
+                    "includes_truncated": includes_truncated,
+                    "include_parse_status": include_parse_status,
+                }
+            except GitLabError as exc:
+                if exc.category in {"cancelled", "deadline"}:
+                    raise
+                status = {
+                    "not_found": "not_found",
+                    "permission": "permission",
+                    "capacity": "capacity",
+                }.get(exc.category, "transient")
+                self._add_warning(warnings, f"ci_file_{status}")
+                ci_file = {
+                    "status": status,
+                    "path": ".gitlab-ci.yml",
+                    "sha256": None,
+                    "size": 0,
+                    "fetched_at": fetched_at,
+                    "includes": [],
+                    "includes_truncated": False,
+                    "include_parse_status": "not_parsed",
+                }
+            branches.append({"name": branch, "ci_file": ci_file})
+        variables = (
+            self._collect_ci_variables(
+                project_result,
+                deadline=deadline,
+                max_pages=max_pages,
+                max_groups=max_groups,
+                max_variables=max_variables,
+            )
+            if collect_variables
+            else {
+                "items": [],
+                "count": 0,
+                "truncated": False,
+                "groups_truncated": False,
+                "continuations": [],
+                "warnings": [],
+            }
+        )
+        truncated = truncated or variables["truncated"]
+        return {
+            "project": project_result,
+            "branch_spec": branch_spec.upper()
+            if branch_spec.upper() in {"ALL", "RECENT"}
+            else branch_spec,
+            "lookback_days": lookback_days,
+            "pipeline_window": pipeline_window,
+            "branches": branches,
+            "variables": variables,
+            "warnings": warnings,
+            "truncated": truncated,
         }

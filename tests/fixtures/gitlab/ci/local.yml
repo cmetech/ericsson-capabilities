@@ -1,0 +1,6 @@
+include:
+  - local: /.ci/nested-must-not-be-fetched.yml
+
+local_job:
+  script:
+    - echo "one-level fixture"

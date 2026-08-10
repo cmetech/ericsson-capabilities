@@ -1,0 +1,13 @@
+[
+  {
+    "key": "DEPLOY_ENV",
+    "value": "must-not-be-projected",
+    "variable_type": "env_var",
+    "protected": true,
+    "masked": false,
+    "hidden": false,
+    "raw": true,
+    "environment_scope": "production",
+    "description": "Deployment environment selector"
+  }
+]

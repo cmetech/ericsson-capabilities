@@ -731,6 +731,16 @@ class GitLabOperations:
     def _write_project(self, project: str | int, *, deadline: float) -> dict[str, Any]:
         return self._ci_project(project, deadline=deadline)
 
+    @staticmethod
+    def _require_reconciled_identity(
+        partial: Mapping[str, Any], reconciled: Mapping[str, Any]
+    ) -> None:
+        if any(
+            field not in reconciled or reconciled[field] != value
+            for field, value in partial.items()
+        ):
+            raise GitLabError("invalid_remote_data")
+
     def _branch_result(
         self,
         payload: Any,
@@ -784,17 +794,22 @@ class GitLabOperations:
         *,
         project_result: Mapping[str, Any],
         branch: str,
-    ) -> None:
+    ) -> dict[str, Any]:
+        identity: dict[str, Any] = {}
         if "name" in payload and payload.get("name") != branch:
             raise GitLabError("invalid_remote_data")
+        if "name" in payload:
+            identity["name"] = branch
         if (
             "project_id" in payload
             and payload.get("project_id") != project_result["id"]
         ):
             raise GitLabError("invalid_remote_data")
+        if "project_id" in payload:
+            identity["project_id"] = project_result["id"]
         project_path = project_result["path_with_namespace"]
         if "web_url" in payload:
-            _canonical_remote_url(
+            identity["web_url"] = _canonical_remote_url(
                 payload.get("web_url"),
                 self.client.auth.origin,
                 f"/{project_path}/-/tree/{branch}",
@@ -802,6 +817,7 @@ class GitLabOperations:
         if "commit" in payload:
             commit = _as_object(payload.get("commit"))
             commit_id = _validate_remote_ref(commit.get("id"))
+            identity["commit_id"] = commit_id
             commit_short_id = commit.get("short_id")
             if "short_id" in commit and (
                 not isinstance(commit_short_id, str)
@@ -810,12 +826,15 @@ class GitLabOperations:
                 or not commit_id.startswith(commit_short_id)
             ):
                 raise GitLabError("invalid_remote_data")
+            if "short_id" in commit:
+                identity["commit_short_id"] = commit_short_id
             if "web_url" in commit:
-                _canonical_remote_url(
+                identity["commit_web_url"] = _canonical_remote_url(
                     commit.get("web_url"),
                     self.client.auth.origin,
                     f"/{project_path}/-/commit/{commit_id}",
                 )
+        return identity
 
     def create_branch(
         self,
@@ -896,11 +915,11 @@ class GitLabOperations:
                 source_ref=selected_source,
                 created=True,
             )
-        self._validate_partial_branch_identity(
+        partial_identity = self._validate_partial_branch_identity(
             created_item, project_result=project_result, branch=branch
         )
         reconciled = self.client.get_json(branch_path, deadline=deadline)
-        return self._branch_result(
+        result = self._branch_result(
             reconciled,
             project=project,
             project_result=project_result,
@@ -908,6 +927,11 @@ class GitLabOperations:
             source_ref=selected_source,
             created=True,
         )
+        reconciled_identity = self._validate_partial_branch_identity(
+            _as_object(reconciled), project_result=project_result, branch=branch
+        )
+        self._require_reconciled_identity(partial_identity, reconciled_identity)
+        return result
 
     @staticmethod
     def _commit_actions(
@@ -1099,13 +1123,18 @@ class GitLabOperations:
         project_result: Mapping[str, Any],
         branch: str,
         commit_message: str,
-    ) -> str:
+    ) -> dict[str, Any]:
         commit_id = _validate_remote_ref(payload.get("id"))
+        identity: dict[str, Any] = {"id": commit_id}
         expected_title = commit_message.splitlines()[0]
         if "title" in payload and payload.get("title") != expected_title:
             raise GitLabError("invalid_remote_data")
+        if "title" in payload:
+            identity["title"] = expected_title
         if "message" in payload and payload.get("message") != commit_message:
             raise GitLabError("invalid_remote_data")
+        if "message" in payload:
+            identity["message"] = commit_message
         if "short_id" in payload:
             short_id = payload.get("short_id")
             if (
@@ -1115,20 +1144,25 @@ class GitLabOperations:
                 or not commit_id.startswith(short_id)
             ):
                 raise GitLabError("invalid_remote_data")
+            identity["short_id"] = short_id
         if (
             "project_id" in payload
             and payload.get("project_id") != project_result["id"]
         ):
             raise GitLabError("invalid_remote_data")
+        if "project_id" in payload:
+            identity["project_id"] = project_result["id"]
         if "branch" in payload and payload.get("branch") != branch:
             raise GitLabError("invalid_remote_data")
+        if "branch" in payload:
+            identity["branch"] = branch
         if "web_url" in payload:
-            _canonical_remote_url(
+            identity["web_url"] = _canonical_remote_url(
                 payload.get("web_url"),
                 self.client.auth.origin,
                 f"/{project_result['path_with_namespace']}/-/commit/{commit_id}",
             )
-        return commit_id
+        return identity
 
     @staticmethod
     def _remote_messages(payload: Any) -> list[str]:
@@ -1214,18 +1248,19 @@ class GitLabOperations:
             )
         if project_result is None:
             raise GitLabError("invalid_remote_data")
-        commit_id = self._validate_partial_commit_identity(
+        partial_identity = self._validate_partial_commit_identity(
             item,
             project_result=project_result,
             branch=branch,
             commit_message=commit_message,
         )
+        commit_id = partial_identity["id"]
         reconciled = self.client.get_json(
             f"/api/v4/projects/{endpoint}/repository/commits/"
             f"{quote(commit_id, safe='')}",
             deadline=deadline,
         )
-        return self._commit_result(
+        result = self._commit_result(
             reconciled,
             project=project,
             project_result=project_result,
@@ -1233,6 +1268,14 @@ class GitLabOperations:
             commit_message=commit_message,
             actions=projected,
         )
+        reconciled_identity = self._validate_partial_commit_identity(
+            _as_object(reconciled),
+            project_result=project_result,
+            branch=branch,
+            commit_message=commit_message,
+        )
+        self._require_reconciled_identity(partial_identity, reconciled_identity)
+        return result
 
     def _merge_request_result(
         self,
@@ -1296,10 +1339,11 @@ class GitLabOperations:
         source_branch: str,
         target_branch: str,
         title: str,
-    ) -> int:
+    ) -> dict[str, Any]:
         iid = payload.get("iid")
         if isinstance(iid, bool) or not isinstance(iid, int) or iid <= 0:
             raise GitLabError("invalid_remote_data")
+        identity: dict[str, Any] = {"iid": iid}
         expected = {
             "project_id": project_id,
             "source_branch": source_branch,
@@ -1310,13 +1354,15 @@ class GitLabOperations:
         for field, expected_value in expected.items():
             if field in payload and payload.get(field) != expected_value:
                 raise GitLabError("invalid_remote_data")
+            if field in payload:
+                identity[field] = expected_value
         if "web_url" in payload:
-            _canonical_remote_url(
+            identity["web_url"] = _canonical_remote_url(
                 payload.get("web_url"),
                 self.client.auth.origin,
                 f"/{project_path}/-/merge_requests/{iid}",
             )
-        return iid
+        return identity
 
     def _existing_merge_request(
         self,
@@ -1454,7 +1500,7 @@ class GitLabOperations:
                 created=True,
                 expected_title=selected_title,
             )
-        iid = self._validate_partial_merge_request_identity(
+        partial_identity = self._validate_partial_merge_request_identity(
             item,
             project_id=project_result["id"],
             project_path=project_result["path_with_namespace"],
@@ -1462,11 +1508,12 @@ class GitLabOperations:
             target_branch=selected_target,
             title=selected_title,
         )
+        iid = partial_identity["iid"]
         reconciled = self.client.get_json(
             f"/api/v4/projects/{endpoint}/merge_requests/{iid}",
             deadline=deadline,
         )
-        return self._merge_request_result(
+        result = self._merge_request_result(
             reconciled,
             project=project,
             project_id=project_result["id"],
@@ -1476,6 +1523,16 @@ class GitLabOperations:
             created=True,
             expected_title=selected_title,
         )
+        reconciled_identity = self._validate_partial_merge_request_identity(
+            _as_object(reconciled),
+            project_id=project_result["id"],
+            project_path=project_result["path_with_namespace"],
+            source_branch=source_branch,
+            target_branch=selected_target,
+            title=selected_title,
+        )
+        self._require_reconciled_identity(partial_identity, reconciled_identity)
+        return result
 
     @staticmethod
     def _add_warning(warnings: list[str], code: str) -> None:

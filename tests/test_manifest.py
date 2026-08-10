@@ -49,6 +49,9 @@ def _minimal_lint_repo(tmp_path: Path, workflow: dict) -> Path:
     (tmp_path / "workflows/example.yml").write_text(
         yaml.safe_dump(workflow, sort_keys=False)
     )
+    (tmp_path / "workflows/example.hermes.yaml").write_text(
+        "language_compatibility: archon-2026-07\n"
+    )
     manifest = {
         "name": "example",
         "version": "1.0.0",
@@ -95,6 +98,19 @@ def test_lint_accepts_generic_flat_archon_and_rejects_malformed_nodes(
     manifest = _minimal_lint_repo(tmp_path, valid)
     monkeypatch.setattr(lint_manifest, "REPO", tmp_path)
     assert lint_manifest.lint(manifest) == []
+
+    sidecar = tmp_path / "workflows/example.hermes.yaml"
+    sidecar.unlink()
+    assert any(
+        "missing Archon workflow sidecar" in problem
+        for problem in lint_manifest.lint(manifest)
+    )
+    sidecar.write_text("language_compatibility: hermes-legacy\n")
+    assert any(
+        "incompatible workflow sidecar" in problem
+        for problem in lint_manifest.lint(manifest)
+    )
+    sidecar.write_text("language_compatibility: archon-2026-07\n")
 
     invalid = dict(valid)
     invalid["nodes"] = [{"id": "broken", "allowed_tools": "example_read"}]

@@ -17,9 +17,13 @@ def test_reference_workflow_formats_are_explicit_and_complete():
     for path in REFS:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
         requires = document.get("requires") if isinstance(document, dict) else None
+        sidecar_path = path.with_name(f"{path.stem}.hermes.yaml")
         if path.stem in LEGACY_V1:
+            assert not sidecar_path.exists(), f"{path.name}: unexpected profile sidecar"
             assert isinstance(requires, dict), f"{path.name}: expected V1 mapping"
         elif path.stem in FLAT_ARCHON:
+            sidecar = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
+            assert sidecar["language_compatibility"] == "archon-2026-07"
             assert isinstance(requires, list), f"{path.name}: expected flat Archon list"
         else:  # pragma: no cover - exact set assertion above guards future drift
             raise AssertionError(f"unknown workflow format: {path.name}")

@@ -134,6 +134,21 @@ def _lint_archon_workflow(document):
     return problems
 
 
+def _workflow_language_profile(path):
+    """Return the explicitly packaged workflow profile, if one exists."""
+    sidecar = path.with_name(f"{path.stem}.hermes.yaml")
+    if not sidecar.is_file():
+        return None
+    try:
+        document = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return "invalid"
+    if not isinstance(document, dict):
+        return "invalid"
+    profile = document.get("language_compatibility")
+    return profile if isinstance(profile, str) else "invalid"
+
+
 def lint(manifest_path: Path) -> list[str]:
     problems = []
     try:
@@ -273,8 +288,17 @@ def lint(manifest_path: Path) -> list[str]:
             continue
         try:
             loaded = yaml.safe_load(p.read_text())
-            if isinstance(loaded, dict) and isinstance(loaded.get("requires"), list):
+            profile = _workflow_language_profile(p)
+            flat_requires = isinstance(loaded, dict) and isinstance(
+                loaded.get("requires"), list
+            )
+            if profile == "archon-2026-07":
                 errors = _lint_archon_workflow(loaded)
+            elif flat_requires:
+                if profile is None:
+                    errors = [f"missing Archon workflow sidecar: {rel}"]
+                else:
+                    errors = [f"incompatible workflow sidecar: {rel}"]
             else:
                 if wc is None:
                     sys.path.insert(

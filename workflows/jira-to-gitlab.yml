@@ -5,90 +5,269 @@ requires: [ericsson-gitlab, ericsson-jira]
 nodes:
   - id: read-ticket
     prompt: >
-      Use the jira_get_issue tool for the exact ticket key. Preserve not_found,
-      permission, and incomplete facts; do not infer missing issue content.
+      Use the jira_get_issue tool for the exact bounded workflow input
+      $ARGUMENTS. Return the ticket key, summary, and explicit GitLab project
+      path. Preserve not_found, permission, and incomplete facts; do not infer
+      missing issue content.
     allowed_tools: [jira_get_issue]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, ticket_summary, project_path]
+      properties:
+        ticket_key: {type: string, maxLength: 128}
+        ticket_summary: {type: string, maxLength: 4096}
+        project_path: {type: string, maxLength: 1024}
 
   - id: resolve-project
     depends_on: [read-ticket]
     prompt: >
-      Use the gitlab_resolve_project tool for the ticket's explicit project.
-      Preserve canonical identity and default branch or report attention needed.
+      Use the gitlab_resolve_project tool for ticket
+      $read-ticket.output.ticket_key, summary
+      $read-ticket.output.ticket_summary, and the explicit project
+      $read-ticket.output.project_path and return exact canonical project identity
+      and default branch. Preserve not_found, permission, and incomplete facts
+      or report attention needed.
     allowed_tools: [gitlab_resolve_project]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, ticket_summary, project_id, project_path, default_branch]
+      properties:
+        ticket_key: {type: string, maxLength: 128}
+        ticket_summary: {type: string, maxLength: 4096}
+        project_id: {type: integer}
+        project_path: {type: string, maxLength: 1024}
+        default_branch: {type: string, maxLength: 1024}
 
   - id: research-repository
     depends_on: [resolve-project]
     prompt: >
-      Use the gitlab_list_repository_tree tool and gitlab_read_file tool only
-      for bounded evidence relevant to the ticket. Preserve every warning and
-      continuation fact.
+      For ticket $resolve-project.output.ticket_key, use the
+      gitlab_list_repository_tree tool and gitlab_read_file tool only against
+      exact project $resolve-project.output.project_id at branch
+      $resolve-project.output.default_branch while gathering bounded evidence relevant
+      to the resolved ticket. Preserve canonical project path
+      $resolve-project.output.project_path and every warning and continuation fact.
     allowed_tools: [gitlab_list_repository_tree, gitlab_read_file]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, ticket_summary, project_id, project_path, default_branch, evidence_summary]
+      properties:
+        ticket_key: {type: string, maxLength: 128}
+        ticket_summary: {type: string, maxLength: 4096}
+        project_id: {type: integer}
+        project_path: {type: string, maxLength: 1024}
+        default_branch: {type: string, maxLength: 1024}
+        evidence_summary: {type: string, maxLength: 16384}
 
   - id: reason-about-fix
     depends_on: [research-repository]
     prompt: >
-      As the active agent, explain the proposed fix, exact bounded actions,
-      evidence gaps, and tests. Stop if the intended change is uncertain.
+      As the active agent, reason about exact project
+      $research-repository.output.project_id at
+      $research-repository.output.project_path for ticket
+      $research-repository.output.ticket_key using only bounded evidence
+      $research-repository.output.evidence_summary to produce the proposed fix,
+      exact bounded actions, branch and merge-request facts, evidence gaps, and tests.
+      Stop if the intended change is uncertain.
     allowed_tools: []
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, ticket_summary, project_id, project_path, default_branch, branch_prefix, branch_summary, commit_message, actions, mr_title, mr_description]
+      properties:
+        ticket_key: {type: string, maxLength: 128}
+        ticket_summary: {type: string, maxLength: 4096}
+        project_id: {type: integer}
+        project_path: {type: string, maxLength: 1024}
+        default_branch: {type: string, maxLength: 1024}
+        branch_prefix: {type: string, maxLength: 128}
+        branch_summary: {type: string, maxLength: 4096}
+        commit_message: {type: string, maxLength: 4096}
+        actions:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [action, file_path, content]
+            properties:
+              action: {type: string, maxLength: 16}
+              file_path: {type: string, maxLength: 4096}
+              content: {type: string, maxLength: 262144}
+        mr_title: {type: string, maxLength: 255}
+        mr_description: {type: string, maxLength: 16384}
 
   - id: approve-code-writes
     depends_on: [reason-about-fix]
     approval:
-      message: Review the proposed branch, file actions, and merge request before GitLab writes.
+      message: >
+        Review the exact proposed branch, file actions, and merge request:
+        $reason-about-fix.output.branch_summary
       capture_response: true
 
   - id: create-branch
-    depends_on: [approve-code-writes]
+    depends_on: [approve-code-writes, reason-about-fix]
     prompt: >
-      First use the gitlab_create_branch tool with dry_run true and compare the
-      preview to the exact approved intent. Only then request visible host approval
-      for the current invocation and create the branch. Stop on uncertain output;
-      do not retry an ambiguous mutation.
+      Use the gitlab_create_branch tool for exact project
+      $reason-about-fix.output.project_id, source branch
+      $reason-about-fix.output.default_branch, prefix
+      $reason-about-fix.output.branch_prefix, ticket
+      $reason-about-fix.output.ticket_key, and summary
+      $reason-about-fix.output.branch_summary before setting dry_run true and comparing
+      the preview to the exact approved intent. Only then request visible host
+      approval for the current invocation and create the branch. Stop on
+      uncertain output; do not retry an ambiguous mutation.
     allowed_tools: [gitlab_create_branch]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [project_id, project_path, branch_name, source_branch, web_url, status]
+      properties:
+        project_id: {type: integer}
+        project_path: {type: string, maxLength: 1024}
+        branch_name: {type: string, maxLength: 1024}
+        source_branch: {type: string, maxLength: 1024}
+        web_url: {type: string, maxLength: 4096}
+        status: {type: string, maxLength: 64}
 
   - id: commit-changes
-    depends_on: [create-branch]
+    depends_on: [create-branch, reason-about-fix]
     prompt: >
-      First use the gitlab_commit_changes tool with dry_run true and compare the
-      reconciled actions to the exact approved intent. Only then request visible
-      host approval for the current invocation and perform the one atomic commit.
-      Stop on uncertain output and do not retry.
+      Use the gitlab_commit_changes tool for exact project
+      $reason-about-fix.output.project_id and branch
+      $create-branch.output.branch_name with message
+      $reason-about-fix.output.commit_message and reconcile only these proposed
+      actions $reason-about-fix.output.actions under approved intent
+      $reason-about-fix.output.branch_summary before setting dry_run true and comparing
+      the reconciled actions to the exact approved intent. Only then request
+      visible host approval for the current invocation and perform the one
+      atomic commit. Stop on uncertain output and do not retry.
     allowed_tools: [gitlab_commit_changes]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [project_id, branch_name, commit_id, web_url, status]
+      properties:
+        project_id: {type: integer}
+        branch_name: {type: string, maxLength: 1024}
+        commit_id: {type: string, maxLength: 256}
+        web_url: {type: string, maxLength: 4096}
+        status: {type: string, maxLength: 64}
 
   - id: create-merge-request
-    depends_on: [commit-changes]
+    depends_on: [commit-changes, create-branch, reason-about-fix]
     prompt: >
-      First use the gitlab_create_merge_request tool with dry_run true and compare
-      its source, target, and title to the exact approved intent. Only then request
-      visible host approval for the current invocation and create or reconcile the
-      merge request. Do not retry an uncertain result.
+      Use the gitlab_create_merge_request tool for exact project
+      $reason-about-fix.output.project_id, source branch
+      $create-branch.output.branch_name, target branch
+      $reason-about-fix.output.default_branch, title
+      $reason-about-fix.output.mr_title, and description
+      $reason-about-fix.output.mr_description and bind the proposal
+      $reason-about-fix.output.branch_summary to confirmed commit
+      $commit-changes.output.commit_id before setting dry_run true and comparing its
+      source, target, and title to the exact approved intent. Only then request
+      visible host approval for the current invocation and create or reconcile
+      the merge request. Do not retry an uncertain result.
     allowed_tools: [gitlab_create_merge_request]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [project_id, iid, source_branch, target_branch, title, state, web_url, status]
+      properties:
+        project_id: {type: integer}
+        iid: {type: integer}
+        source_branch: {type: string, maxLength: 1024}
+        target_branch: {type: string, maxLength: 1024}
+        title: {type: string, maxLength: 255}
+        state: {type: string, maxLength: 64}
+        web_url: {type: string, maxLength: 4096}
+        status: {type: string, maxLength: 64}
 
   - id: review-merge-request
-    depends_on: [create-merge-request]
+    depends_on: [create-merge-request, commit-changes]
     prompt: >
       Use the gitlab_read_merge_request tool and gitlab_read_file tool for one
-      bounded active-agent review. Preserve warnings and identify any attention needed.
+      bounded active-agent review of merge request
+      $create-merge-request.output.web_url with iid
+      $create-merge-request.output.iid in project
+      $create-merge-request.output.project_id while confirming commit
+      $commit-changes.output.commit_id and preserving warnings and any
+      attention needed.
     allowed_tools: [gitlab_read_merge_request, gitlab_read_file]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, project_id, iid, merge_request_url, verdict, review_summary, warnings, status]
+      properties:
+        ticket_key: {type: string, maxLength: 128}
+        project_id: {type: integer}
+        iid: {type: integer}
+        merge_request_url: {type: string, maxLength: 4096}
+        verdict: {type: string, maxLength: 64}
+        review_summary: {type: string, maxLength: 16384}
+        warnings:
+          type: array
+          maxItems: 128
+          items: {type: string, maxLength: 4096}
+        status: {type: string, maxLength: 64}
 
   - id: approve-jira-update
     depends_on: [review-merge-request]
     approval:
-      message: Review the exact confirmed GitLab facts before adding the Jira status comment.
+      message: >
+        Review the exact confirmed GitLab review before adding the Jira status
+        comment: $review-merge-request.output.review_summary
       capture_response: true
 
   - id: update-jira
-    depends_on: [approve-jira-update]
+    depends_on: [approve-jira-update, review-merge-request]
     prompt: >
-      Use the jira_add_comment tool only with the exact approved, confirmed branch,
-      commit, merge request, review, warning, and attention-needed facts. Request
-      visible host approval for this current invocation. Do not retry if uncertain.
+      Use the jira_add_comment tool only for exact ticket
+      $review-merge-request.output.ticket_key with confirmed merge request
+      $review-merge-request.output.merge_request_url, verdict
+      $review-merge-request.output.verdict, warnings
+      $review-merge-request.output.warnings, and exact approved review
+      $review-merge-request.output.review_summary before requesting visible host approval
+      for this current invocation. Do not retry if uncertain.
     allowed_tools: [jira_add_comment]
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, merge_request_url, comment_status, status]
+      properties:
+        ticket_key: {type: string, maxLength: 128}
+        merge_request_url: {type: string, maxLength: 4096}
+        comment_status: {type: string, maxLength: 4096}
+        status: {type: string, maxLength: 64}
 
   - id: report-status
-    depends_on: [update-jira]
+    depends_on: [update-jira, review-merge-request]
     prompt: >
-      Return truthful per-ticket status, including not_found or zero-ticket input,
-      canonical project, branch, commit, merge request, warnings, and attention needed.
-      Never convert an uncertain write into success and do not retry it.
+      Return truthful per-ticket status for ticket
+      $update-jira.output.ticket_key and merge request
+      $update-jira.output.merge_request_url and include Jira comment outcome
+      $update-jira.output.comment_status, review
+      $review-merge-request.output.review_summary, verdict
+      $review-merge-request.output.verdict, warnings
+      $review-merge-request.output.warnings, and attention needed. Preserve
+      not_found or zero-ticket input. Never convert an uncertain write into
+      success and do not retry it.
     allowed_tools: []
+    output_format:
+      type: object
+      additionalProperties: false
+      required: [ticket_key, project_id, merge_request_url, jira_status, review_status, warnings, attention_needed]
+      properties:
+        ticket_key: {type: string, maxLength: 128}
+        project_id: {type: integer}
+        merge_request_url: {type: string, maxLength: 4096}
+        jira_status: {type: string, maxLength: 4096}
+        review_status: {type: string, maxLength: 4096}
+        warnings:
+          type: array
+          maxItems: 128
+          items: {type: string, maxLength: 4096}
+        attention_needed: {type: boolean}

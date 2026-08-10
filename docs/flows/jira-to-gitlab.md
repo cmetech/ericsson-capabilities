@@ -41,7 +41,7 @@ This is high-consequence automation. Require explicit approval before the first 
 
 ## Hermes port status and target shape
 
-Intent ported: the source now supplies Jira reads/comments, nine bounded GitLab tools, active-agent guidance, visible approval nodes, and a flat portable workflow. It deliberately replaces hidden aggregation and model clients with explicit tool contracts. Multi-ticket `loop_group` parity remains deferred.
+Intent ported: the source now supplies Jira reads/comments, nine bounded GitLab tools, active-agent guidance, visible approval nodes, and a packaged flat workflow. The sibling `jira-to-gitlab.hermes.yaml` declares the `archon-2026-07` language profile, bounded required workflow arguments, outward action nodes, and the existing approval-required write policy. The workflow passes the ticket input through `$ARGUMENTS` and passes only typed direct-predecessor outputs into each fresh node, so branch, commit, merge-request, review, Jira, and final-status facts remain explicit. It deliberately replaces hidden aggregation and model clients with explicit tool contracts. Multi-ticket `loop_group` parity remains deferred.
 
 ## How Hermes should explain and configure it
 

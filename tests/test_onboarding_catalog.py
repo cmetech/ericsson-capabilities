@@ -1582,6 +1582,10 @@ def test_validation_accepts_flat_archon_requires_and_allowed_tools(
             ],
         },
     )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
+    )
     repo_fixture.write_complete_entry()
 
     assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
@@ -1599,6 +1603,10 @@ def test_validation_rejects_mixed_or_invalid_flat_requires(
         "workflows/example.yml",
         {"name": "example", "requires": requires, "nodes": []},
     )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
+    )
     repo_fixture.write_complete_entry()
 
     problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
@@ -1612,6 +1620,10 @@ def test_validation_rejects_unknown_flat_required_toolset(
     repo_fixture._write_yaml(
         "workflows/example.yml",
         {"name": "example", "requires": ["missing-service"], "nodes": []},
+    )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
     )
     repo_fixture.write_complete_entry()
 
@@ -1639,6 +1651,10 @@ def test_validation_rejects_unknown_flat_allowed_tool(
             ],
         },
     )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
+    )
     repo_fixture.write_complete_entry()
 
     problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
@@ -1647,6 +1663,44 @@ def test_validation_rejects_unknown_flat_allowed_tool(
         "unknown workflow tool: workflows/example.yml: inspect: removed_runtime_tool"
         in problems
     )
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "expected"),
+    [
+        (None, "missing Archon workflow sidecar: workflows/example.yml"),
+        (
+            {"language_compatibility": "hermes-legacy"},
+            "incompatible workflow sidecar: workflows/example.yml",
+        ),
+    ],
+)
+def test_validation_rejects_flat_workflow_without_archon_sidecar(
+    repo_fixture: RepoFixture,
+    sidecar: dict[str, object] | None,
+    expected: str,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the example_tool tool.",
+                    "allowed_tools": ["example_tool"],
+                }
+            ],
+        },
+    )
+    if sidecar is not None:
+        repo_fixture._write_yaml("workflows/example.hermes.yaml", sidecar)
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert expected in problems
 
 
 def test_validation_preserves_legacy_workflow_mapping_contract(

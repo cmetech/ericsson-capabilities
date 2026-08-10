@@ -125,6 +125,25 @@ def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, Any]:
     return value
 
 
+def _workflow_language_profile(
+    workflow_file: Path, relative: str, problems: list[str]
+) -> str | None:
+    """Read the language profile from the workflow's real sibling sidecar."""
+    sidecar = workflow_file.with_name(f"{workflow_file.stem}.hermes.yaml")
+    if not sidecar.is_file():
+        return None
+    try:
+        metadata = _load_yaml_mapping(sidecar, label="workflow sidecar")
+    except CatalogError:
+        problems.append(f"invalid workflow sidecar: {relative}")
+        return "invalid"
+    profile = metadata.get("language_compatibility")
+    if not isinstance(profile, str):
+        problems.append(f"invalid workflow sidecar: {relative}")
+        return "invalid"
+    return profile
+
+
 def read_frontmatter(path: Path) -> dict:
     try:
         text = path.read_text(encoding="utf-8")
@@ -885,11 +904,15 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
     workflow_toolsets: dict[str, set[str]] = {}
     workflow_mcp_servers: dict[str, set[str]] = {}
     workflow_tool_nodes: dict[str, list[tuple[str, set[str], set[str], str]]] = {}
-    for workflow_file in sorted((repo / "workflows").glob("*.yml")) + sorted(
-        (repo / "workflows").glob("*.yaml")
-    ):
+    workflow_files = sorted((repo / "workflows").glob("*.yml")) + [
+        path
+        for path in sorted((repo / "workflows").glob("*.yaml"))
+        if not path.name.endswith(".hermes.yaml")
+    ]
+    for workflow_file in workflow_files:
         relative = workflow_file.relative_to(repo).as_posix()
         metadata = _load_yaml_mapping(workflow_file, label="workflow metadata")
+        profile = _workflow_language_profile(workflow_file, relative, problems)
         actual_workflows.add(relative)
         name = metadata.get("name")
         if isinstance(name, str):
@@ -914,11 +937,16 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
             workflow_mcp_servers[relative] = _string_list_metadata(
                 requires, "mcp_servers", workflow_file, problems
             )
-        elif isinstance(requires, list) and all(
-            isinstance(item, str) and item for item in requires
-        ):
-            workflow_toolsets[relative] = set(requires)
-            workflow_mcp_servers[relative] = set()
+        elif isinstance(requires, list):
+            if profile is None:
+                problems.append(f"missing Archon workflow sidecar: {relative}")
+            elif profile != "archon-2026-07":
+                problems.append(f"incompatible workflow sidecar: {relative}")
+            if all(isinstance(item, str) and item for item in requires):
+                workflow_toolsets[relative] = set(requires)
+                workflow_mcp_servers[relative] = set()
+            else:
+                problems.append(f"invalid workflow requires: {relative}")
         else:
             problems.append(f"invalid workflow requires: {relative}")
         inputs = metadata.get("inputs", [])

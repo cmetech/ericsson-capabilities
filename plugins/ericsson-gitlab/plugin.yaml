@@ -1,0 +1,12 @@
+name: ericsson-gitlab
+version: 1.0.0
+description: "Bounded Ericsson GitLab repository, merge-request, and pipeline reads."
+author: Ericsson (cmetech)
+kind: standalone
+config_schema: config.schema.json
+provides_tools:
+  - gitlab_resolve_project
+  - gitlab_list_repository_tree
+  - gitlab_read_file
+  - gitlab_read_merge_request
+  - gitlab_list_pipelines

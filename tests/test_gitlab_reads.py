@@ -1,0 +1,458 @@
+from __future__ import annotations
+
+import base64
+import importlib
+import sys
+from pathlib import Path
+
+import httpx
+import pytest
+import respx
+
+
+PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-gitlab"
+ORIGIN = "https://gitlab.example.test"
+
+
+def _modules():
+    assert PLUGIN.is_dir(), "Task 8 GitLab plugin production surface is missing"
+    if str(PLUGIN) not in sys.path:
+        sys.path.insert(0, str(PLUGIN))
+    return (
+        importlib.import_module("auth"),
+        importlib.import_module("client"),
+        importlib.import_module("models"),
+        importlib.import_module("operations"),
+    )
+
+
+def _operations(**client_options):
+    auth, client, _models, operations = _modules()
+    credentials = auth.GitLabAuth(
+        origin=ORIGIN,
+        pat="secret-token",
+        certificate_pair=None,
+    )
+    return operations.GitLabOperations(client.GitLabClient(credentials, **client_options))
+
+
+def _project_json(default_branch="release/2026"):
+    return {
+        "id": 42,
+        "name": "repo",
+        "path_with_namespace": "division/platform/team/repo",
+        "default_branch": default_branch,
+        "web_url": f"{ORIGIN}/division/platform/team/repo",
+        "namespace": {"kind": "group", "full_path": "division/platform/team"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("reference", "endpoint"),
+    [
+        ("division/platform/team/repo", "division%2Fplatform%2Fteam%2Frepo"),
+        ("https://gitlab.example.test/division/platform/team/repo.git", "division%2Fplatform%2Fteam%2Frepo"),
+        ("42", "42"),
+    ],
+)
+def test_resolve_project_accepts_nested_slug_canonical_url_and_numeric_id(reference, endpoint):
+    # GL-ID-01/02 legacy: gitlab_project_resolver.py:GitLabProjectResolver._parse_gitlab_url/resolve_project
+    operations = _operations()
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/{endpoint}").mock(
+            return_value=httpx.Response(200, json=_project_json())
+        )
+        result = operations.resolve_project(reference)
+    assert route.called
+    assert result["id"] == 42
+    assert result["path_with_namespace"] == "division/platform/team/repo"
+    assert result["default_branch"] == "release/2026"
+    assert result["default_branch_fallback"] is False
+
+
+def test_resolve_project_strips_supported_suffixes_and_rejects_foreign_or_unsupported_urls():
+    # GL-READ-05 legacy: gitlab_file_reader.py:GitLabLinkReader._parse_url
+    operations = _operations()
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/division%2Fplatform%2Fteam%2Frepo").mock(
+            return_value=httpx.Response(200, json=_project_json())
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/branches").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": ""},
+                json=[{"name": "release/2026"}],
+            )
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tags").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+        )
+        tree = operations.resolve_project(
+            f"{ORIGIN}/division/platform/team/repo/-/tree/release%2F2026/src"
+        )
+    assert tree["link_kind"] == "tree"
+    assert tree["link_suffix"] == "release/2026/src"
+
+    for reference in (
+        "https://foreign.example.test/division/team/repo",
+        f"{ORIGIN}/division/team/repo/-/issues/1",
+        f"{ORIGIN}/division",
+    ):
+        with pytest.raises(Exception) as caught:
+            operations.resolve_project(reference)
+        assert getattr(caught.value, "category", None) in {
+            "invalid_input",
+            "group_ambiguity",
+        }
+
+
+def test_resolve_project_preserves_nonempty_default_and_reports_main_only_when_missing():
+    # GL-ID-04 legacy: gitlab_project_resolver.py:GitLabProjectResolver.resolve_project
+    operations = _operations()
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42")
+        route.side_effect = [
+            httpx.Response(200, json=_project_json("feature/default")),
+            httpx.Response(200, json=_project_json("")),
+        ]
+        authoritative = operations.resolve_project("42")
+        fallback = operations.resolve_project("42")
+    assert authoritative["default_branch"] == "feature/default"
+    assert authoritative["default_branch_fallback"] is False
+    assert fallback["default_branch"] == "main"
+    assert fallback["default_branch_fallback"] is True
+
+
+def test_project_identity_rejects_cross_origin_web_url_and_builds_canonical_links():
+    # GL-ID-01/02 legacy: gitlab_project_resolver.py:GitLabProjectResolver.resolve_project
+    operations = _operations()
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42")
+        route.side_effect = [
+            httpx.Response(
+                200,
+                json={**_project_json(), "web_url": "https://foreign.example.test/steal"},
+            ),
+            httpx.Response(200, json=_project_json()),
+        ]
+        with pytest.raises(Exception) as caught:
+            operations.resolve_project("42")
+        resolved = operations.resolve_project("42")
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert resolved["links"] == {
+        "root": f"{ORIGIN}/division/platform/team/repo",
+        "tree": f"{ORIGIN}/division/platform/team/repo/-/tree/release%2F2026",
+        "blob": None,
+    }
+
+
+def test_tree_listing_encodes_ref_and_path_and_returns_deterministic_bounded_entries():
+    # GL-READ-01 legacy: gitlab_file_fetcher.py:GitLabFileFetcher._get_tree/fetch_files
+    operations = _operations()
+    seen = {}
+
+    def response(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            headers={"X-Next-Page": ""},
+            json=[
+                {"id": "b", "name": "z.py", "path": "src/z.py", "type": "blob", "mode": "100644"},
+                {"id": "a", "name": "a", "path": "src/a", "type": "tree", "mode": "040000"},
+            ],
+        )
+
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tree").mock(side_effect=response)
+        result = operations.list_repository_tree(
+            "42", ref="release/2026", path="src/lib", recursive=True, max_items=10
+        )
+    assert seen["params"]["ref"] == "release/2026"
+    assert seen["params"]["path"] == "src/lib"
+    assert result["entries"] == [
+        {"id": "a", "name": "a", "path": "src/a", "type": "tree", "mode": "040000"},
+        {"id": "b", "name": "z.py", "path": "src/z.py", "type": "blob", "mode": "100644"},
+    ]
+    assert result["truncated"] is False
+
+
+def test_tree_pagination_honors_headers_short_pages_and_hard_item_page_ceilings():
+    # GL-READ-02/GL-CI-10 legacy: gitlab_file_reader.py:_get_tree; gitlab_cicd_collector.py list loops
+    operations = _operations(max_pages=2)
+    calls = []
+
+    def response(request):
+        page = int(request.url.params["page"])
+        calls.append(page)
+        return httpx.Response(
+            200,
+            headers={"X-Next-Page": str(page + 1)},
+            json=[{"id": str(page), "name": f"{page}.py", "path": f"{page}.py", "type": "blob", "mode": "100644"}],
+        )
+
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tree").mock(side_effect=response)
+        result = operations.list_repository_tree("42", ref="main", max_items=2)
+    assert calls == [1, 2]
+    assert len(result["entries"]) == 2
+    assert result["truncated"] is True
+    assert result["continuation"] == {"next_page": 3}
+
+
+def test_tree_pagination_uses_one_aggregate_operation_deadline():
+    # GL-READ-01/02 legacy: gitlab_file_fetcher.py:GitLabFileFetcher._get_tree
+    now = [0.0]
+    operations = _operations(
+        max_pages=2,
+        total_timeout_seconds=1.0,
+        clock=lambda: now[0],
+    )
+
+    def response(request):
+        now[0] += 0.6
+        page = int(request.url.params["page"])
+        return httpx.Response(
+            200,
+            headers={"X-Next-Page": "2" if page == 1 else ""},
+            json=[{"id": str(page), "name": f"{page}.py", "path": f"{page}.py", "type": "blob", "mode": "100644"}],
+        )
+
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tree").mock(
+            side_effect=response
+        )
+        with pytest.raises(Exception) as caught:
+            operations.list_repository_tree("42", ref="main", max_items=20)
+    assert getattr(caught.value, "category", None) == "deadline"
+
+
+def test_root_tree_and_blob_links_resolve_longest_slash_ref_with_bounded_ref_pages():
+    # GL-READ-06 legacy: gitlab_file_reader.py:_list_refs/_resolve_ref
+    operations = _operations(max_ref_pages=2)
+    project_endpoint = f"{ORIGIN}/api/v4/projects/division%2Fplatform%2Fteam%2Frepo"
+    with respx.mock:
+        respx.get(project_endpoint).mock(return_value=httpx.Response(200, json=_project_json()))
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/branches").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": ""},
+                json=[{"name": "feature"}, {"name": "feature/with/slashes"}],
+            )
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tags").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+        )
+        result = operations.resolve_project(
+            f"{ORIGIN}/division/platform/team/repo/-/blob/feature/with/slashes/src/app.py"
+        )
+    assert result["resolved_ref"] == "feature/with/slashes"
+    assert result["repository_path"] == "src/app.py"
+    assert result["link_kind"] == "blob"
+
+
+def test_unlisted_fallback_ref_is_api_verified_before_access():
+    # GL-READ-06 legacy: gitlab_file_reader.py:_resolve_ref
+    operations = _operations()
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/division%2Fplatform%2Fteam%2Frepo").mock(
+            return_value=httpx.Response(200, json=_project_json())
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/branches").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/tags").mock(
+            return_value=httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+        )
+        verified = respx.get(f"{ORIGIN}/api/v4/projects/42/repository/commits/unlisted-sha").mock(
+            return_value=httpx.Response(200, json={"id": "unlisted-sha"})
+        )
+        result = operations.resolve_project(
+            f"{ORIGIN}/division/platform/team/repo/-/tree/unlisted-sha/src"
+        )
+    assert verified.called
+    assert result["resolved_ref"] == "unlisted-sha"
+    assert result["repository_path"] == "src"
+
+
+def test_incomplete_ref_inventory_fails_closed_instead_of_selecting_shorter_prefix():
+    # GL-READ-06/GL-CI-10 legacy: gitlab_file_reader.py:_list_refs/_resolve_ref
+    operations = _operations(max_ref_pages=1)
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/division%2Fplatform%2Fteam%2Frepo").mock(
+            return_value=httpx.Response(200, json=_project_json())
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/branches").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": "2"},
+                json=[{"name": "feature"}],
+            )
+        )
+        with pytest.raises(Exception) as caught:
+            operations.resolve_project(
+                f"{ORIGIN}/division/platform/team/repo/-/tree/feature/long/ref/src"
+            )
+    assert getattr(caught.value, "category", None) == "capacity"
+
+
+def test_read_file_validates_base64_and_returns_bounded_utf8_without_duplicate_markdown():
+    # GL-READ-03/08 legacy: gitlab_file_fetcher.py:_get_file/fetch_files
+    operations = _operations()
+    payload = base64.b64encode("hello π\n".encode()).decode()
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42/repository/files/src%2Fapp.py").mock(
+            return_value=httpx.Response(
+                200,
+                json={"file_path": "src/app.py", "ref": "main", "blob_id": "abc", "size": 9, "encoding": "base64", "content": payload},
+            )
+        )
+        result = operations.read_file("42", "src/app.py", ref="main", max_bytes=1024)
+    assert route.called
+    assert result["kind"] == "text"
+    assert result["content"] == "hello π\n"
+    assert "```" not in repr(result)
+    assert "text" not in result
+
+
+@pytest.mark.parametrize(
+    ("content", "diagnostic"),
+    [
+        (base64.b64encode(b"\x00\x01binary").decode(), "binary"),
+        (base64.b64encode(b"\xff\xfe").decode(), "undecodable"),
+        ("***not-base64***", "invalid_base64"),
+    ],
+)
+def test_read_file_never_projects_binary_undecodable_or_invalid_base64(content, diagnostic):
+    # GL-READ-03 legacy: gitlab_file_reader.py:GitLabLinkReader._get_file
+    operations = _operations()
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/repository/files/data.bin").mock(
+            return_value=httpx.Response(
+                200,
+                json={"file_path": "data.bin", "ref": "main", "blob_id": "abc", "size": 10, "encoding": "base64", "content": content},
+            )
+        )
+        if diagnostic == "invalid_base64":
+            with pytest.raises(Exception) as caught:
+                operations.read_file("42", "data.bin", ref="main", max_bytes=1024)
+            assert getattr(caught.value, "category", None) == "invalid_remote_data"
+        else:
+            result = operations.read_file("42", "data.bin", ref="main", max_bytes=1024)
+            assert result["kind"] == "binary"
+            assert result["diagnostic"] == diagnostic
+            assert "content" not in result
+            assert content not in repr(result)
+
+
+def test_read_file_rejects_declared_or_decoded_capacity_before_projection():
+    # GL-READ-03 legacy: gitlab_file_fetcher.py:GitLabFileFetcher._get_file
+    operations = _operations()
+    body = base64.b64encode(b"0123456789").decode()
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42/repository/files/large.txt")
+        route.side_effect = [
+            httpx.Response(200, json={"file_path": "large.txt", "ref": "main", "blob_id": "a", "size": 1000, "encoding": "base64", "content": body}),
+            httpx.Response(200, json={"file_path": "large.txt", "ref": "main", "blob_id": "a", "size": 1, "encoding": "base64", "content": body}),
+        ]
+        for _case in range(2):
+            with pytest.raises(Exception) as caught:
+                operations.read_file("42", "large.txt", ref="main", max_bytes=4)
+            assert getattr(caught.value, "category", None) == "capacity"
+
+
+def test_repository_reads_require_one_explicit_ref_identity_and_validate_paths():
+    # GL-READ-04/07 legacy: gitlab_file_fetcher.py:fetch_files; gitlab_file_reader.py:read_files
+    operations = _operations()
+    for ref, path in (("", "src"), ("main", "../secret"), ("main", "/absolute")):
+        with pytest.raises(Exception) as caught:
+            operations.list_repository_tree("42", ref=ref, path=path)
+        assert getattr(caught.value, "category", None) == "invalid_input"
+
+
+def test_read_merge_request_bounds_change_count_and_aggregate_diff_bytes():
+    # GL-REVIEW-01 legacy: code_review_runner.py:CodeReviewRunner._fetch_diff
+    operations = _operations(max_diff_bytes=12, max_changes=2)
+    changes = [
+        {"old_path": "a.py", "new_path": "a.py", "new_file": False, "renamed_file": False, "deleted_file": False, "diff": "12345678"},
+        {"old_path": "b.py", "new_path": "b.py", "new_file": False, "renamed_file": False, "deleted_file": False, "diff": "abcdefgh"},
+        {"old_path": "c.py", "new_path": "c.py", "new_file": True, "renamed_file": False, "deleted_file": False, "diff": "must-not-appear"},
+    ]
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests/7/changes").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": 70, "iid": 7, "title": "Review", "state": "opened", "source_branch": "feature", "target_branch": "main", "web_url": f"{ORIGIN}/x/y/-/merge_requests/7", "changes": changes},
+            )
+        )
+        result = operations.read_merge_request("42", 7)
+    assert len(result["changes"]) == 2
+    assert sum(len(change["diff"].encode()) for change in result["changes"]) <= 12
+    assert result["truncated"] is True
+    assert result["warnings"] == ["merge_request_changes_truncated"]
+    assert "must-not-appear" not in repr(result)
+
+
+def test_merge_request_rejects_cross_origin_url_and_non_scalar_identity():
+    # GL-REVIEW-01 legacy: code_review_runner.py:CodeReviewRunner._fetch_diff
+    operations = _operations()
+    base = {
+        "id": 70,
+        "iid": 7,
+        "title": "Review",
+        "state": "opened",
+        "source_branch": "feature",
+        "target_branch": "main",
+        "web_url": f"{ORIGIN}/x/y/-/merge_requests/7",
+        "changes": [],
+    }
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests/7/changes")
+        route.side_effect = [
+            httpx.Response(200, json={**base, "web_url": "https://foreign.example.test/mr/7"}),
+            httpx.Response(200, json={**base, "id": {"raw": "object"}}),
+            httpx.Response(200, json={**base, "iid": [7]}),
+        ]
+        for _case in range(3):
+            with pytest.raises(Exception) as caught:
+                operations.read_merge_request("42", 7)
+            assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+def test_list_pipelines_is_bounded_paginated_and_normalized_for_public_task8_tool():
+    # GL-CI-10 Task 8 portion legacy: gitlab_cicd_collector.py:_fetch_recent_pipeline_branches
+    operations = _operations(max_pages=2)
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42/pipelines")
+        route.side_effect = [
+            httpx.Response(200, headers={"X-Next-Page": "2"}, json=[{"id": 3, "iid": 3, "ref": "main", "sha": "abc", "status": "success", "source": "push", "web_url": f"{ORIGIN}/x/y/-/pipelines/3", "created_at": "2026-08-09T00:00:00Z", "updated_at": "2026-08-09T00:01:00Z"}]),
+            httpx.Response(200, headers={"X-Next-Page": "3"}, json=[{"id": 2, "iid": 2, "ref": "dev", "sha": "def", "status": "failed", "source": "push", "web_url": f"{ORIGIN}/x/y/-/pipelines/2", "created_at": "2026-08-08T00:00:00Z", "updated_at": "2026-08-08T00:01:00Z"}]),
+        ]
+        result = operations.list_pipelines("42", max_items=2)
+    assert [item["id"] for item in result["pipelines"]] == [3, 2]
+    assert result["truncated"] is True
+    assert result["continuation"] == {"next_page": 3}
+
+
+def test_pipeline_list_rejects_cross_origin_web_urls():
+    # GL-CI-10 Task 8 portion legacy: gitlab_cicd_collector.py:_fetch_pipeline_stats
+    operations = _operations()
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42/pipelines").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": ""},
+                json=[{
+                    "id": 3,
+                    "ref": "main",
+                    "sha": "abc",
+                    "status": "success",
+                    "source": "push",
+                    "web_url": "https://foreign.example.test/pipeline/3",
+                    "created_at": "2026-08-09T00:00:00Z",
+                    "updated_at": "2026-08-09T00:01:00Z",
+                }],
+            )
+        )
+        with pytest.raises(Exception) as caught:
+            operations.list_pipelines("42")
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"

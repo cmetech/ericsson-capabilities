@@ -5,13 +5,14 @@ from __future__ import annotations
 import ast
 import json
 import math
-import os
 import re
-import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import MappingProxyType
 from typing import Any
 
 import yaml
+
+import bounded_source
 
 
 SCHEMA_VERSION = 1
@@ -189,8 +190,7 @@ _WORKFLOW_SIDECAR_BYTE_ERROR = "workflow sidecar exceeds safe byte limit"
 _WORKFLOW_SIDECAR_LIMIT_ERROR = "workflow sidecar exceeds safe structure limits"
 
 
-class CatalogError(ValueError):
-    """Raised when catalog source data violates the authoring contract."""
+CatalogError = bounded_source.SourceError
 
 
 def _require_string_mapping_keys(value: object) -> None:
@@ -201,43 +201,7 @@ def _require_string_mapping_keys(value: object) -> None:
     budget, so aliases cannot amplify an otherwise oversized document.
     """
 
-    stack: list[tuple[object, int, bool]] = [(value, 0, False)]
-    active: set[int] = set()
-    completed: set[int] = set()
-    entries = 1
-    while stack:
-        item, depth, leaving = stack.pop()
-        if leaving:
-            identity = id(item)
-            active.remove(identity)
-            completed.add(identity)
-            continue
-        if depth > _WORKFLOW_SIDECAR_MAX_DEPTH:
-            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
-        if isinstance(item, dict):
-            child_count = len(item)
-        elif isinstance(item, list):
-            child_count = len(item)
-        else:
-            continue
-
-        identity = id(item)
-        if identity in active:
-            raise CatalogError(_WORKFLOW_SIDECAR_CYCLE_ERROR)
-        if identity in completed:
-            continue
-        if child_count and depth >= _WORKFLOW_SIDECAR_MAX_DEPTH:
-            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
-        remaining_entries = _WORKFLOW_SIDECAR_MAX_ENTRIES - entries
-        if child_count > remaining_entries:
-            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR)
-        entries += child_count
-        if isinstance(item, dict) and any(not isinstance(field, str) for field in item):
-            raise CatalogError("workflow sidecar field names must be strings")
-        active.add(identity)
-        stack.append((item, depth, True))
-        nested_values = tuple(item.values()) if isinstance(item, dict) else tuple(item)
-        stack.extend((nested, depth + 1, False) for nested in reversed(nested_values))
+    bounded_source._validate_graph(value, bounded_source.WORKFLOW_SIDECAR_CONTRACT)
 
 
 def validate_workflow_sidecar(
@@ -251,7 +215,10 @@ def validate_workflow_sidecar(
     for field in sorted(set(metadata) - _WORKFLOW_SIDECAR_FIELDS):
         problems.append(field)
     profile = metadata.get("language_compatibility")
-    if profile not in {"hermes-legacy", "archon-2026-07"}:
+    if not isinstance(profile, str) or profile not in {
+        "hermes-legacy",
+        "archon-2026-07",
+    }:
         problems.append("language_compatibility")
     for field in sorted(_WORKFLOW_SIDECAR_MAPPING_FIELDS & set(metadata)):
         if not isinstance(metadata[field], dict):
@@ -273,7 +240,9 @@ def validate_workflow_sidecar(
         "pause_lane_policy": {"hold", "release"},
     }
     for field, allowed in enums.items():
-        if field in metadata and metadata[field] not in allowed:
+        if field in metadata and (
+            not isinstance(metadata[field], str) or metadata[field] not in allowed
+        ):
             problems.append(field)
     if (
         "pause_lane_policy" in metadata
@@ -363,33 +332,21 @@ def _relative_label(path: Path) -> str:
 
 
 def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, Any]:
+    if label == "workflow sidecar":
+        value = bounded_source.load_yaml_mapping(
+            path, bounded_source.WORKFLOW_SIDECAR_CONTRACT
+        )
+        if value is None:
+            raise CatalogError("workflow sidecar is missing")
+        return value
+    if label == "workflow metadata":
+        value = bounded_source.load_yaml_mapping(
+            path, bounded_source.WORKFLOW_METADATA_CONTRACT
+        )
+        assert value is not None
+        return value
     try:
-        if label == "workflow sidecar":
-            with path.open("rb") as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode):
-                    raise OSError("workflow sidecar is not a regular file")
-                if metadata.st_size > _WORKFLOW_SIDECAR_MAX_BYTES:
-                    raise CatalogError(_WORKFLOW_SIDECAR_BYTE_ERROR)
-                remaining = _WORKFLOW_SIDECAR_MAX_BYTES + 1
-                chunks: list[bytes] = []
-                while remaining:
-                    chunk = stream.read(remaining)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    remaining -= len(chunk)
-                content = b"".join(chunks)
-            if len(content) > _WORKFLOW_SIDECAR_MAX_BYTES:
-                raise CatalogError(_WORKFLOW_SIDECAR_BYTE_ERROR)
-            text = content.decode("utf-8")
-        else:
-            text = path.read_text(encoding="utf-8")
-        value = yaml.safe_load(text)
-    except RecursionError:
-        if label == "workflow sidecar":
-            raise CatalogError(_WORKFLOW_SIDECAR_LIMIT_ERROR) from None
-        raise CatalogError(f"{label} exceeds safe structure limits") from None
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise CatalogError(f"{path}: invalid {label}: {exc}") from exc
     if not isinstance(value, dict):
@@ -398,25 +355,20 @@ def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, Any]:
 
 
 def _workflow_language_profile(
-    workflow_file: Path, relative: str, problems: list[str]
+    workflow_file: Path,
+    relative: str,
+    problems: list[str],
+    *,
+    workflow_metadata: dict[str, Any],
 ) -> str | None:
     """Read the language profile from the workflow's real sibling sidecar."""
     sidecar = workflow_file.with_name(f"{workflow_file.stem}.hermes.yaml")
-    if not sidecar.is_file():
-        return None
-    try:
-        metadata = _load_yaml_mapping(sidecar, label="workflow sidecar")
-    except CatalogError as exc:
-        if str(exc) in {
-            _WORKFLOW_SIDECAR_BYTE_ERROR,
-            _WORKFLOW_SIDECAR_LIMIT_ERROR,
-        }:
-            raise
-        problems.append(f"invalid workflow sidecar: {relative}")
-        return "invalid"
-    nodes = _load_yaml_mapping(workflow_file, label="workflow metadata").get(
-        "nodes", []
+    metadata = bounded_source.load_yaml_mapping(
+        sidecar, bounded_source.WORKFLOW_SIDECAR_CONTRACT
     )
+    if metadata is None:
+        return None
+    nodes = workflow_metadata.get("nodes", [])
     node_ids = (
         {
             node["id"]
@@ -471,8 +423,9 @@ def load_entries(repo: Path) -> list[dict]:
     return sorted(entries, key=lambda entry: entry["id"])
 
 
-def build_catalog(repo: Path) -> dict:
-    entries = load_entries(repo)
+def build_catalog(repo: Path, *, entries: list[dict] | None = None) -> dict:
+    if entries is None:
+        entries = load_entries(repo)
     manifest_path = repo / "sets/ericsson.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -488,12 +441,18 @@ def build_catalog(repo: Path) -> dict:
     }
 
 
-def validate_repository(repo: Path, entries: list[dict]) -> list[str]:
-    inventory = collect_repository_inventory(repo)
+def validate_repository(
+    repo: Path,
+    entries: list[dict],
+    *,
+    inventory: dict[str, Any] | None = None,
+) -> list[str]:
+    if inventory is None:
+        inventory = collect_repository_inventory(repo)
     represented = collect_entry_inventory(entries)
     problems = compare_inventories(inventory, represented)
     problems.extend(validate_flow_maturity(repo, entries))
-    problems.extend(validate_configuration_names(repo, entries))
+    problems.extend(validate_configuration_names(repo, entries, inventory=inventory))
     problems.extend(validate_entry_paths(repo, entries))
     problems.extend(inventory["problems"])
     return sorted(set(problems))
@@ -701,7 +660,10 @@ def _string_list_metadata(
 
 def _parse_python(path: Path, problems: list[str]) -> ast.Module | None:
     try:
-        return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        compile(tree, str(path), "exec", dont_inherit=True)
+        return tree
     except (OSError, UnicodeError, SyntaxError) as exc:
         problems.append(f"invalid plugin Python: {_relative_label(path)}: {exc}")
         return None
@@ -729,27 +691,253 @@ def _literal_dict_keys(value: ast.Dict) -> set[str]:
     }
 
 
-def _schema_contract(tree: ast.Module) -> tuple[set[str], dict[str, str]]:
+def _schema_contract(
+    tree: ast.Module,
+    **_unused: object,
+) -> tuple[set[str], dict[str, str]]:
+    """Read literal SCHEMAS keys and their declared public names."""
+
+    active = _active_binding(tree.body, len(tree.body), "SCHEMAS")
+    if active is None:
+        return set(), {}
+    schemas = _direct_named_dict(active[1], "SCHEMAS")
+    if schemas is None:
+        return set(), {}
     tools: set[str] = set()
     schema_names: dict[str, str] = {}
-    for schemas in _assigned_dicts(tree, "SCHEMAS"):
-        for key, value in zip(schemas.keys, schemas.values):
-            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
-                continue
-            tools.add(key.value)
-            if isinstance(value, ast.Dict):
-                for field, field_value in zip(value.keys, value.values):
-                    if (
-                        isinstance(field, ast.Constant)
-                        and field.value == "name"
-                        and isinstance(field_value, ast.Constant)
-                        and isinstance(field_value.value, str)
-                    ):
-                        schema_names[key.value] = field_value.value
+    for key, value in zip(schemas.keys, schemas.values):
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            continue
+        tools.add(key.value)
+        if not isinstance(value, ast.Dict):
+            continue
+        for field, field_value in zip(value.keys, value.values):
+            if (
+                isinstance(field, ast.Constant)
+                and field.value == "name"
+                and isinstance(field_value, ast.Constant)
+                and isinstance(field_value.value, str)
+            ):
+                schema_names[key.value] = field_value.value
     return tools, schema_names
 
 
+def _direct_named_dict(statement: ast.stmt | None, name: str) -> ast.Dict | None:
+    if (
+        isinstance(statement, ast.Assign)
+        and bool(statement.targets)
+        and all(isinstance(target, ast.Name) for target in statement.targets)
+        and any(target.id == name for target in statement.targets)
+        and isinstance(statement.value, ast.Dict)
+    ):
+        return statement.value
+    if (
+        isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+        and statement.target.id == name
+        and isinstance(statement.value, ast.Dict)
+    ):
+        return statement.value
+    return None
+
+
+def _directly_binds(statement: ast.stmt, name: str) -> bool:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return statement.name == name
+    if isinstance(statement, ast.Assign):
+        return any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in statement.targets
+        )
+    if isinstance(statement, ast.AnnAssign):
+        return isinstance(statement.target, ast.Name) and statement.target.id == name
+    if isinstance(statement, ast.Delete):
+        return any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in statement.targets
+        )
+    if isinstance(statement, ast.Import):
+        return any(
+            (item.asname or item.name.split(".", 1)[0]) == name
+            for item in statement.names
+        )
+    if isinstance(statement, ast.ImportFrom):
+        return any((item.asname or item.name) == name for item in statement.names)
+    return False
+
+
+def _bound_names(statement: ast.stmt) -> set[str]:
+    """Collect bindings in this lexical scope, including compound statements."""
+
+    class BindingVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self.names.add(node.id)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.names.add(node.name)
+
+            for expression in node.decorator_list:
+                self.visit(expression)
+            for expression in [*node.args.defaults, *node.args.kw_defaults]:
+                if expression is not None:
+                    self.visit(expression)
+            arguments = [
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ]
+            if node.args.vararg is not None:
+                arguments.append(node.args.vararg)
+            if node.args.kwarg is not None:
+                arguments.append(node.args.kwarg)
+            for argument in arguments:
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
+            for parameter in getattr(node, "type_params", ()):
+                self.visit(parameter)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.names.add(node.name)
+            for expression in [*node.decorator_list, *node.bases]:
+                self.visit(expression)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+            for parameter in getattr(node, "type_params", ()):
+                self.visit(parameter)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            for expression in [*node.args.defaults, *node.args.kw_defaults]:
+                if expression is not None:
+                    self.visit(expression)
+
+        def _visit_comprehension(self, node: ast.AST, results: list[ast.expr]) -> None:
+            for generator in node.generators:
+                self.visit(generator.iter)
+                for condition in generator.ifs:
+                    self.visit(condition)
+            for expression in results:
+                self.visit(expression)
+
+        def visit_ListComp(self, node: ast.ListComp) -> None:
+            self._visit_comprehension(node, [node.elt])
+
+        visit_SetComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+        def visit_DictComp(self, node: ast.DictComp) -> None:
+            self._visit_comprehension(node, [node.key, node.value])
+
+        def visit_Import(self, node: ast.Import) -> None:
+            self.names.update(
+                item.asname or item.name.split(".", 1)[0] for item in node.names
+            )
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            self.names.update(item.asname or item.name for item in node.names)
+
+        def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+            if node.type is not None:
+                self.visit(node.type)
+            if isinstance(node.name, str):
+                self.names.add(node.name)
+            for item in node.body:
+                self.visit(item)
+
+        def visit_MatchAs(self, node: ast.MatchAs) -> None:
+            if isinstance(node.name, str):
+                self.names.add(node.name)
+            if node.pattern is not None:
+                self.visit(node.pattern)
+
+        def visit_MatchStar(self, node: ast.MatchStar) -> None:
+            if isinstance(node.name, str):
+                self.names.add(node.name)
+
+        def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+            if isinstance(node.rest, str):
+                self.names.add(node.rest)
+            for pattern in node.patterns:
+                self.visit(pattern)
+
+    visitor = BindingVisitor()
+    visitor.visit(statement)
+    return visitor.names
+
+
+def _scope_directives(statements: list[ast.stmt]) -> set[str]:
+    """Return global/nonlocal names declared in this exact lexical scope."""
+
+    class DirectiveVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+
+        def visit_Global(self, node: ast.Global) -> None:
+            self.names.update(node.names)
+
+        def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+            self.names.update(node.names)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+        visit_ClassDef = visit_FunctionDef
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+    visitor = DirectiveVisitor()
+    for statement in statements:
+        visitor.visit(statement)
+    return visitor.names
+
+
+def _active_binding(
+    statements: list[ast.stmt], end: int, name: str
+) -> tuple[int, ast.stmt | None] | None:
+    active: tuple[int, ast.stmt | None] | None = None
+    for index, statement in enumerate(statements[:end]):
+        if not _may_bind_name(statement, name):
+            continue
+        active = (
+            (index, statement) if _directly_binds(statement, name) else (index, None)
+        )
+    return active
+
+
+def _may_bind_name(statement: ast.stmt, name: str) -> bool:
+    class WildcardVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.found = False
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            self.found = self.found or any(item.name == "*" for item in node.names)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+        visit_ClassDef = visit_FunctionDef
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+    visitor = WildcardVisitor()
+    visitor.visit(statement)
+    return name in _bound_names(statement) or visitor.found
+
+
 def _registered_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
+    """Retain the legacy literal and direct-SCHEMAS registration inventory."""
+
     registered: set[str] = set()
     loops_over_schemas = any(
         isinstance(node, ast.For)
@@ -779,52 +967,361 @@ def _registered_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
     return registered
 
 
-def _schema_loop_handler_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
-    """Recognize a directly bound handler factory in a SCHEMAS loop."""
-    for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
-        if not (
-            isinstance(loop.target, ast.Tuple)
-            and len(loop.target.elts) == 2
-            and all(isinstance(item, ast.Name) for item in loop.target.elts)
-            and isinstance(loop.iter, ast.Call)
-            and isinstance(loop.iter.func, ast.Attribute)
-            and loop.iter.func.attr == "items"
-            and isinstance(loop.iter.func.value, ast.Attribute)
-            and loop.iter.func.value.attr == "SCHEMAS"
+def _schema_import_sources(
+    tree: ast.Module, schema_tools_by_module: dict[str, set[str]]
+) -> dict[str, str]:
+    """Map direct local schema-module imports to their lexical bindings."""
+
+    sources: dict[str, str] = {}
+    for index, statement in enumerate(tree.body):
+        if isinstance(statement, ast.Import):
+            for item_index, item in enumerate(statement.names):
+                source = item.name.rsplit(".", 1)[-1]
+                binding = item.asname or item.name.split(".", 1)[0]
+                final_in_statement = not any(
+                    (later.asname or later.name.split(".", 1)[0]) == binding
+                    for later in statement.names[item_index + 1 :]
+                )
+                if (
+                    final_in_statement
+                    and item.name == source
+                    and source in schema_tools_by_module
+                    and _active_binding(tree.body, len(tree.body), binding)
+                    == (index, statement)
+                ):
+                    sources[binding] = source
+        elif isinstance(statement, ast.ImportFrom):
+            for item_index, item in enumerate(statement.names):
+                binding = item.asname or item.name
+                final_in_statement = not any(
+                    (later.asname or later.name) == binding
+                    for later in statement.names[item_index + 1 :]
+                )
+                if (
+                    final_in_statement
+                    and statement.level > 0
+                    and statement.module is None
+                    and item.name in schema_tools_by_module
+                    and _active_binding(tree.body, len(tree.body), binding)
+                    == (index, statement)
+                ):
+                    sources[binding] = item.name
+    return sources
+
+
+def _direct_register(tree: ast.Module) -> ast.FunctionDef | None:
+    active = _active_binding(tree.body, len(tree.body), "register")
+    if active is None or not isinstance(active[1], ast.FunctionDef):
+        return None
+    register = active[1]
+    if (
+        register.decorator_list
+        or register.args.posonlyargs
+        or len(register.args.args) != 1
+        or register.args.defaults
+        or register.args.kwonlyargs
+        or register.args.vararg is not None
+        or register.args.kwarg is not None
+    ):
+        return None
+    return register
+
+
+def _factory_returns_own_callable(
+    factory: ast.FunctionDef,
+    *,
+    required_parameter: str | None = None,
+) -> bool:
+    """Prove only that a local factory directly returns its own callable."""
+
+    parameters = [*factory.args.posonlyargs, *factory.args.args]
+    if (
+        factory.decorator_list
+        or len(parameters) != 1
+        or factory.args.vararg is not None
+        or factory.args.kwarg is not None
+        or factory.args.kwonlyargs
+        or factory.args.defaults
+    ):
+        return False
+    if required_parameter is not None and parameters[0].arg != required_parameter:
+        return False
+    if len(factory.body) == 1 and isinstance(factory.body[0], ast.Return):
+        return isinstance(factory.body[0].value, ast.Lambda)
+    if (
+        len(factory.body) == 2
+        and isinstance(factory.body[0], (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not factory.body[0].decorator_list
+        and isinstance(factory.body[1], ast.Return)
+        and isinstance(factory.body[1].value, ast.Name)
+    ):
+        return factory.body[1].value.id == factory.body[0].name
+    return False
+
+
+def _schema_loop(
+    statement: ast.stmt, context_name: str
+) -> tuple[str, str, str, ast.Call, int] | None:
+    if not (
+        isinstance(statement, ast.For)
+        and not statement.orelse
+        and isinstance(statement.target, ast.Tuple)
+        and len(statement.target.elts) == 2
+        and all(isinstance(item, ast.Name) for item in statement.target.elts)
+        and statement.target.elts[0].id != statement.target.elts[1].id
+        and isinstance(statement.iter, ast.Call)
+        and not statement.iter.args
+        and not statement.iter.keywords
+        and isinstance(statement.iter.func, ast.Attribute)
+        and statement.iter.func.attr == "items"
+        and isinstance(statement.iter.func.value, ast.Attribute)
+        and statement.iter.func.value.attr == "SCHEMAS"
+    ):
+        return None
+    calls = [
+        (index, item.value)
+        for index, item in enumerate(statement.body)
+        if isinstance(item, ast.Expr)
+        and isinstance(item.value, ast.Call)
+        and isinstance(item.value.func, ast.Attribute)
+        and item.value.func.attr == "register_tool"
+        and isinstance(item.value.func.value, ast.Name)
+        and item.value.func.value.id == context_name
+    ]
+    if len(calls) != 1:
+        return None
+    name = statement.target.elts[0].id
+    schema = statement.target.elts[1].id
+    binding = (
+        statement.iter.func.value.value.id
+        if isinstance(statement.iter.func.value.value, ast.Name)
+        else ""
+    )
+    call_index, call = calls[0]
+    return name, schema, binding, call, call_index
+
+
+def _keyword_values(call: ast.Call) -> dict[str, ast.expr] | None:
+    values: dict[str, ast.expr] = {}
+    for keyword in call.keywords:
+        if keyword.arg is None or keyword.arg in values:
+            return None
+        values[keyword.arg] = keyword.value
+    return values
+
+
+def _callable_map_keys(
+    tree: ast.Module,
+    register: ast.FunctionDef,
+    loop_index: int,
+    map_name: str,
+) -> set[str] | None:
+    parameter_names = {
+        argument.arg for argument in [*register.args.posonlyargs, *register.args.args]
+    }
+    directives = _scope_directives(register.body)
+    if map_name in parameter_names:
+        return None
+    local = _active_binding(register.body, loop_index, map_name)
+    if local is not None:
+        if map_name in directives:
+            return None
+        statements = register.body
+        map_index, statement = local
+    else:
+        map_scope = (
+            register.body[:loop_index] if map_name in directives else register.body
+        )
+        if any(_may_bind_name(item, map_name) for item in map_scope):
+            return None
+        statements = tree.body
+        module = _active_binding(tree.body, len(tree.body), map_name)
+        if module is None:
+            return None
+        map_index, statement = module
+    mapping = _direct_named_dict(statement, map_name)
+    if mapping is None:
+        return None
+
+    def callable_binding(name: str) -> tuple[int, ast.stmt | None] | None:
+        if name in parameter_names:
+            return None
+        active = _active_binding(statements, map_index, name)
+        local_map = statements is register.body
+        if active is not None and local_map and name in directives:
+            return None
+        if active is not None or statements is tree.body:
+            return active
+        callable_scope = (
+            register.body[:map_index] if name in directives else register.body
+        )
+        if any(_may_bind_name(item, name) for item in callable_scope):
+            return None
+        return _active_binding(tree.body, len(tree.body), name)
+
+    keys: set[str] = set()
+    for key, value in zip(mapping.keys, mapping.values):
+        if (
+            not isinstance(key, ast.Constant)
+            or not isinstance(key.value, str)
+            or key.value in keys
+        ):
+            return None
+        callable_value = isinstance(value, ast.Lambda)
+        if isinstance(value, ast.Name):
+            binding = callable_binding(value.id)
+            callable_value = binding is not None and isinstance(
+                binding[1], (ast.FunctionDef, ast.AsyncFunctionDef)
+            )
+        elif (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and len(value.args) == 1
+            and not value.keywords
+        ):
+            binding = callable_binding(value.func.id)
+            callable_value = (
+                binding is not None
+                and isinstance(binding[1], ast.FunctionDef)
+                and _factory_returns_own_callable(binding[1])
+            )
+        if not callable_value:
+            return None
+        keys.add(key.value)
+    return keys
+
+
+def _schema_loop_handler_contract(
+    tree: ast.Module,
+    schema_bindings: dict[str, set[str]],
+) -> tuple[set[str], set[str]]:
+    """Recognize only the authorized direct structural registration forms."""
+
+    register = _direct_register(tree)
+    if register is None:
+        return set(), set()
+    context_name = register.args.args[0].arg
+    directives = _scope_directives(register.body)
+    handled: set[str] = set()
+    registered: set[str] = set()
+    for loop_index, statement in enumerate(register.body):
+        shell = _schema_loop(statement, context_name)
+        if shell is None:
+            continue
+        name, schema, binding, call, call_index = shell
+        loop_tools = schema_bindings.get(binding)
+        if loop_tools is None:
+            continue
+        schema_binding_scope = (
+            register.body[:loop_index] if binding in directives else register.body
+        )
+        if (
+            context_name in {name, schema, binding}
+            or any(
+                _may_bind_name(item, context_name)
+                for item in register.body[:loop_index]
+            )
+            or any(_may_bind_name(item, binding) for item in schema_binding_scope)
         ):
             continue
-        name_variable = loop.target.elts[0].id
-        factories = {
-            node.name
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and len(node.args.args) == 1
-            and node.args.args[0].arg == name_variable
-        }
-        for call in ast.walk(loop):
-            if not (
-                isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Attribute)
-                and call.func.attr == "register_tool"
+        loop_prefix_bindings = set().union(
+            *(_bound_names(item) for item in statement.body[:call_index]), set()
+        )
+        if {context_name, name, schema} & loop_prefix_bindings:
+            continue
+        if any(
+            isinstance(item, ast.ImportFrom)
+            and any(alias.name == "*" for alias in item.names)
+            for item in statement.body[:call_index]
+        ):
+            continue
+        keywords = _keyword_values(call)
+        if keywords is None:
+            continue
+        if not (
+            isinstance(keywords.get("name"), ast.Name)
+            and keywords["name"].id == name
+            and isinstance(keywords.get("schema"), ast.Name)
+            and keywords["schema"].id == schema
+        ):
+            continue
+        handler = keywords.get("handler")
+        if (
+            isinstance(handler, ast.Call)
+            and isinstance(handler.func, ast.Name)
+            and len(handler.args) == 1
+            and not handler.keywords
+            and isinstance(handler.args[0], ast.Name)
+            and handler.args[0].id == name
+        ):
+            if handler.func.id in (
+                {name, schema, context_name} | loop_prefix_bindings | directives
             ):
                 continue
-            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-            name_value = keywords.get("name")
-            handler_value = keywords.get("handler")
-            if not (
-                isinstance(name_value, ast.Name)
-                and name_value.id == name_variable
-                and isinstance(handler_value, ast.Call)
-                and isinstance(handler_value.func, ast.Name)
-                and handler_value.func.id in factories
-                and len(handler_value.args) == 1
-                and isinstance(handler_value.args[0], ast.Name)
-                and handler_value.args[0].id == name_variable
-                and not handler_value.keywords
+            factory_info = _active_binding(register.body, loop_index, handler.func.id)
+            if (
+                factory_info is not None
+                and isinstance(factory_info[1], ast.FunctionDef)
+                and _factory_returns_own_callable(
+                    factory_info[1], required_parameter=name
+                )
+            ):
+                handled.update(loop_tools)
+                registered.update(loop_tools)
+            continue
+        if (
+            isinstance(handler, ast.Subscript)
+            and isinstance(handler.value, ast.Name)
+            and isinstance(handler.slice, ast.Name)
+            and handler.slice.id == name
+        ):
+            if handler.value.id in (
+                {name, schema, context_name} | loop_prefix_bindings
             ):
                 continue
-            return set(schema_tools)
-    return set()
+            mapped = _callable_map_keys(tree, register, loop_index, handler.value.id)
+            if mapped is not None:
+                handled.update(mapped)
+                registered.update(loop_tools & mapped)
+    return handled, registered
+
+
+def _schema_loop_handler_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
+    """Compatibility wrapper for the legacy single-binding helper."""
+
+    bindings = {
+        node.iter.func.value.value.id: set(schema_tools)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Call)
+        and isinstance(node.iter.func, ast.Attribute)
+        and isinstance(node.iter.func.value, ast.Attribute)
+        and isinstance(node.iter.func.value.value, ast.Name)
+        and node.iter.func.value.attr == "SCHEMAS"
+    }
+    return _schema_loop_handler_contract(tree, bindings)[0]
+
+
+def _portable_config_basename(value: object) -> str | None:
+    if not isinstance(value, str) or not value or value in {".", ".."}:
+        return None
+    if value.rstrip(" .") != value or any(
+        ord(character) < 32
+        or 0xD800 <= ord(character) <= 0xDFFF
+        or character in '<>"/\\|?*:'
+        for character in value
+    ):
+        return None
+    device = value.split(".", 1)[0].upper()
+    if device in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or re.fullmatch(
+        r"(?:COM|LPT)[1-9¹²³]", device
+    ):
+        return None
+    if PurePosixPath(value).name != value or PureWindowsPath(value).name != value:
+        return None
+    if len(value.encode("utf-16-le")) > bounded_source.MAX_WIN32_COMPONENT_UTF16_BYTES:
+        return None
+    return value
 
 
 def _plugin_config_schema_contract(
@@ -836,25 +1333,32 @@ def _plugin_config_schema_contract(
     descriptor = metadata.get("config_schema")
     if descriptor is None:
         return set(), set()
-    if not isinstance(descriptor, str) or _is_unsafe_reference(descriptor):
+    safe_descriptor = _portable_config_basename(descriptor)
+    if safe_descriptor is None:
         problems.append(f"unsafe plugin config schema: {relative}")
         return set(), set()
-    path = plugin_dir / descriptor
     try:
-        resolved = path.resolve(strict=True)
-        plugin_root = plugin_dir.resolve(strict=True)
-        resolved.relative_to(plugin_root)
-        if not resolved.is_file() or resolved.stat().st_size > 512 * 1024:
-            raise OSError
-        value = json.loads(resolved.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        problems.append(f"missing plugin config schema: {relative}: {descriptor}")
+        is_junction = getattr(plugin_dir, "is_junction", lambda: False)
+        if plugin_dir.is_symlink() or is_junction():
+            problems.append(f"unsafe plugin config schema: {relative}")
+            return set(), set()
+    except OSError:
+        problems.append(f"invalid plugin config schema: {relative}: {safe_descriptor}")
         return set(), set()
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-        problems.append(f"invalid plugin config schema: {relative}: {descriptor}")
-        return set(), set()
-    if not isinstance(value, dict):
-        problems.append(f"invalid plugin config schema: {relative}: {descriptor}")
+    try:
+        value = bounded_source.load_json_mapping_relative(
+            plugin_dir, safe_descriptor, bounded_source.CONFIG_SCHEMA_CONTRACT
+        )
+        assert value is not None
+    except CatalogError as exc:
+        if exc.code is bounded_source.SourceErrorCode.MISSING_SOURCE:
+            problems.append(
+                f"missing plugin config schema: {relative}: {safe_descriptor}"
+            )
+        else:
+            problems.append(
+                f"invalid plugin config schema: {relative}: {safe_descriptor}"
+            )
         return set(), set()
     version = value.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
@@ -880,6 +1384,7 @@ def _plugin_config_schema_contract(
         if (
             not isinstance(field_id, str)
             or not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", field_id)
+            or not isinstance(storage, str)
             or storage not in {"setting", "secret"}
             or not isinstance(field_type, str)
             or not field_type.strip()
@@ -1079,11 +1584,14 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
             if tree is not None:
                 python_trees.append((python_file, tree))
         schema_tools: set[str] = set()
+        schema_tools_by_module: dict[str, set[str]] = {}
         schema_names: dict[str, str] = {}
         implementation_environment: set[str] = set()
-        for _python_file, tree in python_trees:
+        for python_file, tree in python_trees:
             file_tools, file_schema_names = _schema_contract(tree)
             schema_tools.update(file_tools)
+            if file_tools:
+                schema_tools_by_module[python_file.stem] = file_tools
             schema_names.update(file_schema_names)
             implementation_environment.update(_environment_accesses(tree))
         init_tree = next(
@@ -1093,10 +1601,14 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         handler_tools: set[str] = set()
         registered_tools: set[str] = set()
         if init_tree is not None:
-            for handlers in _assigned_dicts(init_tree, "handlers"):
-                handler_tools.update(_literal_dict_keys(handlers))
-            handler_tools.update(_schema_loop_handler_tools(init_tree, schema_tools))
-            registered_tools = _registered_tools(init_tree, schema_tools)
+            schema_sources = _schema_import_sources(init_tree, schema_tools_by_module)
+            schema_bindings = {
+                binding: set(schema_tools_by_module[source])
+                for binding, source in schema_sources.items()
+            }
+            handler_tools, registered_tools = _schema_loop_handler_contract(
+                init_tree, schema_bindings
+            )
 
         for tool in sorted(declared_tools - schema_tools):
             problems.append(
@@ -1203,7 +1715,12 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
     for workflow_file in workflow_files:
         relative = workflow_file.relative_to(repo).as_posix()
         metadata = _load_yaml_mapping(workflow_file, label="workflow metadata")
-        profile = _workflow_language_profile(workflow_file, relative, problems)
+        profile = _workflow_language_profile(
+            workflow_file,
+            relative,
+            problems,
+            workflow_metadata=metadata,
+        )
         actual_workflows.add(relative)
         name = metadata.get("name")
         if isinstance(name, str):
@@ -1336,40 +1853,54 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         for path in sorted((repo / "docs/flows").glob("*.md"))
         if not path.name.startswith("_")
     }
-    return {
-        "manifest_skills": manifest_skills,
-        "manifest_plugins": manifest_plugins,
-        "manifest_mcp_local": manifest_mcp_local,
-        "manifest_workflows": manifest_workflows,
-        "replaced_builtin_skills": replaced_builtin_skills,
-        "actual_skills": actual_skills,
-        "actual_plugins": actual_plugins,
-        "actual_mcp_local": {
-            path.parent.relative_to(repo).as_posix()
-            for path in sorted((repo / "mcp").glob("*/run_server.py"))
-        },
-        "actual_workflows": actual_workflows,
-        "skill_names": skill_names,
-        "plugin_names": plugin_names,
-        "mcp_servers": mcp_servers,
-        "mcp_local_servers": mcp_local_servers,
-        "mcp_local_tools": mcp_local_tools,
-        "mcp_server_tools": mcp_server_tools,
-        "workflow_names": workflow_names,
-        "workflow_inputs": workflow_inputs,
-        "workflow_toolsets": workflow_toolsets,
-        "workflow_mcp_servers": workflow_mcp_servers,
-        "workflow_tool_nodes": workflow_tool_nodes,
-        "workflow_core_tools": workflow_core_tools,
-        "tools": tools,
-        "configuration": configuration,
-        "required_configuration": required_configuration,
-        "optional_configuration": optional_configuration,
-        "manifest_environment": manifest_environment,
-        "implementation_configuration": implementation_configuration,
-        "flows": flows,
-        "problems": problems,
-    }
+    return _deep_freeze(
+        {
+            "manifest_skills": manifest_skills,
+            "manifest_plugins": manifest_plugins,
+            "manifest_mcp_local": manifest_mcp_local,
+            "manifest_workflows": manifest_workflows,
+            "replaced_builtin_skills": replaced_builtin_skills,
+            "actual_skills": actual_skills,
+            "actual_plugins": actual_plugins,
+            "actual_mcp_local": {
+                path.parent.relative_to(repo).as_posix()
+                for path in sorted((repo / "mcp").glob("*/run_server.py"))
+            },
+            "actual_workflows": actual_workflows,
+            "skill_names": skill_names,
+            "plugin_names": plugin_names,
+            "mcp_servers": mcp_servers,
+            "mcp_local_servers": mcp_local_servers,
+            "mcp_local_tools": mcp_local_tools,
+            "mcp_server_tools": mcp_server_tools,
+            "workflow_names": workflow_names,
+            "workflow_inputs": workflow_inputs,
+            "workflow_toolsets": workflow_toolsets,
+            "workflow_mcp_servers": workflow_mcp_servers,
+            "workflow_tool_nodes": workflow_tool_nodes,
+            "workflow_core_tools": workflow_core_tools,
+            "tools": tools,
+            "configuration": configuration,
+            "required_configuration": required_configuration,
+            "optional_configuration": optional_configuration,
+            "manifest_environment": manifest_environment,
+            "implementation_configuration": implementation_configuration,
+            "flows": flows,
+            "problems": problems,
+        }
+    )
+
+
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _deep_freeze(item) for key, item in value.items()}
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_deep_freeze(item) for item in value)
+    return value
 
 
 def collect_entry_inventory(entries: list[dict]) -> dict[str, set[str]]:
@@ -1535,8 +2066,14 @@ def validate_flow_maturity(repo: Path, entries: list[dict]) -> list[str]:
     return problems
 
 
-def validate_configuration_names(repo: Path, entries: list[dict]) -> list[str]:
-    inventory = collect_repository_inventory(repo)
+def validate_configuration_names(
+    repo: Path,
+    entries: list[dict],
+    *,
+    inventory: dict[str, Any] | None = None,
+) -> list[str]:
+    if inventory is None:
+        inventory = collect_repository_inventory(repo)
     represented = collect_entry_inventory(entries)
     problems = [
         f"unrepresented configuration: {name}"

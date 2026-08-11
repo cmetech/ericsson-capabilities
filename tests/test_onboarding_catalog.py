@@ -316,11 +316,13 @@ class RepoFixture:
             {
                 "name": "ericsson",
                 "version": "1.2.3",
+                "description": "Example Ericsson capability set.",
                 "skills": ["skills/ericsson/example"],
                 "plugins": ["plugins/ericsson-example"],
                 "mcpServers": "mcp/mcp-servers.yaml",
                 "mcpLocal": ["mcp/example-mcp"],
                 "workflows": ["workflows/example.yml"],
+                "personas": [],
                 "env": [],
             },
         )
@@ -359,7 +361,7 @@ class RepoFixture:
             "def register(ctx):\n"
             "    handlers = {'example_tool': lambda args: args}\n"
             "    for name, schema in example_tools.SCHEMAS.items():\n"
-            "        ctx.register_tool(name=name, schema=schema, handler=handlers[name])\n",
+            "        ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handlers[name])\n",
         )
         self._write_text("mcp/example-mcp/run_server.py", "")
         self._write_yaml(
@@ -1344,7 +1346,7 @@ def test_validation_accepts_direct_handler_factory_bound_to_schema_loop(
         "    def handler(name):\n"
         "        return lambda args: (name, args)\n"
         "    for name, schema in example_tools.SCHEMAS.items():\n"
-        "        ctx.register_tool(name=name, schema=schema, handler=handler(name))\n",
+        "        ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handler(name))\n",
     )
     repo_fixture.write_complete_entry()
 
@@ -1362,9 +1364,9 @@ def test_validation_preserves_literal_handler_map_registration(
 @pytest.mark.parametrize(
     "registration",
     [
-        "ctx.register_tool(name=name, schema=schema, handler=resolve(name))",
-        "ctx.register_tool(name=name, schema=schema, handler=handler(schema))",
-        "ctx.register_tool(name=name, schema=schema, handler=handler(name))",
+        "ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=resolve(name))",
+        "ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handler(schema))",
+        "ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handler(name))",
     ],
     ids=("dynamic-factory", "wrong-loop-variable", "undefined-factory"),
 )
@@ -2127,43 +2129,28 @@ def test_catalog_library_bounds_read_when_sidecar_grows_after_open(
     sidecar = _configure_flat_archon_fixture(repo_fixture)
     sidecar.write_bytes(_sidecar_bytes(1024))
     replacement = _sidecar_bytes(256 * 1024)
-    original_open = Path.open
+    import bounded_source
+
+    original_read = bounded_source._read_descriptor
     requests: list[int] = []
     returned: list[int] = []
+    grown = False
+    identity = (sidecar.stat().st_dev, sidecar.stat().st_ino)
 
-    class GrowingReader:
-        def __init__(self, stream) -> None:
-            self.stream = stream
-            self.grown = False
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal grown
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != identity:
+            return original_read(descriptor, size)
+        if not grown:
+            grown = True
+            sidecar.write_bytes(replacement)
+        requests.append(size)
+        content = original_read(descriptor, size)
+        returned.append(len(content))
+        return content
 
-        def __enter__(self):
-            self.stream.__enter__()
-            return self
-
-        def __exit__(self, *args):
-            return self.stream.__exit__(*args)
-
-        def __getattr__(self, name: str):
-            return getattr(self.stream, name)
-
-        def read(self, size: int = -1) -> bytes:
-            if not self.grown:
-                self.grown = True
-                with original_open(sidecar, "wb") as replacement_file:
-                    replacement_file.write(replacement)
-            requests.append(size)
-            content = self.stream.read(size)
-            returned.append(len(content))
-            return content
-
-    def tracked_open(path: Path, *args, **kwargs):
-        stream = original_open(path, *args, **kwargs)
-        mode = args[0] if args else kwargs.get("mode", "r")
-        if path == sidecar and mode == "rb":
-            return GrowingReader(stream)
-        return stream
-
-    monkeypatch.setattr(Path, "open", tracked_open)
+    monkeypatch.setattr(bounded_source, "_read_descriptor", tracked_read)
 
     with pytest.raises(CatalogError) as exc:
         validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
@@ -2182,44 +2169,28 @@ def test_catalog_library_accumulates_bounded_short_reads_after_sidecar_growth(
     sidecar = _configure_flat_archon_fixture(repo_fixture)
     sidecar.write_bytes(_sidecar_bytes(1024))
     replacement = _sidecar_bytes(64 * 1024 + 1)
-    original_open = Path.open
+    import bounded_source
+
+    original_read = bounded_source._read_descriptor
     requests: list[int] = []
     total_returned = 0
+    grown = False
+    identity = (sidecar.stat().st_dev, sidecar.stat().st_ino)
 
-    class ShortGrowingReader:
-        def __init__(self, stream) -> None:
-            self.stream = stream
-            self.grown = False
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal grown, total_returned
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != identity:
+            return original_read(descriptor, size)
+        if not grown:
+            grown = True
+            sidecar.write_bytes(replacement)
+        requests.append(size)
+        content = original_read(descriptor, min(size, 997))
+        total_returned += len(content)
+        return content
 
-        def __enter__(self):
-            self.stream.__enter__()
-            return self
-
-        def __exit__(self, *args):
-            return self.stream.__exit__(*args)
-
-        def __getattr__(self, name: str):
-            return getattr(self.stream, name)
-
-        def read(self, size: int = -1) -> bytes:
-            nonlocal total_returned
-            if not self.grown:
-                self.grown = True
-                with original_open(sidecar, "wb") as replacement_file:
-                    replacement_file.write(replacement)
-            requests.append(size)
-            content = self.stream.read(min(size, 997))
-            total_returned += len(content)
-            return content
-
-    def tracked_open(path: Path, *args, **kwargs):
-        stream = original_open(path, *args, **kwargs)
-        mode = args[0] if args else kwargs.get("mode", "r")
-        if path == sidecar and mode == "rb":
-            return ShortGrowingReader(stream)
-        return stream
-
-    monkeypatch.setattr(Path, "open", tracked_open)
+    monkeypatch.setattr(bounded_source, "_read_descriptor", tracked_read)
 
     with pytest.raises(CatalogError) as exc:
         validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
@@ -2246,37 +2217,24 @@ from pathlib import Path
 
 target = Path(os.environ["SIDECAR_RACE_TARGET"])
 marker = Path(os.environ["SIDECAR_RACE_MARKER"])
-original_open = Path.open
+original_read = os.read
 replacement = (b"language_compatibility: archon-2026-07\\n#" + b"x" * (256 * 1024))
+identity = (target.stat().st_dev, target.stat().st_ino)
+grown = False
 
-class GrowingReader:
-    def __init__(self, stream):
-        self.stream = stream
-        self.grown = False
-    def __enter__(self):
-        self.stream.__enter__()
-        return self
-    def __exit__(self, *args):
-        return self.stream.__exit__(*args)
-    def __getattr__(self, name):
-        return getattr(self.stream, name)
-    def read(self, size=-1):
-        if not self.grown:
-            self.grown = True
-            with original_open(target, "wb") as output:
-                output.write(replacement)
-        content = self.stream.read(size)
-        marker.write_text(json.dumps({"requested": size, "returned": len(content)}))
-        return content
+def tracked_read(descriptor, size):
+    global grown
+    metadata = os.fstat(descriptor)
+    if (metadata.st_dev, metadata.st_ino) != identity:
+        return original_read(descriptor, size)
+    if not grown:
+        grown = True
+        target.write_bytes(replacement)
+    content = original_read(descriptor, size)
+    marker.write_text(json.dumps({"requested": size, "returned": len(content)}))
+    return content
 
-def tracked_open(path, *args, **kwargs):
-    stream = original_open(path, *args, **kwargs)
-    mode = args[0] if args else kwargs.get("mode", "r")
-    if path == target and mode == "rb":
-        return GrowingReader(stream)
-    return stream
-
-Path.open = tracked_open
+os.read = tracked_read
 """,
         encoding="utf-8",
     )

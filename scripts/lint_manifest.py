@@ -6,6 +6,7 @@ Prints one JSON object; exit 0 when ok, 1 when problems were found.
 Run from the repo root (paths in the manifest are repo-relative).
 """
 
+import argparse
 import json
 import re
 import sys
@@ -13,9 +14,11 @@ from pathlib import Path
 
 import yaml
 
-REPO = Path(__file__).resolve().parents[1]
-CATALOG_SCRIPTS = REPO / "skills/ericsson/onboard-ericsson-capabilities/scripts"
+HOST_REPO = Path(__file__).resolve().parents[1]
+REPO = HOST_REPO
+CATALOG_SCRIPTS = HOST_REPO / "skills/ericsson/onboard-ericsson-capabilities/scripts"
 sys.path.insert(0, str(CATALOG_SCRIPTS))
+import bounded_source  # noqa: E402
 from catalog_lib import validate_workflow_sidecar  # noqa: E402
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -34,6 +37,8 @@ REQUIRED = [
     "personas",
     "env",
 ]
+MAX_ARCHON_NODES = 2_048
+MAX_ARCHON_DEPENDENCY_EDGES = 8_192
 
 
 def _is_string_list(value):
@@ -63,6 +68,8 @@ def _lint_archon_workflow(document):
     nodes = document.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         return problems + ["nodes must be a non-empty list"]
+    if len(nodes) > MAX_ARCHON_NODES:
+        return ["workflow exceeds safe node limit"]
 
     by_id = {}
     dependencies = {}
@@ -118,37 +125,65 @@ def _lint_archon_workflow(document):
         if not any(key in node for key in ("approval", "prompt", "bash")):
             problems.append(f"{label}: requires prompt, approval, or bash")
 
+    edge_count = sum(len(required) for required in dependencies.values())
+    if edge_count > MAX_ARCHON_DEPENDENCY_EDGES:
+        return ["workflow exceeds safe dependency edge limit"]
+
+    known_ids = set(by_id)
     for node_id, required in dependencies.items():
-        for dependency in sorted(required - set(by_id)):
+        for dependency in sorted(required - known_ids):
             problems.append(f"node {node_id}: unknown dependency: {dependency}")
 
-    def has_approval_ancestor(node_id, seen=None):
-        seen = set() if seen is None else seen
-        if node_id in seen:
-            return False
-        seen.add(node_id)
-        direct = dependencies.get(node_id, set())
-        return bool(direct & approval_ids) or any(
-            has_approval_ancestor(parent, seen) for parent in direct
-        )
-
-    for node_id in sorted(write_nodes):
-        if not has_approval_ancestor(node_id):
-            problems.append(f"node {node_id}: outward tool requires approval ancestor")
+    approval_reachable, cyclic = _approval_reachability(dependencies, approval_ids)
+    if cyclic:
+        problems.append("workflow dependency graph contains a cycle")
+    else:
+        for node_id in sorted(write_nodes):
+            if not approval_reachable.get(node_id, False):
+                problems.append(
+                    f"node {node_id}: outward tool requires approval ancestor"
+                )
     return problems
+
+
+def _approval_reachability(dependencies, approval_ids):
+    """Return approval reachability and cycle fact in O(nodes + edges)."""
+    node_ids = set(dependencies)
+    indegree = {node_id: 0 for node_id in node_ids}
+    children = {node_id: [] for node_id in node_ids}
+    for node_id, parents in dependencies.items():
+        for parent in parents:
+            if parent not in node_ids:
+                continue
+            indegree[node_id] += 1
+            children[parent].append(node_id)
+    queue = [node_id for node_id, degree in indegree.items() if degree == 0]
+    reachable = {node_id: False for node_id in node_ids}
+    seen = 0
+    while queue:
+        node_id = queue.pop()
+        seen += 1
+        for child in children[node_id]:
+            reachable[child] = (
+                reachable[child] or node_id in approval_ids or reachable[node_id]
+            )
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
+    return reachable, seen != len(node_ids)
 
 
 def _workflow_language_profile(path, workflow):
     """Return the explicitly packaged workflow profile, if one exists."""
     sidecar = path.with_name(f"{path.stem}.hermes.yaml")
-    if not sidecar.is_file():
-        return None, []
     try:
-        document = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError):
-        return "invalid", ["root"]
-    if not isinstance(document, dict):
-        return "invalid", ["root"]
+        document = bounded_source.load_yaml_mapping(
+            sidecar, bounded_source.WORKFLOW_SIDECAR_CONTRACT
+        )
+    except bounded_source.SourceError as exc:
+        return "invalid", [str(exc)]
+    if document is None:
+        return None, []
     nodes = workflow.get("nodes", []) if isinstance(workflow, dict) else []
     node_ids = (
         {
@@ -302,14 +337,20 @@ def lint(manifest_path: Path) -> list[str]:
             problems.append(f"workflow missing: {rel}")
             continue
         try:
-            loaded = yaml.safe_load(p.read_text())
+            loaded = bounded_source.load_yaml_mapping(
+                p, bounded_source.WORKFLOW_METADATA_CONTRACT
+            )
+            assert loaded is not None
             profile, sidecar_errors = _workflow_language_profile(p, loaded)
             flat_requires = isinstance(loaded, dict) and isinstance(
                 loaded.get("requires"), list
             )
             if sidecar_errors:
                 errors = [
-                    f"invalid workflow sidecar: {field}" for field in sidecar_errors
+                    field
+                    if field.startswith("workflow sidecar ")
+                    else f"invalid workflow sidecar: {field}"
+                    for field in sidecar_errors
                 ]
             elif profile == "archon-2026-07":
                 errors = _lint_archon_workflow(loaded)
@@ -322,13 +363,20 @@ def lint(manifest_path: Path) -> list[str]:
                 if wc is None:
                     sys.path.insert(
                         0,
-                        str(REPO / "skills/ericsson/workflow-orchestrator/scripts"),
+                        str(
+                            HOST_REPO / "skills/ericsson/workflow-orchestrator/scripts"
+                        ),
                     )
                     import workflow_ctl as wc_module
 
                     wc = wc_module
-                errors, _ = wc.validate_workflow(wc.load_workflow(p))
-            problems += [f"{rel}: {e}" for e in errors]
+                errors, _ = wc.validate_workflow(loaded)
+            problems += [
+                error if error.startswith("workflow sidecar ") else f"{rel}: {error}"
+                for error in errors
+            ]
+        except bounded_source.SourceError as e:
+            problems.append(f"{rel}: {e}")
         except Exception as e:
             problems.append(f"{rel}: {e}")
 
@@ -358,16 +406,37 @@ def lint(manifest_path: Path) -> list[str]:
     return problems
 
 
+class _JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, _message):
+        raise ValueError("invalid arguments")
+
+
+def parse_args():
+    parser = _JsonArgumentParser(description=__doc__)
+    parser.add_argument("manifest", type=Path)
+    parser.add_argument("--repo", type=Path, default=REPO)
+    return parser.parse_args()
+
+
 def main():
-    if len(sys.argv) != 2:
+    global REPO
+    if len(sys.argv) == 1:
         print(json.dumps({"error": "usage: lint_manifest.py <manifest.json>"}))
-        sys.exit(1)
-    problems = lint(Path(sys.argv[1]))
+        return 1
+    try:
+        args = parse_args()
+    except ValueError:
+        print(json.dumps({"error": "usage: lint_manifest.py <manifest.json>"}))
+        return 1
+    REPO = args.repo.resolve()
+    manifest = args.manifest if args.manifest.is_absolute() else REPO / args.manifest
+    problems = lint(manifest)
     if problems:
         print(json.dumps({"ok": False, "problems": problems}, indent=2))
-        sys.exit(1)
+        return 1
     print(json.dumps({"ok": True}))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -35,6 +35,7 @@ _MAX_COMMENTS = 2000
 _MAX_DISCUSSIONS = 1000
 _MAX_NOTES_PER_DISCUSSION = 500
 _MAX_NOTE_BODY = 128 * 1024
+_MAX_MERGE_REQUESTS = 2000
 _MAX_REF = 512
 _MAX_PATH = 4096
 _MAX_TREE_ITEMS = 2000
@@ -1070,6 +1071,269 @@ class GitLabOperations:
             "notes_truncated": any(
                 discussion["notes_truncated"] for discussion in discussions
             ),
+            "truncated": pages.truncated,
+            "continuation": self._continuation(pages),
+        }
+
+    def _normalize_merge_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        project_path: str,
+    ) -> dict[str, Any]:
+        identifier = _remote_positive_int(payload.get("id"))
+        iid = _remote_positive_int(payload.get("iid"))
+        title = payload.get("title")
+        state = payload.get("state")
+        draft = payload.get("draft")
+        if (
+            not isinstance(title, str)
+            or not title
+            or len(title) > _MAX_MR_TITLE_INPUT
+            or "\x00" in title
+            or state not in {"opened", "closed", "merged", "locked"}
+            or not isinstance(draft, bool)
+        ):
+            raise GitLabError("invalid_remote_data")
+        source_branch = _validate_remote_ref(payload.get("source_branch"))
+        target_branch = _validate_remote_ref(payload.get("target_branch"))
+        _created, created_at = _rfc3339(payload.get("created_at"), remote=True)
+        _updated, updated_at = _rfc3339(payload.get("updated_at"), remote=True)
+
+        optional_times: dict[str, str | None] = {}
+        for source, target in (("merged_at", "merged_at"), ("closed_at", "closed_at")):
+            value = payload.get(source)
+            if value is None:
+                optional_times[target] = None
+            else:
+                _parsed, optional_times[target] = _rfc3339(value, remote=True)
+        raw_labels = _as_list(payload.get("labels"))
+        if len(raw_labels) > 100:
+            raise GitLabError("invalid_remote_data")
+        labels: list[str] = []
+        for label in raw_labels:
+            if (
+                not isinstance(label, str)
+                or not label
+                or len(label) > 255
+                or "\x00" in label
+            ):
+                raise GitLabError("invalid_remote_data")
+            labels.append(label)
+        note_count = payload.get("user_notes_count")
+        all_resolved = payload.get("blocking_discussions_resolved")
+        if (
+            isinstance(note_count, bool)
+            or not isinstance(note_count, int)
+            or note_count < 0
+            or not isinstance(all_resolved, bool)
+        ):
+            raise GitLabError("invalid_remote_data")
+        web_url = _canonical_remote_url(
+            payload.get("web_url"),
+            self.client.auth.origin,
+            f"/{project_path}/-/merge_requests/{iid}",
+        )
+        return {
+            "id": identifier,
+            "iid": iid,
+            "title": title,
+            "state": state,
+            "draft": draft,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "author": self._normalize_user(payload.get("author")),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            **optional_times,
+            "labels": labels,
+            "note_count": note_count,
+            "discussion_resolution": {"all_resolved": all_resolved},
+            "web_url": web_url,
+        }
+
+    def list_merge_requests(
+        self,
+        project: str | int,
+        *,
+        state: str = "opened",
+        source_branch: str | None = None,
+        target_branch: str | None = None,
+        search: str | None = None,
+        order_by: str = "created_at",
+        sort: str = "desc",
+        created_after: str | None = None,
+        updated_after: str | None = None,
+        lookback_hours: int | None = None,
+        max_items: int = 100,
+        continuation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        state = "opened" if state == "open" else state
+        if state not in {"opened", "closed", "merged", "all"}:
+            raise GitLabError("invalid_input")
+        if order_by not in {"created_at", "updated_at"} or sort not in {"asc", "desc"}:
+            raise GitLabError("invalid_input")
+        if source_branch is not None:
+            source_branch = _validate_ref(source_branch)
+        if target_branch is not None:
+            target_branch = _validate_ref(target_branch)
+        if search is not None:
+            search = _bounded_string(search, 512)
+        if sum(
+            value is not None for value in (lookback_hours, created_after, updated_after)
+        ) > 1:
+            raise GitLabError("invalid_input")
+        if lookback_hours is not None:
+            lookback_hours = _positive_bound(lookback_hours, 24 * 365)
+            now = self._now()
+            if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+                raise GitLabError("invalid_configuration")
+            created_after = (
+                now.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+            ).isoformat().replace("+00:00", "Z")
+        if created_after is not None:
+            _created_after, created_after = _rfc3339(
+                created_after, remote=False
+            )
+        if updated_after is not None:
+            _updated_after, updated_after = _rfc3339(
+                updated_after, remote=False
+            )
+        max_items = _positive_bound(max_items, _MAX_MERGE_REQUESTS)
+        start_page, start_offset = _continuation_source(continuation)
+
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        params: dict[str, Any] = {
+            "state": state,
+            "scope": "all",
+            "order_by": order_by,
+            "sort": sort,
+        }
+        for key, value in (
+            ("source_branch", source_branch),
+            ("target_branch", target_branch),
+            ("search", search),
+            ("created_after", created_after),
+            ("updated_after", updated_after),
+        ):
+            if value is not None:
+                params[key] = value
+        pages = self._paginate(
+            f"/api/v4/projects/{resolved['id']}/merge_requests",
+            params=params,
+            max_items=max_items,
+            normalize=lambda item: self._normalize_merge_request(
+                item, project_path=resolved["path_with_namespace"]
+            ),
+            deadline=deadline,
+            start_page=start_page,
+            start_offset=start_offset,
+        )
+        activity_basis = (
+            "created"
+            if created_after is not None
+            else "updated"
+            if updated_after is not None
+            else None
+        )
+        return {
+            "project": self._project_summary(resolved),
+            "filters": {
+                "state": state,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "search": search,
+                "order_by": order_by,
+                "sort": sort,
+                "created_after": created_after,
+                "updated_after": updated_after,
+                "lookback_hours": lookback_hours,
+            },
+            "activity_basis": activity_basis,
+            "merge_requests": list(pages.items),
+            "count": len(pages.items),
+            "truncated": pages.truncated,
+            "continuation": self._continuation(pages),
+        }
+
+    def list_merge_request_commits(
+        self,
+        project: str | int,
+        iid: int,
+        *,
+        max_items: int = 100,
+        continuation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        iid = _positive_bound(iid, 2_147_483_647)
+        max_items = _positive_bound(max_items, _MAX_COMMITS)
+        start_page, start_offset = _continuation_source(continuation)
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        pages = self._paginate(
+            f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/commits",
+            params={},
+            max_items=max_items,
+            normalize=lambda item: self._normalize_commit(
+                item, project_path=resolved["path_with_namespace"]
+            ),
+            deadline=deadline,
+            start_page=start_page,
+            start_offset=start_offset,
+        )
+        return {
+            "project": self._project_summary(resolved),
+            "iid": iid,
+            "commits": list(pages.items),
+            "count": len(pages.items),
+            "truncated": pages.truncated,
+            "continuation": self._continuation(pages),
+        }
+
+    def list_merge_request_discussions(
+        self,
+        project: str | int,
+        iid: int,
+        *,
+        max_discussions: int = 100,
+        max_notes_per_discussion: int = 100,
+        continuation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        iid = _positive_bound(iid, 2_147_483_647)
+        max_discussions = _positive_bound(max_discussions, _MAX_DISCUSSIONS)
+        max_notes_per_discussion = _positive_bound(
+            max_notes_per_discussion, _MAX_NOTES_PER_DISCUSSION
+        )
+        start_page, start_offset = _continuation_source(continuation)
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        pages = self._paginate(
+            f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/discussions",
+            params={},
+            max_items=max_discussions,
+            normalize=lambda item: self._normalize_discussion(
+                item, max_notes=max_notes_per_discussion
+            ),
+            deadline=deadline,
+            start_page=start_page,
+            start_offset=start_offset,
+        )
+        discussions = list(pages.items)
+        notes = [note for discussion in discussions for note in discussion["notes"]]
+        resolvable_notes = [note for note in notes if note["resolvable"]]
+        resolved_notes = [note for note in resolvable_notes if note["resolved"]]
+        return {
+            "project": self._project_summary(resolved),
+            "iid": iid,
+            "discussions": discussions,
+            "count": len(discussions),
+            "resolution_summary": {
+                "resolvable_notes": len(resolvable_notes),
+                "resolved_notes": len(resolved_notes),
+                "unresolved_notes": len(resolvable_notes) - len(resolved_notes),
+            },
+            "summary_complete": not pages.truncated
+            and not any(value["notes_truncated"] for value in discussions),
             "truncated": pages.truncated,
             "continuation": self._continuation(pages),
         }

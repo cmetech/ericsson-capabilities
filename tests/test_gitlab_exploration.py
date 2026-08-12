@@ -120,6 +120,27 @@ def _note(note_id=100, *, body="Please adjust this.", position=None):
     }
 
 
+def _merge_request(iid=17, *, state="opened", draft=False):
+    return {
+        "id": 900 + iid,
+        "iid": iid,
+        "title": "Improve event delivery",
+        "state": state,
+        "draft": draft,
+        "source_branch": "feature/event-delivery",
+        "target_branch": "main",
+        "author": _user(8, "author", "MR Author"),
+        "created_at": "2026-08-12T10:00:00Z",
+        "updated_at": "2026-08-12T14:00:00+00:00",
+        "merged_at": None,
+        "closed_at": None,
+        "labels": ["backend", "review-ready"],
+        "user_notes_count": 4,
+        "blocking_discussions_resolved": False,
+        "web_url": f"{ORIGIN}/group/repo/-/merge_requests/{iid}",
+    }
+
+
 @pytest.mark.parametrize(
     "reference",
     [
@@ -634,4 +655,224 @@ def test_commit_discussions_reject_malformed_nested_discussion_data(mutation):
         ).mock(return_value=httpx.Response(200, json=[discussion]))
         with pytest.raises(Exception) as caught:
             _operations().list_commit_discussions(42, "main")
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+@pytest.mark.parametrize(
+    ("requested", "sent"),
+    [("open", "opened"), ("opened", "opened"), ("closed", "closed"), ("merged", "merged"), ("all", "all")],
+)
+def test_merge_request_listing_supports_states_filters_ordering_and_safe_normalization(
+    requested, sent
+):
+    operations = _operations()
+    seen = {}
+
+    def response(request):
+        seen.update(dict(request.url.params))
+        return httpx.Response(
+            200,
+            headers={"X-Next-Page": ""},
+            json=[_merge_request()],
+        )
+
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests").mock(
+            side_effect=response
+        )
+        result = operations.list_merge_requests(
+            42,
+            state=requested,
+            source_branch="feature/event-delivery",
+            target_branch="main",
+            search="delivery",
+            order_by="updated_at",
+            sort="desc",
+        )
+
+    assert seen["state"] == sent
+    assert seen["scope"] == "all"
+    assert seen["source_branch"] == "feature/event-delivery"
+    assert seen["target_branch"] == "main"
+    assert seen["search"] == "delivery"
+    assert seen["order_by"] == "updated_at"
+    assert seen["sort"] == "desc"
+    assert result["merge_requests"] == [
+        {
+            "id": 917,
+            "iid": 17,
+            "title": "Improve event delivery",
+            "state": "opened",
+            "draft": False,
+            "source_branch": "feature/event-delivery",
+            "target_branch": "main",
+            "author": {
+                "id": 8,
+                "username": "author",
+                "name": "MR Author",
+                "state": "active",
+            },
+            "created_at": "2026-08-12T10:00:00Z",
+            "updated_at": "2026-08-12T14:00:00Z",
+            "merged_at": None,
+            "closed_at": None,
+            "labels": ["backend", "review-ready"],
+            "note_count": 4,
+            "discussion_resolution": {"all_resolved": False},
+            "web_url": f"{ORIGIN}/group/repo/-/merge_requests/17",
+        }
+    ]
+    assert "email" not in repr(result).lower()
+    assert "avatar" not in repr(result).lower()
+
+
+def test_merge_request_listing_maps_lookback_to_created_and_updated_activity_explicitly():
+    from datetime import datetime, timezone
+
+    operations = _operations(
+        now=lambda: datetime(2026, 8, 12, 15, 30, tzinfo=timezone.utc)
+    )
+    requests = []
+
+    def response(request):
+        requests.append(dict(request.url.params))
+        return httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+
+    with respx.mock:
+        project = respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        project.side_effect = [
+            httpx.Response(200, json=_project(42, "group/repo")),
+            httpx.Response(200, json=_project(42, "group/repo")),
+        ]
+        respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests").mock(
+            side_effect=response
+        )
+        new_result = operations.list_merge_requests(42, lookback_hours=24)
+        active_result = operations.list_merge_requests(
+            42, updated_after="2026-08-12T12:00:00+00:00"
+        )
+
+    assert requests[0]["created_after"] == "2026-08-11T15:30:00Z"
+    assert "updated_after" not in requests[0]
+    assert requests[1]["updated_after"] == "2026-08-12T12:00:00Z"
+    assert "created_after" not in requests[1]
+    assert new_result["activity_basis"] == "created"
+    assert active_result["activity_basis"] == "updated"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lookback_hours": 24, "created_after": "2026-08-12T00:00:00Z"},
+        {"lookback_hours": 24, "updated_after": "2026-08-12T00:00:00Z"},
+        {"created_after": "2026-08-12T00:00:00Z", "updated_after": "2026-08-12T00:00:00Z"},
+        {"state": "invalid"},
+        {"order_by": "title"},
+        {"sort": "sideways"},
+    ],
+)
+def test_merge_request_listing_rejects_ambiguous_windows_and_invalid_filters(kwargs):
+    with pytest.raises(Exception) as caught:
+        _operations().list_merge_requests(42, **kwargs)
+    assert getattr(caught.value, "category", None) == "invalid_input"
+
+
+def test_merge_request_commits_reuse_safe_commit_normalization_and_pagination():
+    operations = _operations()
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests/17/commits").mock(
+            return_value=httpx.Response(
+                200,
+                json=[_commit(), _commit("c" * 40, short_sha="c" * 8)],
+            )
+        )
+        result = operations.list_merge_request_commits(42, 17, max_items=1)
+    assert result["iid"] == 17
+    assert result["commits"][0]["sha"] == "a" * 40
+    assert result["continuation"] == {"page": 1, "offset": 1}
+    assert "email" not in repr(result).lower()
+
+
+def test_merge_request_discussions_reuse_resolution_and_position_normalization():
+    operations = _operations()
+    resolved_note = {
+        **_note(
+            1,
+            position={
+                "position_type": "text",
+                "base_sha": "b" * 40,
+                "start_sha": "c" * 40,
+                "head_sha": "a" * 40,
+                "old_path": "src/old.py",
+                "new_path": "src/new.py",
+                "old_line": 10,
+                "new_line": 12,
+            },
+        ),
+        "resolved": True,
+        "resolved_by": _user(9, "resolver", "Resolver"),
+        "resolved_at": "2026-08-12T15:00:00Z",
+    }
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(
+            f"{ORIGIN}/api/v4/projects/42/merge_requests/17/discussions"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": ""},
+                json=[
+                    {
+                        "id": "mr-thread",
+                        "individual_note": False,
+                        "notes": [resolved_note],
+                    }
+                ],
+            )
+        )
+        result = operations.list_merge_request_discussions(42, 17)
+    assert result["iid"] == 17
+    assert result["resolution_summary"] == {
+        "resolvable_notes": 1,
+        "resolved_notes": 1,
+        "unresolved_notes": 0,
+    }
+    assert result["discussions"][0]["notes"][0]["resolved_by"]["username"] == (
+        "resolver"
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"iid": 0},
+        {"state": "unknown"},
+        {"draft": "false"},
+        {"created_at": "naive"},
+        {"labels": [1]},
+        {"author": {**_user(), "username": ""}},
+        {"web_url": "https://foreign.example.test/mr/17"},
+        {"blocking_discussions_resolved": "false"},
+    ],
+)
+def test_merge_request_listing_rejects_malformed_remote_items(mutation):
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests").mock(
+            return_value=httpx.Response(200, json=[{**_merge_request(), **mutation}])
+        )
+        with pytest.raises(Exception) as caught:
+            _operations().list_merge_requests(42)
     assert getattr(caught.value, "category", None) == "invalid_remote_data"

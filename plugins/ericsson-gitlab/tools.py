@@ -158,6 +158,67 @@ SCHEMAS = {
         },
         ["project", "commit"],
     ),
+    "gitlab_list_merge_requests": _schema(
+        "gitlab_list_merge_requests",
+        "Explore bounded GitLab merge requests. Rolling lookback means newly "
+        "created MRs; updated_after means recently active MRs.",
+        {
+            "project": _PROJECT,
+            "state": {
+                "type": "string",
+                "enum": ["open", "opened", "closed", "merged", "all"],
+            },
+            "source_branch": _REF,
+            "target_branch": _REF,
+            "search": {"type": "string", "minLength": 1, "maxLength": 512},
+            "order_by": {
+                "type": "string",
+                "enum": ["created_at", "updated_at"],
+            },
+            "sort": {"type": "string", "enum": ["asc", "desc"]},
+            "created_after": _TIMESTAMP,
+            "updated_after": _TIMESTAMP,
+            "lookback_hours": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8760,
+            },
+            "max_items": {"type": "integer", "minimum": 1, "maximum": 2000},
+            "continuation": _PAGE_CONTINUATION,
+        },
+        ["project"],
+    ),
+    "gitlab_list_merge_request_commits": _schema(
+        "gitlab_list_merge_request_commits",
+        "List bounded, display-safe commits belonging to one merge request.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+            "max_items": {"type": "integer", "minimum": 1, "maximum": 2000},
+            "continuation": _PAGE_CONTINUATION,
+        },
+        ["project", "iid"],
+    ),
+    "gitlab_list_merge_request_discussions": _schema(
+        "gitlab_list_merge_request_discussions",
+        "List bounded merge-request discussion threads, resolution state, and diff positions.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+            "max_discussions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+            },
+            "max_notes_per_discussion": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+            },
+            "continuation": _PAGE_CONTINUATION,
+        },
+        ["project", "iid"],
+    ),
     "gitlab_list_repository_tree": _schema(
         "gitlab_list_repository_tree",
         "List a bounded, normalized repository tree at one explicit ref.",
@@ -355,6 +416,38 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             return operations.list_commit_discussions(
                 values["project"],
                 values["commit"],
+                max_discussions=values.get("max_discussions", 100),
+                max_notes_per_discussion=values.get(
+                    "max_notes_per_discussion", 100
+                ),
+                continuation=values.get("continuation"),
+            )
+        if name == "gitlab_list_merge_requests":
+            return operations.list_merge_requests(
+                values["project"],
+                state=values.get("state", "opened"),
+                source_branch=values.get("source_branch"),
+                target_branch=values.get("target_branch"),
+                search=values.get("search"),
+                order_by=values.get("order_by", "created_at"),
+                sort=values.get("sort", "desc"),
+                created_after=values.get("created_after"),
+                updated_after=values.get("updated_after"),
+                lookback_hours=values.get("lookback_hours"),
+                max_items=values.get("max_items", 100),
+                continuation=values.get("continuation"),
+            )
+        if name == "gitlab_list_merge_request_commits":
+            return operations.list_merge_request_commits(
+                values["project"],
+                values["iid"],
+                max_items=values.get("max_items", 100),
+                continuation=values.get("continuation"),
+            )
+        if name == "gitlab_list_merge_request_discussions":
+            return operations.list_merge_request_discussions(
+                values["project"],
+                values["iid"],
                 max_discussions=values.get("max_discussions", 100),
                 max_notes_per_discussion=values.get(
                     "max_notes_per_discussion", 100

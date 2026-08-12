@@ -26,6 +26,25 @@ _PROJECT = {
         "GitLab origin."
     ),
 }
+_GROUP = {
+    "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 2048},
+        {"type": "integer", "minimum": 1},
+    ],
+    "description": (
+        "Group numeric id, full nested group path, or group URL on the "
+        "configured GitLab origin."
+    ),
+}
+_PAGE_CONTINUATION = {
+    "type": "object",
+    "properties": {
+        "page": {"type": "integer", "minimum": 1},
+        "next_page": {"type": "integer", "minimum": 1},
+        "offset": {"type": "integer", "minimum": 0, "maximum": 99},
+    },
+    "additionalProperties": False,
+}
 _REF = {"type": "string", "minLength": 1, "maxLength": 512}
 _PATH = {"type": "string", "maxLength": 4096}
 
@@ -50,6 +69,33 @@ SCHEMAS = {
         "to bounded canonical identity.",
         {"project": _PROJECT},
         ["project"],
+    ),
+    "gitlab_list_group_projects": _schema(
+        "gitlab_list_group_projects",
+        "Explore a bounded GitLab group hierarchy and its visible projects, "
+        "including empty subgroups and source-labelled continuation.",
+        {
+            "group": _GROUP,
+            "recursive": {"type": "boolean"},
+            "include_shared": {"type": "boolean"},
+            "include_archived": {"type": "boolean"},
+            "search": {"type": "string", "minLength": 1, "maxLength": 512},
+            "max_groups": {"type": "integer", "minimum": 1, "maximum": 2000},
+            "max_projects": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5000,
+            },
+            "continuation": {
+                "type": "object",
+                "properties": {
+                    "groups": _PAGE_CONTINUATION,
+                    "projects": _PAGE_CONTINUATION,
+                },
+                "additionalProperties": False,
+            },
+        },
+        ["group"],
     ),
     "gitlab_list_repository_tree": _schema(
         "gitlab_list_repository_tree",
@@ -209,6 +255,17 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
     try:
         if name == "gitlab_resolve_project":
             return operations.resolve_project(values["project"])
+        if name == "gitlab_list_group_projects":
+            return operations.list_group_projects(
+                values["group"],
+                recursive=values.get("recursive", True),
+                include_shared=values.get("include_shared", False),
+                include_archived=values.get("include_archived", False),
+                search=values.get("search"),
+                max_groups=values.get("max_groups", 200),
+                max_projects=values.get("max_projects", 500),
+                continuation=values.get("continuation"),
+            )
         if name == "gitlab_list_repository_tree":
             return operations.list_repository_tree(
                 values["project"],

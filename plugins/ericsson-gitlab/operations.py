@@ -24,6 +24,10 @@ else:  # Standalone source tests import modules directly from the plugin root.
 
 _MAX_PROJECT_REFERENCE = 2048
 _MAX_PROJECT_SLUG = 1024
+_MAX_GROUP_REFERENCE = 2048
+_MAX_GROUP_SLUG = 1024
+_MAX_GROUPS = 2000
+_MAX_GROUP_PROJECTS = 5000
 _MAX_REF = 512
 _MAX_PATH = 4096
 _MAX_TREE_ITEMS = 2000
@@ -201,6 +205,60 @@ def _project_endpoint(project: str | int) -> str:
     return quote(value, safe="")
 
 
+def _namespace_path(value: Any, *, remote: bool) -> str:
+    category = "invalid_remote_data" if remote else "invalid_input"
+    maximum = _MAX_GROUP_SLUG if remote else _MAX_GROUP_REFERENCE
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise GitLabError(category)
+    if value != value.strip() or value.startswith("/") or value.endswith("/"):
+        raise GitLabError(category)
+    if any(part in {"", ".", ".."} for part in value.split("/")):
+        raise GitLabError(category)
+    if "\x00" in value:
+        raise GitLabError(category)
+    return value
+
+
+def _group_endpoint(group: str | int) -> str:
+    if isinstance(group, bool):
+        raise GitLabError("invalid_input")
+    if isinstance(group, int):
+        if group <= 0:
+            raise GitLabError("invalid_input")
+        return str(group)
+    value = _bounded_string(group, _MAX_GROUP_SLUG)
+    if value.isdigit():
+        numeric_group = int(value)
+        if numeric_group <= 0:
+            raise GitLabError("invalid_input")
+        return str(numeric_group)
+    return quote(_namespace_path(value, remote=False), safe="")
+
+
+def _continuation_source(value: Any) -> tuple[int, int]:
+    if value is None:
+        return 1, 0
+    if not isinstance(value, Mapping) or not set(value).issubset(
+        {"page", "next_page", "offset"}
+    ):
+        raise GitLabError("invalid_input")
+    if "page" in value and "next_page" in value:
+        raise GitLabError("invalid_input")
+    page = value.get("page", value.get("next_page", 1))
+    offset = value.get("offset", 0)
+    if (
+        isinstance(page, bool)
+        or not isinstance(page, int)
+        or page <= 0
+        or isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or offset < 0
+        or offset >= 100
+    ):
+        raise GitLabError("invalid_input")
+    return page, offset
+
+
 def _build_branch_name(prefix: Any, ticket_key: Any, summary: Any) -> str:
     prefix = _bounded_string(prefix, _MAX_REF).rstrip("/")
     ticket_key = _bounded_string(ticket_key, 128)
@@ -255,6 +313,37 @@ class GitLabOperations:
         if kind not in {"tree", "blob"} or not separator or not remainder:
             raise GitLabError("invalid_input")
         return {"project": slug, "link_kind": kind, "link_suffix": remainder}
+
+    def _parse_group_reference(self, reference: str | int) -> str:
+        if isinstance(reference, int) and not isinstance(reference, bool):
+            if reference <= 0:
+                raise GitLabError("invalid_input")
+            return str(reference)
+        value = _bounded_string(reference, _MAX_GROUP_REFERENCE)
+        if value.isdigit():
+            numeric_group = int(value)
+            if numeric_group <= 0:
+                raise GitLabError("invalid_input")
+            return str(numeric_group)
+        if not value.startswith(("http://", "https://")):
+            return _namespace_path(value, remote=False)
+
+        parsed = urlsplit(value)
+        configured = urlsplit(self.client.auth.origin)
+        if (
+            parsed.scheme != configured.scheme
+            or parsed.hostname != configured.hostname
+            or parsed.port != configured.port
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise GitLabError("invalid_input")
+        path = unquote(parsed.path).strip("/")
+        if not path or "/-/" in path or path.endswith(".git"):
+            raise GitLabError("invalid_input")
+        return _namespace_path(path, remote=False)
 
     def resolve_project(self, reference: str | int) -> dict[str, Any]:
         deadline = self.client.operation_deadline()
@@ -323,6 +412,205 @@ class GitLabOperations:
         }
         return result
 
+    def _normalize_group(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        group_id = _remote_positive_int(payload.get("id"))
+        name = payload.get("name")
+        full_path = _namespace_path(payload.get("full_path"), remote=True)
+        parent_id = payload.get("parent_id")
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > 512
+            or name != name.strip()
+            or (parent_id is not None and (
+                isinstance(parent_id, bool)
+                or not isinstance(parent_id, int)
+                or parent_id <= 0
+            ))
+        ):
+            raise GitLabError("invalid_remote_data")
+        web_url = _canonical_remote_url(
+            payload.get("web_url"),
+            self.client.auth.origin,
+            f"/{full_path}",
+        )
+        return {
+            "id": group_id,
+            "name": name,
+            "full_path": full_path,
+            "parent_id": parent_id,
+            "web_url": web_url,
+        }
+
+    def _normalize_group_project(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        root_path: str,
+    ) -> dict[str, Any]:
+        project_id = _remote_positive_int(payload.get("id"))
+        name = payload.get("name")
+        path = _namespace_path(payload.get("path_with_namespace"), remote=True)
+        if "/" not in path or not isinstance(name, str) or not name or len(name) > 512:
+            raise GitLabError("invalid_remote_data")
+        namespace = _as_object(payload.get("namespace"))
+        namespace_kind = namespace.get("kind")
+        namespace_path = _namespace_path(namespace.get("full_path"), remote=True)
+        if namespace_kind not in {"group", "user"} or path.rsplit("/", 1)[0] != namespace_path:
+            raise GitLabError("invalid_remote_data")
+        archived = payload.get("archived")
+        if not isinstance(archived, bool):
+            raise GitLabError("invalid_remote_data")
+        default_branch = payload.get("default_branch")
+        if default_branch in {None, ""}:
+            default_branch = None
+        else:
+            default_branch = _validate_remote_ref(default_branch)
+        web_url = _canonical_remote_url(
+            payload.get("web_url"),
+            self.client.auth.origin,
+            f"/{path}",
+        )
+        shared = not (
+            namespace_path == root_path or namespace_path.startswith(root_path + "/")
+        )
+        return {
+            "id": project_id,
+            "name": name,
+            "path_with_namespace": path,
+            "owning_namespace": namespace_path,
+            "namespace_kind": namespace_kind,
+            "default_branch": default_branch,
+            "archived": archived,
+            "shared": shared,
+            "web_url": web_url,
+        }
+
+    def list_group_projects(
+        self,
+        group: str | int,
+        *,
+        recursive: bool = True,
+        include_shared: bool = False,
+        include_archived: bool = False,
+        search: str | None = None,
+        max_groups: int = 200,
+        max_projects: int = 500,
+        continuation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not all(
+            isinstance(value, bool)
+            for value in (recursive, include_shared, include_archived)
+        ):
+            raise GitLabError("invalid_input")
+        max_groups = _positive_bound(max_groups, _MAX_GROUPS)
+        max_projects = _positive_bound(max_projects, _MAX_GROUP_PROJECTS)
+        if search is not None:
+            search = _bounded_string(search, 512)
+        if continuation is None:
+            continuation = {}
+        if not isinstance(continuation, Mapping) or not set(continuation).issubset(
+            {"groups", "projects"}
+        ):
+            raise GitLabError("invalid_input")
+        group_page, group_offset = _continuation_source(continuation.get("groups"))
+        project_page, project_offset = _continuation_source(
+            continuation.get("projects")
+        )
+
+        deadline = self.client.operation_deadline()
+        reference = self._parse_group_reference(group)
+        endpoint = _group_endpoint(reference)
+        root = self._normalize_group(
+            _as_object(
+                self.client.get_json(
+                    f"/api/v4/groups/{endpoint}",
+                    deadline=deadline,
+                )
+            )
+        )
+        groups: list[dict[str, Any]] = [root]
+        if recursive and max_groups > 1:
+            group_pages = self._paginate(
+                f"/api/v4/groups/{root['id']}/descendant_groups",
+                params={"order_by": "full_path", "sort": "asc"},
+                max_items=max_groups - 1,
+                normalize=self._normalize_group,
+                deadline=deadline,
+                start_page=group_page,
+                start_offset=group_offset,
+            )
+            groups.extend(group_pages.items)
+        elif recursive:
+            group_pages = PageResult((), True, group_page, group_offset)
+        else:
+            if "groups" in continuation:
+                raise GitLabError("invalid_input")
+            group_pages = PageResult((), False, None, None)
+
+        project_params: dict[str, Any] = {
+            "include_subgroups": str(recursive).lower(),
+            "with_shared": str(include_shared).lower(),
+            "archived": str(include_archived).lower(),
+            "order_by": "path",
+            "sort": "asc",
+        }
+        if search is not None:
+            project_params["search"] = search
+        project_pages = self._paginate(
+            f"/api/v4/groups/{root['id']}/projects",
+            params=project_params,
+            max_items=max_projects,
+            normalize=lambda item: self._normalize_group_project(
+                item, root_path=root["full_path"]
+            ),
+            deadline=deadline,
+            start_page=project_page,
+            start_offset=project_offset,
+        )
+        projects = [
+            project
+            for project in project_pages.items
+            if (include_shared or not project["shared"])
+            and (include_archived or not project["archived"])
+        ]
+        project_counts: dict[str, int] = {}
+        for project in projects:
+            namespace = project["owning_namespace"]
+            project_counts[namespace] = project_counts.get(namespace, 0) + 1
+        normalized_groups = [
+            {**value, "project_count": project_counts.get(value["full_path"], 0)}
+            for value in groups
+        ]
+        normalized_groups.sort(key=lambda value: (value["full_path"], value["id"]))
+        projects.sort(key=lambda value: (value["path_with_namespace"], value["id"]))
+        next_sources = {
+            source: value
+            for source, value in (
+                ("groups", self._continuation(group_pages)),
+                ("projects", self._continuation(project_pages)),
+            )
+            if value is not None
+        }
+        truncated = group_pages.truncated or project_pages.truncated
+        return {
+            "root_group": next(
+                value for value in normalized_groups if value["id"] == root["id"]
+            ),
+            "recursive": recursive,
+            "include_shared": include_shared,
+            "include_archived": include_archived,
+            "search": search,
+            "groups": normalized_groups,
+            "projects": projects,
+            "group_count": len(normalized_groups),
+            "project_count": len(projects),
+            "warnings": [],
+            "truncated": truncated,
+            "complete": not truncated,
+            "continuation": next_sources or None,
+        }
+
     def _list_named_refs(
         self, project_id: int, kind: str, *, deadline: float
     ) -> list[str]:
@@ -390,9 +678,23 @@ class GitLabOperations:
         params: Mapping[str, Any],
         max_items: int,
         normalize: Callable[[Mapping[str, Any]], dict[str, Any]],
+        deadline: float | None = None,
+        start_page: int = 1,
+        start_offset: int = 0,
     ) -> PageResult:
-        deadline = self.client.operation_deadline()
-        page = 1
+        if deadline is None:
+            deadline = self.client.operation_deadline()
+        if (
+            isinstance(start_page, bool)
+            or not isinstance(start_page, int)
+            or start_page <= 0
+            or isinstance(start_offset, bool)
+            or not isinstance(start_offset, int)
+            or not 0 <= start_offset < 100
+        ):
+            raise GitLabError("invalid_input")
+        page = start_page
+        first_page = True
         items: list[dict[str, Any]] = []
         truncated = False
         next_page: int | None = None
@@ -404,7 +706,10 @@ class GitLabOperations:
                 path, params=query, deadline=deadline
             )
             values = _as_list(payload)
-            for offset, raw in enumerate(values):
+            offset_base = start_offset if first_page else 0
+            if offset_base > len(values):
+                raise GitLabError("invalid_input")
+            for offset, raw in enumerate(values[offset_base:], start=offset_base):
                 if len(items) >= max_items:
                     truncated = True
                     next_page = page
@@ -413,6 +718,7 @@ class GitLabOperations:
                 items.append(normalize(_as_object(raw)))
             if truncated:
                 break
+            first_page = False
             next_header = str(headers.get("x-next-page", "")).strip()
             if not next_header and len(values) < 100:
                 break

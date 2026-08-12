@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "ericsson-gitlab"
 EXPECTED_TOOLS = {
     "gitlab_resolve_project",
+    "gitlab_list_group_projects",
     "gitlab_list_repository_tree",
     "gitlab_read_file",
     "gitlab_read_merge_request",
@@ -113,7 +114,7 @@ def test_descriptor_is_standalone_static_and_declares_exact_current_tools():
     assert "enabled" not in descriptor
 
 
-def test_register_exposes_exact_nine_json_native_bounded_schemas():
+def test_register_exposes_exact_json_native_bounded_schemas():
     # GL-READ-07/08 legacy: gitlab_file_reader.py:read_files
     plugin = _load_plugin()
     context = Context()

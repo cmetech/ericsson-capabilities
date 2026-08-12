@@ -34,6 +34,11 @@ def test_run_helper_importable_without_mcp_package():
     assert outlook_cli.SCRIPT_PATH.endswith("outlook-cli.ps1")
 
 
+def test_powershell_subprocess_has_no_stdin_inheritance():
+    source = (MCP_DIR / "src/outlook_cli/__init__.py").read_text()
+    assert "stdin=subprocess.DEVNULL" in source
+
+
 def test_mcp_servers_yaml():
     doc = yaml.safe_load((REPO / "mcp/mcp-servers.yaml").read_text())
     servers = doc["mcp_servers"]

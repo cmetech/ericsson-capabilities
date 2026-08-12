@@ -190,7 +190,10 @@ def _project_endpoint(project: str | int) -> str:
         return str(project)
     value = _bounded_string(project, _MAX_PROJECT_SLUG)
     if value.isdigit():
-        return str(int(value))
+        numeric_project = int(value)
+        if numeric_project <= 0:
+            raise GitLabError("invalid_input")
+        return str(numeric_project)
     if "/" not in value or value.startswith("/") or value.endswith("/"):
         raise GitLabError("group_ambiguity")
     if any(part in {"", ".", ".."} for part in value.split("/")):

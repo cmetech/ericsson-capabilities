@@ -620,3 +620,9 @@ def test_pipeline_list_rejects_cross_origin_web_urls():
         with pytest.raises(Exception) as caught:
             operations.list_pipelines("42")
     assert getattr(caught.value, "category", None) == "invalid_remote_data"
+def test_project_endpoint_rejects_nonpositive_numeric_strings_before_transport():
+    _auth, _client, _models, operations = _modules()
+    with pytest.raises(operations.GitLabError, match="input is invalid"):
+        operations._project_endpoint("0")
+    with pytest.raises(operations.GitLabError, match="input is invalid"):
+        operations._project_endpoint("000")

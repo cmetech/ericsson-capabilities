@@ -21,6 +21,12 @@
   "mcpServers": "mcp/mcp-servers.yaml",
   "mcpLocal": ["mcp/outlook-mcp"],
   "workflowCoreTools": [],
+  "workflowPackages": [
+    {
+      "path": "capabilities/workflow-packages/ericsson",
+      "digestManifest": "capabilities/workflow-packages/ericsson/digests.json"
+    }
+  ],
   "workflows": [
     "workflows/my-tickets-summary.yml",
     "workflows/inbox-digest.yml",

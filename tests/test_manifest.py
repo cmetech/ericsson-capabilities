@@ -334,6 +334,10 @@ def test_manifest_content():
     assert doc["mcpServers"] == "mcp/mcp-servers.yaml"
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]
     assert doc["workflowCoreTools"] == []
+    assert doc["workflowPackages"] == [{
+        "path": "capabilities/workflow-packages/ericsson",
+        "digestManifest": "capabilities/workflow-packages/ericsson/digests.json",
+    }]
     assert set(doc["workflows"]) == {
         "workflows/my-tickets-summary.yml",
         "workflows/inbox-digest.yml",
@@ -354,6 +358,21 @@ def test_manifest_content():
     assert "requiresEnv" not in doc
     assert "disabledByDefault" not in doc
     assert "ERICSSON_ENV" not in MANIFEST.read_text()
+
+
+def test_workflow_package_is_complete_and_digest_bound():
+    package = REPO / "capabilities/workflow-packages/ericsson"
+    expected = {
+        "commands/collect-inbox.md", "commands/fetch-tickets.md",
+        "commands/summarize-inbox.md", "commands/summarize-tickets.md",
+        "digests.json", "workflows/inbox-digest.yaml",
+        "workflows/my-tickets-summary.hermes.yaml",
+        "workflows/my-tickets-summary.yaml",
+    }
+    assert {path.relative_to(package).as_posix() for path in package.rglob("*") if path.is_file()} == expected
+    digests = json.loads((package / "digests.json").read_text())
+    assert set(digests["packages"]) == {"inbox-digest", "my-tickets-summary"}
+    assert all(len(value) == 64 for value in digests["packages"].values())
 
 
 def test_guides_record_frozen_loop24_inventory_and_reviewed_flow_provenance():

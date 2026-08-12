@@ -93,6 +93,33 @@ def _commit(
     return payload
 
 
+def _user(user_id=7, username="reviewer", name="Review Person"):
+    return {
+        "id": user_id,
+        "username": username,
+        "name": name,
+        "state": "active",
+        "avatar_url": "https://private.example.test/avatar.png",
+        "email": "private@example.test",
+    }
+
+
+def _note(note_id=100, *, body="Please adjust this.", position=None):
+    return {
+        "id": note_id,
+        "body": body,
+        "author": _user(),
+        "created_at": "2026-08-12T14:00:00Z",
+        "updated_at": "2026-08-12T14:05:00+00:00",
+        "system": False,
+        "resolvable": True,
+        "resolved": False,
+        "resolved_by": None,
+        "resolved_at": None,
+        "position": position,
+    }
+
+
 @pytest.mark.parametrize(
     "reference",
     [
@@ -452,4 +479,159 @@ def test_read_commit_rejects_malformed_remote_commit_data(mutator):
         )
         with pytest.raises(Exception) as caught:
             _operations().read_commit(42, sha)
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+@pytest.mark.parametrize("commit", ["a" * 40, "release/2026", "v3.1.3"])
+def test_commit_comments_normalize_display_safe_data_and_encode_commit_reference(commit):
+    operations = _operations()
+    seen = {}
+
+    def response(request):
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            headers={"X-Next-Page": ""},
+            json=[
+                {
+                    "note": "Line-level feedback",
+                    "author": _user(),
+                    "created_at": "2026-08-12T14:00:00Z",
+                    "path": "src/core.py",
+                    "line": 18,
+                    "line_type": "new",
+                }
+            ],
+        )
+
+    encoded = commit.replace("/", "%2F")
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(
+            f"{ORIGIN}/api/v4/projects/42/repository/commits/{encoded}/comments"
+        ).mock(side_effect=response)
+        result = operations.list_commit_comments(42, commit)
+
+    assert seen["path"].endswith(f"/repository/commits/{commit}/comments")
+    assert result["comments"] == [
+        {
+            "body": "Line-level feedback",
+            "author": {
+                "id": 7,
+                "username": "reviewer",
+                "name": "Review Person",
+                "state": "active",
+            },
+            "created_at": "2026-08-12T14:00:00Z",
+            "path": "src/core.py",
+            "line": 18,
+            "line_type": "new",
+        }
+    ]
+    assert "email" not in repr(result).lower()
+    assert "avatar" not in repr(result).lower()
+
+
+def test_commit_discussions_bound_outer_pages_and_nested_notes_independently():
+    operations = _operations()
+    position = {
+        "position_type": "text",
+        "base_sha": "b" * 40,
+        "start_sha": "c" * 40,
+        "head_sha": "a" * 40,
+        "old_path": "src/old.py",
+        "new_path": "src/new.py",
+        "old_line": 10,
+        "new_line": 12,
+    }
+    discussions = [
+        {
+            "id": "discussion-one",
+            "individual_note": False,
+            "notes": [_note(1, position=position), _note(2)],
+        },
+        {
+            "id": "discussion-two",
+            "individual_note": True,
+            "notes": [_note(3)],
+        },
+    ]
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(
+            f"{ORIGIN}/api/v4/projects/42/repository/commits/main/discussions"
+        ).mock(return_value=httpx.Response(200, json=discussions))
+        result = operations.list_commit_discussions(
+            42,
+            "main",
+            max_discussions=1,
+            max_notes_per_discussion=1,
+        )
+
+    assert result["truncated"] is True
+    assert result["continuation"] == {"page": 1, "offset": 1}
+    assert result["discussions"][0]["id"] == "discussion-one"
+    assert result["discussions"][0]["individual_note"] is False
+    assert result["discussions"][0]["notes_truncated"] is True
+    assert result["discussions"][0]["note_count"] == 2
+    assert result["discussions"][0]["returned_note_count"] == 1
+    assert result["discussions"][0]["notes"][0]["position"] == position
+    assert result["discussions"][0]["notes"][0]["resolved"] is False
+    assert "email" not in repr(result).lower()
+    assert "avatar" not in repr(result).lower()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"note": "body", "author": {**_user(), "id": "bad"}, "created_at": "2026-08-12T14:00:00Z", "path": None, "line": None, "line_type": None},
+        {"note": "body", "author": _user(), "created_at": "bad", "path": None, "line": None, "line_type": None},
+        {"note": "body", "author": _user(), "created_at": "2026-08-12T14:00:00Z", "path": "../secret", "line": 1, "line_type": "new"},
+        {"note": "body", "author": _user(), "created_at": "2026-08-12T14:00:00Z", "path": None, "line": True, "line_type": None},
+        {"note": "x" * (128 * 1024 + 1), "author": _user(), "created_at": "2026-08-12T14:00:00Z", "path": None, "line": None, "line_type": None},
+    ],
+)
+def test_commit_comments_reject_malformed_authors_dates_lines_and_oversized_bodies(payload):
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(
+            f"{ORIGIN}/api/v4/projects/42/repository/commits/main/comments"
+        ).mock(return_value=httpx.Response(200, json=[payload]))
+        with pytest.raises(Exception) as caught:
+            _operations().list_commit_comments(42, "main")
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"individual_note": "false"},
+        {"notes": "not-a-list"},
+        {"notes": [{**_note(), "system": "false"}]},
+        {"notes": [{**_note(), "resolved": "false"}]},
+        {"notes": [{**_note(), "position": {"position_type": "unknown"}}]},
+    ],
+)
+def test_commit_discussions_reject_malformed_nested_discussion_data(mutation):
+    discussion = {
+        "id": "discussion-one",
+        "individual_note": False,
+        "notes": [_note()],
+        **mutation,
+    }
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project(42, "group/repo"))
+        )
+        respx.get(
+            f"{ORIGIN}/api/v4/projects/42/repository/commits/main/discussions"
+        ).mock(return_value=httpx.Response(200, json=[discussion]))
+        with pytest.raises(Exception) as caught:
+            _operations().list_commit_discussions(42, "main")
     assert getattr(caught.value, "category", None) == "invalid_remote_data"

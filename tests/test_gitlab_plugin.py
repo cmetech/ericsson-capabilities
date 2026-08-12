@@ -21,6 +21,8 @@ EXPECTED_TOOLS = {
     "gitlab_list_group_projects",
     "gitlab_list_commits",
     "gitlab_read_commit",
+    "gitlab_list_commit_comments",
+    "gitlab_list_commit_discussions",
     "gitlab_list_repository_tree",
     "gitlab_read_file",
     "gitlab_read_merge_request",

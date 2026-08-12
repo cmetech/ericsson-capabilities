@@ -127,6 +127,37 @@ SCHEMAS = {
         },
         ["project", "commit"],
     ),
+    "gitlab_list_commit_comments": _schema(
+        "gitlab_list_commit_comments",
+        "List bounded display-safe comments attached to one GitLab commit, branch, or tag.",
+        {
+            "project": _PROJECT,
+            "commit": _REF,
+            "max_items": {"type": "integer", "minimum": 1, "maximum": 2000},
+            "continuation": _PAGE_CONTINUATION,
+        },
+        ["project", "commit"],
+    ),
+    "gitlab_list_commit_discussions": _schema(
+        "gitlab_list_commit_discussions",
+        "List bounded threaded discussions and display-safe notes for one GitLab commit.",
+        {
+            "project": _PROJECT,
+            "commit": _REF,
+            "max_discussions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+            },
+            "max_notes_per_discussion": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+            },
+            "continuation": _PAGE_CONTINUATION,
+        },
+        ["project", "commit"],
+    ),
     "gitlab_list_repository_tree": _schema(
         "gitlab_list_repository_tree",
         "List a bounded, normalized repository tree at one explicit ref.",
@@ -313,6 +344,23 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             )
         if name == "gitlab_read_commit":
             return operations.read_commit(values["project"], values["commit"])
+        if name == "gitlab_list_commit_comments":
+            return operations.list_commit_comments(
+                values["project"],
+                values["commit"],
+                max_items=values.get("max_items", 100),
+                continuation=values.get("continuation"),
+            )
+        if name == "gitlab_list_commit_discussions":
+            return operations.list_commit_discussions(
+                values["project"],
+                values["commit"],
+                max_discussions=values.get("max_discussions", 100),
+                max_notes_per_discussion=values.get(
+                    "max_notes_per_discussion", 100
+                ),
+                continuation=values.get("continuation"),
+            )
         if name == "gitlab_list_repository_tree":
             return operations.list_repository_tree(
                 values["project"],

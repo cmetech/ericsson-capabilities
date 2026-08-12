@@ -1,5 +1,13 @@
 # GitLab connector source and vendor baseline
 
+> **2026-08-12 read-exploration extension:** The historical inventory below
+> remains the frozen port baseline. The current source connector now also owns
+> bounded recursive group/project discovery, commit history/detail/comments/
+> discussions, merge-request discovery/commits/discussions, and a natural-
+> language activity-digest skill for one-time, Kanban, and cron execution. These
+> additions are source-first and must be vendored from one clean source SHA;
+> they do not change the historical comparison recorded below.
+
 This document freezes the pre-port source/vendor state for the Ericsson GitLab
 connector release. It is an inventory, not permission to silently prefer the
 newer copy of a divergent file.

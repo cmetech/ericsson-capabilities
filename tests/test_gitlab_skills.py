@@ -18,8 +18,13 @@ PLUGIN_SKILLS = {
     "repository-research": {
         "read": {
             "gitlab_resolve_project",
+            "gitlab_list_group_projects",
             "gitlab_list_repository_tree",
             "gitlab_read_file",
+            "gitlab_list_commits",
+            "gitlab_read_commit",
+            "gitlab_list_commit_comments",
+            "gitlab_list_commit_discussions",
         },
         "write": set(),
     },
@@ -29,8 +34,19 @@ PLUGIN_SKILLS = {
             "gitlab_list_repository_tree",
             "gitlab_read_file",
             "gitlab_read_merge_request",
+            "gitlab_list_merge_requests",
+            "gitlab_list_merge_request_commits",
+            "gitlab_list_merge_request_discussions",
         },
         "write": set(),
+    },
+    "gitlab-activity-digest": {
+        "read": {
+            "gitlab_resolve_project",
+            "gitlab_list_commits",
+            "gitlab_list_merge_requests",
+        },
+        "write": {"cronjob"},
     },
     "ci-investigation": {
         "read": {
@@ -124,6 +140,9 @@ def test_repository_research_requires_identity_before_bounded_evidence_reads() -
     )
     assert "default branch" in lowered
     assert "binary" in lowered
+    assert "group" in lowered and "subgroup" in lowered
+    assert "commit" in lowered and "discussion" in lowered
+    assert "pipelines are not commit history" in lowered
 
 
 def test_merge_request_review_uses_active_agent_and_never_claims_write_authority() -> (
@@ -138,6 +157,31 @@ def test_merge_request_review_uses_active_agent_and_never_claims_write_authority
     assert "separately requests" in lowered
     assert "host approval" in lowered
     assert "confidence score" not in lowered
+    assert "created" in lowered and "updated" in lowered
+    assert "new" in lowered and "active" in lowered
+    assert "discussion" in lowered and "commit" in lowered
+
+
+def test_activity_digest_supports_natural_language_one_time_and_recurring_runs() -> None:
+    metadata, _root, body = _skill_contract(
+        PLUGIN / "skills/gitlab-activity-digest/SKILL.md"
+    )
+    description = metadata["description"].lower()
+    assert "one-time" in description or "one time" in description
+    assert "recurring" in description or "daily" in description
+    assert "commit" in description and "merge request" in description
+    lowered = body.lower()
+    for phrase in (
+        "last 24 hours",
+        "ericsson-gitlab:gitlab-activity-digest",
+        "ericsson-gitlab",
+        "origin delivery",
+        "[silent]",
+        "do not call",
+    ):
+        assert phrase in lowered
+    assert "cronjob" in lowered
+    assert "reschedul" in lowered
 
 
 def test_ci_investigation_preserves_metadata_only_and_unsupported_include_facts() -> (
@@ -170,7 +214,10 @@ def test_source_gitlab_skill_is_a_thin_always_indexed_enablement_router() -> Non
         "ericsson-gitlab:repository-research",
         "ericsson-gitlab:merge-request-review",
         "ericsson-gitlab:ci-investigation",
+        "ericsson-gitlab:gitlab-activity-digest",
     } <= set(re.findall(r"ericsson-gitlab:[a-z-]+", body))
+    for intent in ("subgroup", "latest commit", "recent merge request", "daily digest"):
+        assert intent in lowered
     assert "do not claim" in lowered or "never claim" in lowered
 
 
@@ -223,7 +270,7 @@ def test_new_skills_embed_no_transport_credentials_or_hidden_model_client() -> N
         ), path
 
 
-def test_enabled_plugin_registers_exactly_three_explicit_qualified_skills() -> None:
+def test_enabled_plugin_registers_explicit_qualified_skills_from_contract() -> None:
     # Hermes PluginContext.register_skill is the sole qualified plugin-skill authority.
     module_name = "_task11_ericsson_gitlab"
     init_path = PLUGIN / "__init__.py"
@@ -262,3 +309,25 @@ def test_enabled_plugin_registers_exactly_three_explicit_qualified_skills() -> N
         for key in list(sys.modules):
             if key == module_name or key.startswith(f"{module_name}."):
                 sys.modules.pop(key, None)
+
+
+def test_every_skill_tool_reference_resolves_to_plugin_or_local_scheduler() -> None:
+    module_name = "_task_read_exploration_tools"
+    tools_path = PLUGIN / "tools.py"
+    spec = importlib.util.spec_from_file_location(module_name, tools_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(PLUGIN))
+    try:
+        spec.loader.exec_module(module)
+        available = set(module.SCHEMAS) | {"cronjob"}
+        declared = set()
+        for skill_name in PLUGIN_SKILLS:
+            _metadata, root, _body = _skill_contract(
+                PLUGIN / "skills" / skill_name / "SKILL.md"
+            )
+            declared |= _declared_tools(root, "read")
+            declared |= _declared_tools(root, "write")
+        assert declared <= available
+    finally:
+        sys.modules.pop(module_name, None)

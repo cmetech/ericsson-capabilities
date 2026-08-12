@@ -19,6 +19,8 @@ PLUGIN = REPO / "plugins" / "ericsson-gitlab"
 EXPECTED_TOOLS = {
     "gitlab_resolve_project",
     "gitlab_list_group_projects",
+    "gitlab_list_commits",
+    "gitlab_read_commit",
     "gitlab_list_repository_tree",
     "gitlab_read_file",
     "gitlab_read_merge_request",

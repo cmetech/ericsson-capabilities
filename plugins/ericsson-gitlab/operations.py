@@ -28,6 +28,9 @@ _MAX_GROUP_REFERENCE = 2048
 _MAX_GROUP_SLUG = 1024
 _MAX_GROUPS = 2000
 _MAX_GROUP_PROJECTS = 5000
+_MAX_COMMITS = 2000
+_MAX_COMMIT_TEXT = 128 * 1024
+_MAX_COMMIT_STAT = 1_000_000_000
 _MAX_REF = 512
 _MAX_PATH = 4096
 _MAX_TREE_ITEMS = 2000
@@ -259,6 +262,33 @@ def _continuation_source(value: Any) -> tuple[int, int]:
     return page, offset
 
 
+def _rfc3339(value: Any, *, remote: bool) -> tuple[datetime, str]:
+    category = "invalid_remote_data" if remote else "invalid_input"
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise GitLabError(category)
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        raise GitLabError(category) from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise GitLabError(category)
+    utc = parsed.astimezone(timezone.utc)
+    return utc, utc.isoformat().replace("+00:00", "Z")
+
+
+def _commit_sha(value: Any, *, short: bool = False, remote: bool = True) -> str:
+    category = "invalid_remote_data" if remote else "invalid_input"
+    minimum = 7 if short else 40
+    maximum = 40
+    if (
+        not isinstance(value, str)
+        or not minimum <= len(value) <= maximum
+        or re.fullmatch(r"[0-9a-fA-F]+", value) is None
+    ):
+        raise GitLabError(category)
+    return value.lower()
+
+
 def _build_branch_name(prefix: Any, ticket_key: Any, summary: Any) -> str:
     prefix = _bounded_string(prefix, _MAX_REF).rstrip("/")
     ticket_key = _bounded_string(ticket_key, 128)
@@ -273,8 +303,14 @@ def _build_branch_name(prefix: Any, ticket_key: Any, summary: Any) -> str:
 
 
 class GitLabOperations:
-    def __init__(self, client: GitLabClient) -> None:
+    def __init__(
+        self,
+        client: GitLabClient,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
         self.client = client
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     def _parse_project_reference(self, reference: str | int) -> dict[str, Any]:
         if isinstance(reference, int) and not isinstance(reference, bool):
@@ -345,8 +381,14 @@ class GitLabOperations:
             raise GitLabError("invalid_input")
         return _namespace_path(path, remote=False)
 
-    def resolve_project(self, reference: str | int) -> dict[str, Any]:
-        deadline = self.client.operation_deadline()
+    def resolve_project(
+        self,
+        reference: str | int,
+        *,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
+        if deadline is None:
+            deadline = self.client.operation_deadline()
         parsed = self._parse_project_reference(reference)
         endpoint = _project_endpoint(parsed["project"])
         payload = _as_object(
@@ -609,6 +651,192 @@ class GitLabOperations:
             "truncated": truncated,
             "complete": not truncated,
             "continuation": next_sources or None,
+        }
+
+    @staticmethod
+    def _project_summary(project: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "id": project["id"],
+            "name": project["name"],
+            "path_with_namespace": project["path_with_namespace"],
+            "default_branch": project["default_branch"],
+            "web_url": project["web_url"],
+        }
+
+    def _normalize_commit(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        project_path: str,
+        include_stats: bool = False,
+    ) -> dict[str, Any]:
+        sha = _commit_sha(payload.get("id"))
+        short_sha = _commit_sha(payload.get("short_id"), short=True)
+        if not sha.startswith(short_sha):
+            raise GitLabError("invalid_remote_data")
+        title = payload.get("title")
+        message = payload.get("message")
+        author_name = payload.get("author_name")
+        committer_name = payload.get("committer_name")
+        if any(
+            not isinstance(value, str)
+            or not value
+            or "\x00" in value
+            or len(value) > maximum
+            for value, maximum in (
+                (title, _MAX_COMMIT_TEXT),
+                (message, _MAX_COMMIT_TEXT),
+                (author_name, 512),
+                (committer_name, 512),
+            )
+        ):
+            raise GitLabError("invalid_remote_data")
+        _authored, authored_at = _rfc3339(payload.get("authored_date"), remote=True)
+        _committed, committed_at = _rfc3339(
+            payload.get("committed_date"), remote=True
+        )
+        _created, created_at = _rfc3339(payload.get("created_at"), remote=True)
+        parent_values = _as_list(payload.get("parent_ids"))
+        if len(parent_values) > 100:
+            raise GitLabError("invalid_remote_data")
+        parents = [_commit_sha(value) for value in parent_values]
+        web_url = _canonical_remote_url(
+            payload.get("web_url"),
+            self.client.auth.origin,
+            f"/{project_path}/-/commit/{sha}",
+        )
+        result: dict[str, Any] = {
+            "sha": sha,
+            "short_sha": short_sha,
+            "title": title,
+            "message": message,
+            "author_name": author_name,
+            "committer_name": committer_name,
+            "authored_at": authored_at,
+            "committed_at": committed_at,
+            "created_at": created_at,
+            "parent_shas": parents,
+            "web_url": web_url,
+        }
+        if include_stats:
+            stats = _as_object(payload.get("stats"))
+            if set(stats) != {"additions", "deletions", "total"}:
+                raise GitLabError("invalid_remote_data")
+            normalized_stats: dict[str, int] = {}
+            for field in ("additions", "deletions", "total"):
+                value = stats.get(field)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 0 <= value <= _MAX_COMMIT_STAT
+                ):
+                    raise GitLabError("invalid_remote_data")
+                normalized_stats[field] = value
+            if normalized_stats["total"] != (
+                normalized_stats["additions"] + normalized_stats["deletions"]
+            ):
+                raise GitLabError("invalid_remote_data")
+            result["stats"] = normalized_stats
+        return result
+
+    def list_commits(
+        self,
+        project: str | int,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        lookback_hours: int | None = None,
+        max_items: int = 100,
+        continuation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        max_items = _positive_bound(max_items, _MAX_COMMITS)
+        if ref is not None:
+            ref = _validate_ref(ref)
+        if path is not None:
+            path = _validate_path(path, allow_empty=False)
+        if lookback_hours is not None:
+            lookback_hours = _positive_bound(lookback_hours, 24 * 365)
+            if since is not None:
+                raise GitLabError("invalid_input")
+            now = self._now()
+            if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+                raise GitLabError("invalid_configuration")
+            since_dt = now.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+            since = since_dt.isoformat().replace("+00:00", "Z")
+        since_dt = None
+        until_dt = None
+        if since is not None:
+            since_dt, since = _rfc3339(since, remote=False)
+        if until is not None:
+            until_dt, until = _rfc3339(until, remote=False)
+        if since_dt is not None and until_dt is not None and since_dt > until_dt:
+            raise GitLabError("invalid_input")
+        start_page, start_offset = _continuation_source(continuation)
+
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        selected_ref = ref or resolved["default_branch"]
+        params: dict[str, Any] = {
+            "ref_name": selected_ref,
+            "order": "default",
+        }
+        if path is not None:
+            params["path"] = path
+        if since is not None:
+            params["since"] = since
+        if until is not None:
+            params["until"] = until
+        pages = self._paginate(
+            f"/api/v4/projects/{resolved['id']}/repository/commits",
+            params=params,
+            max_items=max_items,
+            normalize=lambda item: self._normalize_commit(
+                item, project_path=resolved["path_with_namespace"]
+            ),
+            deadline=deadline,
+            start_page=start_page,
+            start_offset=start_offset,
+        )
+        return {
+            "project": self._project_summary(resolved),
+            "ref": selected_ref,
+            "path": path,
+            "time_window": {
+                "since": since,
+                "until": until,
+                "lookback_hours": lookback_hours,
+            },
+            "commits": list(pages.items),
+            "count": len(pages.items),
+            "truncated": pages.truncated,
+            "continuation": self._continuation(pages),
+        }
+
+    def read_commit(
+        self,
+        project: str | int,
+        commit: str,
+    ) -> dict[str, Any]:
+        commit = _validate_ref(_bounded_string(commit, _MAX_REF))
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        payload = _as_object(
+            self.client.get_json(
+                f"/api/v4/projects/{resolved['id']}/repository/commits/{quote(commit, safe='')}",
+                params={"stats": "true"},
+                deadline=deadline,
+            )
+        )
+        return {
+            "project": self._project_summary(resolved),
+            "requested_commit": commit,
+            "commit": self._normalize_commit(
+                payload,
+                project_path=resolved["path_with_namespace"],
+                include_stats=True,
+            ),
         }
 
     def _list_named_refs(

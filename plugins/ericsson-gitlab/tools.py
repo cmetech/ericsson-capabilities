@@ -47,6 +47,7 @@ _PAGE_CONTINUATION = {
 }
 _REF = {"type": "string", "minLength": 1, "maxLength": 512}
 _PATH = {"type": "string", "maxLength": 4096}
+_TIMESTAMP = {"type": "string", "minLength": 1, "maxLength": 128}
 
 
 def _schema(name: str, description: str, properties: dict, required: list[str]):
@@ -96,6 +97,35 @@ SCHEMAS = {
             },
         },
         ["group"],
+    ),
+    "gitlab_list_commits": _schema(
+        "gitlab_list_commits",
+        "List bounded Git commit history newest-first for a project, ref, path, "
+        "or rolling UTC time window. This is commit history, not pipelines.",
+        {
+            "project": _PROJECT,
+            "ref": _REF,
+            "path": {**_PATH, "minLength": 1},
+            "since": _TIMESTAMP,
+            "until": _TIMESTAMP,
+            "lookback_hours": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8760,
+            },
+            "max_items": {"type": "integer", "minimum": 1, "maximum": 2000},
+            "continuation": _PAGE_CONTINUATION,
+        },
+        ["project"],
+    ),
+    "gitlab_read_commit": _schema(
+        "gitlab_read_commit",
+        "Read one bounded GitLab commit with canonical identity and aggregate stats.",
+        {
+            "project": _PROJECT,
+            "commit": _REF,
+        },
+        ["project", "commit"],
     ),
     "gitlab_list_repository_tree": _schema(
         "gitlab_list_repository_tree",
@@ -235,7 +265,11 @@ SCHEMAS = {
 
 def operations_from_configuration(configuration, **client_options) -> GitLabOperations:
     authentication = GitLabAuth.from_configuration(configuration)
-    return GitLabOperations(GitLabClient(authentication, **client_options))
+    now = client_options.pop("now", None)
+    return GitLabOperations(
+        GitLabClient(authentication, **client_options),
+        **({"now": now} if now is not None else {}),
+    )
 
 
 def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
@@ -266,6 +300,19 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 max_projects=values.get("max_projects", 500),
                 continuation=values.get("continuation"),
             )
+        if name == "gitlab_list_commits":
+            return operations.list_commits(
+                values["project"],
+                ref=values.get("ref"),
+                path=values.get("path"),
+                since=values.get("since"),
+                until=values.get("until"),
+                lookback_hours=values.get("lookback_hours"),
+                max_items=values.get("max_items", 100),
+                continuation=values.get("continuation"),
+            )
+        if name == "gitlab_read_commit":
+            return operations.read_commit(values["project"], values["commit"])
         if name == "gitlab_list_repository_tree":
             return operations.list_repository_tree(
                 values["project"],

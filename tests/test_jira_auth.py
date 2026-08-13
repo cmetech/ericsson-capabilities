@@ -32,6 +32,20 @@ class Configuration:
         return self.secrets[field_id]
 
 
+class HostStyleConfiguration(Configuration):
+    """Hermes reports inactive optional fields as unavailable, not KeyError."""
+
+    def setting(self, field_id):
+        if field_id not in self.settings:
+            raise RuntimeError("plugin configuration value unavailable")
+        return self.settings[field_id]
+
+    def secret(self, field_id):
+        if field_id not in self.secrets or not self.secrets[field_id]:
+            raise RuntimeError("plugin configuration value unavailable")
+        return self.secrets[field_id]
+
+
 def test_bearer_auth_normalizes_origin_and_redacts_secret():
     auth = authentication_from_configuration(Configuration())
 
@@ -43,6 +57,17 @@ def test_bearer_auth_normalizes_origin_and_redacts_secret():
     assert auth.default_max_results == 25
     assert "bearer-secret" not in repr(auth)
     assert "<redacted>" in repr(auth)
+
+
+def test_bearer_auth_accepts_host_unavailable_inactive_basic_fields():
+    configuration = HostStyleConfiguration()
+    configuration.settings.pop("email", None)
+    configuration.secrets.pop("api_token", None)
+
+    auth = authentication_from_configuration(configuration)
+
+    assert auth.auth_mode == "bearer"
+    assert auth.authorization == "Bearer bearer-secret"
 
 
 def test_basic_auth_requires_email_and_api_token_and_redacts_both():

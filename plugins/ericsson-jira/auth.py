@@ -20,19 +20,15 @@ _MAX_EMAIL = 320
 def _setting(configuration, field_id: str, default):
     try:
         return configuration.setting(field_id)
-    except KeyError:
-        return default
     except Exception:
-        raise JiraError("invalid_configuration") from None
+        return default
 
 
 def _secret(configuration, field_id: str) -> str:
     try:
         value = configuration.secret(field_id)
-    except KeyError:
-        return ""
     except Exception:
-        raise JiraError("invalid_configuration") from None
+        return ""
     if value is None:
         return ""
     if not isinstance(value, str) or len(value) > _MAX_SECRET:

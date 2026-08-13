@@ -213,6 +213,33 @@ def test_group_discovery_resolves_group_and_preserves_empty_subgroups(reference)
     assert result["complete"] is True
 
 
+def test_group_discovery_uses_supported_descendant_ordering():
+    operations = _operations()
+    seen = {}
+
+    def descendants_response(request):
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, headers={"X-Next-Page": ""}, json=[])
+
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/groups/root").mock(
+            return_value=httpx.Response(200, json=_group(10, "root"))
+        )
+        respx.get(f"{ORIGIN}/api/v4/groups/10/descendant_groups").mock(
+            side_effect=descendants_response
+        )
+        respx.get(f"{ORIGIN}/api/v4/groups/10/projects").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"X-Next-Page": ""},
+                json=[],
+            )
+        )
+        operations.list_group_projects("root")
+
+    assert seen["order_by"] == "path"
+
+
 def test_group_discovery_filters_shared_and_archived_by_default_and_labels_continuations():
     operations = _operations(max_pages=4)
     project_page = [

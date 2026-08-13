@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+from pathlib import PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,6 +70,31 @@ def test_bearer_auth_accepts_host_unavailable_inactive_basic_fields():
 
     assert auth.auth_mode == "bearer"
     assert auth.authorization == "Bearer bearer-secret"
+
+
+@pytest.mark.parametrize("transport", ["auto", "native"])
+def test_windows_default_curl_path_does_not_disable_non_curl_configuration(
+    monkeypatch, transport
+):
+    configuration = Configuration(settings={"transport": transport})
+    configuration.settings.pop("curl_executable")
+    monkeypatch.setattr(auth, "Path", PureWindowsPath)
+    monkeypatch.setattr(auth, "sys", SimpleNamespace(platform="win32"), raising=False)
+
+    resolved = authentication_from_configuration(configuration)
+
+    assert resolved.transport == transport
+    assert resolved.curl_executable == r"C:\Windows\System32\curl.exe"
+
+
+def test_native_transport_ignores_an_inactive_relative_curl_setting():
+    resolved = authentication_from_configuration(
+        Configuration(
+            settings={"transport": "native", "curl_executable": "unused-curl"}
+        )
+    )
+
+    assert resolved.transport == "native"
 
 
 def test_basic_auth_requires_email_and_api_token_and_redacts_both():

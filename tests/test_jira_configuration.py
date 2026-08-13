@@ -53,6 +53,7 @@ def test_configuration_declares_only_supported_auth_rest_and_transport_modes():
         "field": "transport",
         "equals": "curl",
     }
+    assert "default" not in fields["curl_executable"]
 
 
 def test_configuration_defaults_are_finite_and_bounded():

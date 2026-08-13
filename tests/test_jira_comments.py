@@ -323,16 +323,31 @@ def test_registered_comment_requires_exact_host_admission_before_configuration(m
     assert calls == ["jira_add_comment"]
 
 
-def test_comment_hook_requests_host_approval_and_schema_has_no_caller_auth_field():
+def test_comment_hook_binds_host_approval_to_exact_issue_and_body():
     plugin = load_plugin()
     context = Context()
     plugin.register(context)
 
-    assert context.hooks["pre_tool_call"]("jira_add_comment", {"key": "ABC-1"}) == {
-        "action": "approve",
-        "message": "Approve Ericsson Jira comment",
-        "rule_key": "jira_add_comment",
-    }
+    first = context.hooks["pre_tool_call"](
+        "jira_add_comment", {"key": "ABC-1", "body": "first body"}
+    )
+    second = context.hooks["pre_tool_call"](
+        "jira_add_comment", {"key": "XYZ-9", "body": "second body"}
+    )
+
+    assert first["action"] == second["action"] == "approve"
+    assert "ABC-1" in first["message"] and "first body" in first["message"]
+    assert "XYZ-9" in second["message"] and "second body" in second["message"]
+    assert first["rule_key"].startswith("jira_add_comment:")
+    assert second["rule_key"].startswith("jira_add_comment:")
+    assert first["rule_key"] != second["rule_key"]
+
+
+def test_comment_hook_requests_no_approval_for_read_tools_and_schema_has_no_caller_auth_field():
+    plugin = load_plugin()
+    context = Context()
+    plugin.register(context)
+
     assert context.hooks["pre_tool_call"]("jira_get_issue", {}) is None
     properties = context.registrations["jira_add_comment"]["schema"]["parameters"]["properties"]
     assert "approved" not in properties

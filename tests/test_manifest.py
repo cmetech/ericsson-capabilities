@@ -387,15 +387,16 @@ def test_workflow_package_is_complete_and_digest_bound():
     assert all(len(value) == 64 for value in digests["packages"].values())
 
     manifest = json.loads(MANIFEST.read_text())
-    jira_workflows = {}
+    connector_workflows = {}
     for relative in manifest["workflows"]:
         source = REPO / relative
         document = yaml.safe_load(source.read_text(encoding="utf-8"))
-        if "ericsson-jira" in document.get("requires", []):
-            jira_workflows[source.stem] = source
+        required = set(document.get("requires", []))
+        if required & {"ericsson-jira", "ericsson-sharepoint"}:
+            connector_workflows[source.stem] = source
 
-    assert jira_workflows
-    for name, source in jira_workflows.items():
+    assert "sharepoint-document-intake" in connector_workflows
+    for name, source in connector_workflows.items():
         packaged = package / "workflows" / f"{name}.yaml"
         source_sidecar = source.with_name(f"{name}.hermes.yaml")
         packaged_sidecar = packaged.with_name(f"{name}.hermes.yaml")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -62,13 +63,26 @@ def register(ctx) -> None:
     ctx.register_setup_action("enroll_browser", auth.enroll_browser)
     ctx.register_setup_action("clear_session", auth.clear_session)
 
-    def require_write_approval(tool_name, _arguments, **_kwargs):
+    def require_write_approval(tool_name, arguments, **_kwargs):
         if tool_name not in _WRITE_TOOLS:
             return None
+        canonical_arguments = json.dumps(
+            arguments if isinstance(arguments, dict) else {},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         return {
             "action": "approve",
-            "message": "Approve Ericsson SharePoint mutation",
-            "rule_key": tool_name,
+            "message": (
+                "Approve Ericsson SharePoint mutation\n"
+                f"Tool: {tool_name}\n"
+                f"Arguments: {canonical_arguments}"
+            ),
+            "rule_key": (
+                f"{tool_name}:"
+                f"{hashlib.sha256(canonical_arguments.encode('utf-8')).hexdigest()}"
+            ),
         }
 
     ctx.register_hook("pre_tool_call", require_write_approval)

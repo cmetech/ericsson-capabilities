@@ -237,6 +237,44 @@ def test_w08_all_writes_require_exact_backend_admission_and_reject_argument_clai
         assert denied["error"]["category"] == "approval_required"
 
 
+def test_write_approval_binds_cache_identity_and_prompt_to_exact_target():
+    package, _, _ = _load("sharepoint_write_approval_binding_test")
+
+    class Context:
+        def __init__(self):
+            self.hook = None
+
+        def register_setup_action(self, *_args, **_kwargs):
+            pass
+
+        def register_hook(self, name, handler):
+            assert name == "pre_tool_call"
+            self.hook = handler
+
+        def register_tool(self, **_kwargs):
+            pass
+
+        def configuration(self):
+            return {}
+
+    context = Context()
+    package.register(context)
+
+    first_args = {"url": "https://tenant.sharepoint.com/Documents/First.docx"}
+    reordered_first_args = dict(reversed(list(first_args.items())))
+    second_args = {"url": "https://tenant.sharepoint.com/Documents/Second.docx"}
+    first = context.hook("sharepoint_recycle_item", first_args)
+    same = context.hook("sharepoint_recycle_item", reordered_first_args)
+    second = context.hook("sharepoint_recycle_item", second_args)
+
+    assert first["action"] == same["action"] == second["action"] == "approve"
+    assert first["rule_key"].startswith("sharepoint_recycle_item:")
+    assert first["rule_key"] == same["rule_key"]
+    assert first["rule_key"] != second["rule_key"]
+    assert first_args["url"] in first["message"]
+    assert second_args["url"] in second["message"]
+
+
 def test_write_schemas_have_no_permanent_delete_or_approval_claims():
     _load()
     tools = sys.modules["sharepoint_writes_test.tools"]

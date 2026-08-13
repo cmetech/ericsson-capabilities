@@ -14,7 +14,7 @@ This is the configuration source of truth for the documented flows and the imple
 
 | Capability | Current configuration | Authentication form | Used by |
 |---|---|---|---|
-| Jira | `JIRA_BASE_URL`, `JIRA_PAT` | Static PAT/API token | Ticket summary; Jira→GitLab; defect loop |
+| Jira | Standalone Tools settings plus protected PAT or API token | Bearer PAT or basic email/API-token | Ticket summary; Jira→GitLab; single-ticket triage |
 | Glean | `GLEAN_API_TOKEN` | Bearer token for the supplied remote MCP endpoint | Internal search when a workflow elects to use Glean |
 | Teams | `teams_auth`; optional `ERICSSON_GRAPH_CLIENT_ID` | MSAL device-code sign-in | Teams list/read/send/reply and future notifications |
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
@@ -32,8 +32,8 @@ This is the configuration source of truth for the documented flows and the imple
 `sets/ericsson.json` distinguishes existing backend infrastructure from standalone
 connectors without a capability-set toggle:
 
-- a string in `plugins[]` is an existing enabled backend; the Jira and Teams entries
-  retain their current behavior, and `plugins/workflow` records Hermes' enabled built-in
+- a string in `plugins[]` is an existing enabled backend; the Teams entry retains its
+  current behavior, and `plugins/workflow` records Hermes' enabled built-in
   workflow backend;
 - a `{path, id, enabled: false}` object is a standalone connector bundled for explicit
   per-profile opt-in. Every new profile starts every such connector disabled; and
@@ -43,23 +43,33 @@ connectors without a capability-set toggle:
 
 Do not use connector metadata to disable source skills or workflows, add a set-wide
 `disabledByDefault` switch, or infer that a declared connector is implemented. The
-GitLab object declares the Release 1 lifecycle contract and the implemented plugin
-remains disabled until explicit per-profile opt-in. Jira remains an existing backend for this
-release, while SharePoint and Confluence have no production connector placeholders.
+GitLab object declares the Release 1 lifecycle contract. Jira declares the one-time
+`ericsson-jira-backend-to-standalone-v1` transition that removes only historical
+automatic enablement and records its completion. Existing Jira settings or credentials
+never imply consent to enable the connector. Both implemented connectors remain disabled
+until explicit per-profile opt-in. SharePoint and Confluence have no production connector
+placeholders in this release.
 
 ## Jira
 
-### Current keys
+### Standalone Tools configuration
 
-- `JIRA_BASE_URL`: Jira origin/base path used by REST API v2, without a trailing slash.
-- `JIRA_PAT`: bearer personal access token or compatible Jira token. It is marked as a password in the capability manifest.
+Enable `ericsson-jira` explicitly for each intended profile, then configure it through
+the product's Tools UI or `hermes tools`. Set the Jira base URL, authentication mode,
+REST preference, transport, timeout, and finite result default as ordinary settings.
+Enter either a bearer PAT or a basic-auth API token through the protected secret editor;
+basic auth also requires the Jira account email. Secret values are write-only and are
+never projected back into the UI, CLI output, logs, or tool results. Do not put Jira
+credentials in `.env`, workflow YAML, prompts, or chat.
 
-The current plugin exposes `jira_my_tickets`, `jira_get_issue`, and `jira_add_comment`. It is available only when both values are present. The PAT must be able to browse assigned issues; comment permission is additionally required for `jira_add_comment` and the future defect-fix flow.
+The plugin preserves `jira_my_tickets`, `jira_get_issue`, and `jira_add_comment`.
+Browsing issues requires read permission; `jira_add_comment` additionally requires
+comment permission and host-authored approval.
 
 ### Configure and validate
 
 1. Obtain a token through the organization's approved Jira token process. Do not reuse a browser cookie.
-2. Add the base URL and token through Keys.
+2. Enable the connector and save settings and secrets through Tools.
 3. Validate with a read-only call such as `jira_my_tickets` with a small result limit.
 4. If a real comment is later needed, preview the exact issue and text and obtain explicit approval. Never post a comment merely to validate configuration.
 

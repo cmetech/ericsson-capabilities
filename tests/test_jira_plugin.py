@@ -1,15 +1,52 @@
+import json
 import sys
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/ericsson-jira"))
 import jira_tools  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 BASE = "https://jira.internal.ericsson.com"
+
+
+def test_descriptor_is_standalone_and_preserves_stable_public_identity():
+    manifest = yaml.safe_load(
+        (REPO / "plugins" / "ericsson-jira" / "plugin.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    descriptor = json.loads(
+        (REPO / "plugins" / "ericsson-jira" / "config.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert manifest["name"] == "ericsson-jira"
+    assert manifest["kind"] == "standalone"
+    assert manifest["config_schema"] == "config.schema.json"
+    assert manifest["provides_tools"] == [
+        "jira_my_tickets",
+        "jira_get_issue",
+        "jira_add_comment",
+    ]
+    assert "requires_env" not in manifest
+    assert {field["id"] for field in descriptor["fields"]} >= {
+        "base_url",
+        "auth_mode",
+        "pat",
+        "email",
+        "api_token",
+        "rest_api_version",
+        "transport",
+        "curl_executable",
+        "request_timeout_seconds",
+        "default_max_results",
+    }
 
 
 @pytest.fixture

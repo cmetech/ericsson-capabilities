@@ -322,7 +322,15 @@ def test_manifest_content():
         "skills/ericsson/jira-to-gitlab",
     ]
     assert doc["plugins"] == [
-        "plugins/ericsson-jira",
+        {
+            "path": "plugins/ericsson-jira",
+            "id": "ericsson-jira",
+            "enabled": False,
+            "lifecycleMigration": {
+                "id": "ericsson-jira-backend-to-standalone-v1",
+                "from": "auto_seeded_backend",
+            },
+        },
         "plugins/ericsson-teams",
         "plugins/workflow",
         {
@@ -346,8 +354,6 @@ def test_manifest_content():
     assert doc["personas"] == []
     keys = {e["key"] for e in doc["env"]}
     assert keys == {
-        "JIRA_BASE_URL",
-        "JIRA_PAT",
         "GLEAN_API_TOKEN",
         "ERICSSON_GRAPH_CLIENT_ID",
     }
@@ -447,6 +453,29 @@ def test_lint_accepts_bounded_standalone_lifecycle_migration(tmp_path):
     code, out = _lint(_write_manifest(tmp_path, doc))
 
     assert code == 0 and out["ok"] is True, out
+
+
+def test_jira_manifest_declares_disabled_one_time_backend_transition():
+    doc = json.loads(MANIFEST.read_text())
+    jira = next(
+        entry
+        for entry in doc["plugins"]
+        if isinstance(entry, dict) and entry.get("id") == "ericsson-jira"
+    )
+
+    assert jira == {
+        "path": "plugins/ericsson-jira",
+        "id": "ericsson-jira",
+        "enabled": False,
+        "lifecycleMigration": {
+            "id": "ericsson-jira-backend-to-standalone-v1",
+            "from": "auto_seeded_backend",
+        },
+    }
+    assert all(
+        not isinstance(entry, str) or entry != "plugins/ericsson-jira"
+        for entry in doc["plugins"]
+    )
 
 
 def test_lint_rejects_non_boolean_or_enabled_standalone_plugins(tmp_path):

@@ -113,6 +113,42 @@ def test_readiness_keeps_graph_ready_when_audit_browser_needs_enrollment(tmp_pat
     }
 
 
+def test_graph_readiness_accepts_explicit_azure_cli_identity(tmp_path):
+    _, auth = _load_package()
+    seen = []
+
+    def readiness_probe(_config, **facts):
+        seen.append(facts)
+        return types.SimpleNamespace(
+            status=(
+                "ready"
+                if facts["azure_cli_authenticated"]
+                else "authentication_required"
+            ),
+            mode="azure_cli",
+            missing_fields=(),
+        )
+
+    assert auth.graph_ready(
+        _configuration(
+            tmp_path,
+            auth_mode="azure_cli",
+            tenant_id="",
+            client_id="",
+            client_secret="",
+            scopes="https://graph.microsoft.com/.default",
+        ),
+        readiness_probe=readiness_probe,
+        identity_config_type=_GraphIdentityConfig,
+    )
+    assert seen == [
+        {
+            "delegated_cache_has_account": False,
+            "azure_cli_authenticated": True,
+        }
+    ]
+
+
 def test_authenticate_is_explicit_interactive_and_never_returns_a_token(tmp_path):
     _, auth = _load_package()
     calls = []

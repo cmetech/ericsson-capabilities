@@ -268,9 +268,29 @@ def clear_session(run, *, browser_registry=None) -> dict[str, Any]:
     return {"cleared": True, "browser_profile": config.browser_profile}
 
 
-def graph_ready(configuration) -> bool:
+def graph_ready(
+    configuration,
+    *,
+    readiness_probe: Callable[..., Any] = _default_readiness_probe,
+    identity_config_type=None,
+) -> bool:
     try:
         config = SharePointConfiguration.from_runtime(configuration)
-        return identity_status(config)["graph"]["status"] == "ready"
+        # Azure CLI owns its credential cache outside Hermes. Selecting it
+        # explicitly (or opting it into auto selection) is the durable
+        # readiness signal; token validity is still checked by test_connection
+        # and every Graph request.
+        azure_cli_configured = (
+            config.auth_mode == "azure_cli" or config.azure_cli_enabled
+        )
+        return (
+            identity_status(
+                config,
+                readiness_probe=readiness_probe,
+                azure_cli_authenticated=azure_cli_configured,
+                identity_config_type=identity_config_type,
+            )["graph"]["status"]
+            == "ready"
+        )
     except Exception:
         return False

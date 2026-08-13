@@ -93,10 +93,12 @@ class JiraClient:
     ) -> None:
         if type(max_retries) is not int or not 0 <= max_retries <= 4:
             raise JiraError("invalid_configuration")
+        self._cancel_check = cancel_check or (lambda: False)
         self.auth = authentication
         self.max_retries = max_retries
-        self._transport = native_transport or NativeTransport(authentication)
-        self._cancel_check = cancel_check or (lambda: False)
+        self._transport = native_transport or NativeTransport(
+            authentication, cancel_check=self._cancel_check
+        )
         self._clock = clock
         self._sleep = sleep
 

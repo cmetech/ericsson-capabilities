@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from . import auth, client, tools  # noqa: F401
+from . import audit, auth, client, operations, tools  # noqa: F401
 from .models import (
     SharePointConfigurationError,
     SharePointFileBoundaryError,
@@ -75,7 +75,7 @@ def register(ctx) -> None:
             toolset="ericsson-sharepoint",
             schema=schema,
             handler=handler(name),
-            check_fn=available,
+            check_fn=(lambda: operations.audit_ready(ctx.configuration())) if name == "sharepoint_audit_permissions" else available,
             is_async=True,
             emoji="📁",
         )

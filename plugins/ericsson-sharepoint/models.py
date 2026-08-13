@@ -240,3 +240,7 @@ class SharePointDeadlineError(RuntimeError):
 
 class SharePointFileBoundaryError(RuntimeError):
     """Raised when a local path is outside the admitted operation boundary."""
+
+
+class SharePointAuditError(RuntimeError):
+    """Raised when a browser-backed audit cannot preserve its authority contract."""

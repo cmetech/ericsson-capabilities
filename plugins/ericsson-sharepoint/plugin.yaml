@@ -9,3 +9,5 @@ provides_tools:
   - sharepoint_get_item
   - sharepoint_list_items
   - sharepoint_download
+  - sharepoint_list_owned_sites
+  - sharepoint_audit_permissions

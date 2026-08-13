@@ -74,6 +74,28 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "sharepoint_list_owned_sites": {
+        "name": "sharepoint_list_owned_sites",
+        "description": "List bounded SharePoint sites owned through Microsoft 365 groups.",
+        "parameters": {"type": "object", "properties": {
+            "max_pages": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "max_sites": {"type": "integer", "minimum": 1, "maximum": 100000},
+            "max_metadata_bytes": {"type": "integer", "minimum": 1, "maximum": 67108864}
+        }, "additionalProperties": False},
+    },
+    "sharepoint_audit_permissions": {
+        "name": "sharepoint_audit_permissions",
+        "description": "Audit bounded permissions and site metadata through the enrolled same-origin browser.",
+        "parameters": {"type": "object", "properties": {
+            "sites": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "object", "properties": {"name": {"type": "string", "maxLength": 512}, "url": {"type": "string", "maxLength": 8192}}, "required": ["name", "url"], "additionalProperties": False}},
+            "selected": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 8192}},
+            "max_sites": {"type": "integer", "minimum": 1, "maximum": 100},
+            "max_pages_per_category": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "max_rows_per_category": {"type": "integer", "minimum": 1, "maximum": 100000},
+            "max_total_rows": {"type": "integer", "minimum": 1, "maximum": 100000},
+            "max_total_bytes": {"type": "integer", "minimum": 1, "maximum": 1099511627776}
+        }, "required": ["sites"], "additionalProperties": False},
+    },
 }
 
 
@@ -121,5 +143,26 @@ async def invoke(
             file_authorization=file_authorization,
             unattended=unattended,
             cancel_check=cancel_check,
+        )
+    if name == "sharepoint_list_owned_sites":
+        return await operations.list_owned_sites(
+            configuration,
+            max_pages=arguments.get("max_pages"),
+            max_sites=arguments.get("max_sites"),
+            max_metadata_bytes=arguments.get("max_metadata_bytes"),
+            cancel_check=cancel_check,
+        )
+    if name == "sharepoint_audit_permissions":
+        limits = {
+            key: arguments[key]
+            for key in ("max_sites", "max_pages_per_category", "max_rows_per_category", "max_total_rows", "max_total_bytes")
+            if key in arguments
+        }
+        return await operations.audit_permissions(
+            configuration,
+            sites=arguments.get("sites") or [],
+            selected=tuple(arguments.get("selected") or ()),
+            cancel_check=cancel_check,
+            **limits,
         )
     raise ValueError("unknown SharePoint tool")

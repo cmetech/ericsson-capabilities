@@ -17,12 +17,14 @@ from urllib.parse import urlsplit
 from .auth import build_identity_config
 from .client import SharePointClient
 from .models import (
+    SharePointAuditError,
     SharePointCancelledError,
     SharePointConfiguration,
     SharePointDeadlineError,
     SharePointFileBoundaryError,
     SharePointResolutionError,
 )
+from . import audit as sharepoint_audit
 
 
 _INVALID_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
@@ -539,4 +541,120 @@ async def download(
         unattended=unattended,
         deadline=time.monotonic() + config.timeout_seconds,
         cancel_check=cancel_check,
+    )
+
+
+async def list_owned_sites_with_graph(
+    graph,
+    *,
+    tenant_hosts,
+    max_pages,
+    max_sites,
+    max_metadata_bytes,
+    deadline=None,
+    cancel_check=None,
+    clock=time.monotonic,
+):
+    _control(deadline=deadline, cancel_check=cancel_check, clock=clock)
+    await graph.get_json("/me", params={"$select": "id,displayName"})
+    sites = []
+    warnings = []
+    reasons = []
+    pages = 0
+    metadata_bytes = 0
+    async for page in graph.iterate_pages(
+        "/me/ownedObjects/microsoft.graph.group",
+        params={"$select": "id,displayName", "$top": min(200, max_sites)},
+    ):
+        _control(deadline=deadline, cancel_check=cancel_check, clock=clock)
+        if pages >= max_pages:
+            reasons.append("page limit reached")
+            break
+        pages += 1
+        values = page.get("value") if isinstance(page, Mapping) else None
+        if not isinstance(values, list):
+            raise SharePointResolutionError("Graph returned invalid owned-group page")
+        for group in values:
+            if len(sites) >= max_sites:
+                reasons.append("site limit reached")
+                break
+            group_id = _bounded_text(group.get("id") if isinstance(group, Mapping) else "", "group id", 1024)
+            if not group_id:
+                continue
+            try:
+                raw = await graph.get_json(f"/groups/{group_id}/sites/root", params={"$select": "id,displayName,webUrl,description,createdDateTime"})
+                if not isinstance(raw, Mapping):
+                    raise ValueError
+                web_url = _safe_remote_web_url(raw.get("webUrl"), tenant_hosts)
+                row = {"id": _bounded_text(raw.get("id"), "site id", 1024), "name": _bounded_text(raw.get("displayName"), "site name"), "url": web_url, "description": _bounded_text(raw.get("description"), "description"), "created": _bounded_text(raw.get("createdDateTime"), "created", 128), "group_id": group_id, "group_name": _bounded_text(group.get("displayName"), "group name")}
+            except Exception:
+                warnings.append({"group_id": group_id, "category": "remote_unavailable"})
+                continue
+            size = len(json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode())
+            if metadata_bytes + size > max_metadata_bytes:
+                reasons.append("metadata byte limit reached")
+                break
+            sites.append(row)
+            metadata_bytes += size
+        if reasons:
+            break
+    return {"status": "partial" if warnings else "truncated" if reasons else "complete", "sites": sites, "warnings": warnings, "truncated": bool(reasons), "truncation_reasons": list(dict.fromkeys(reasons)), "counts": {"sites": len(sites), "pages": pages, "metadata_bytes": metadata_bytes}}
+
+
+async def audit_permissions_with_browser(
+    config: SharePointConfiguration,
+    *,
+    sites,
+    selected,
+    browser_profiles=None,
+    browser_manager=None,
+    audit_runner=sharepoint_audit.audit_sites_with_session,
+    cancel_check=None,
+    **limits,
+):
+    if browser_profiles is None or browser_manager is None:
+        from tools import browser_profiles as core_profiles
+        from tools import browser_session_manager as core_manager
+        browser_profiles = browser_profiles or core_profiles
+        browser_manager = browser_manager or core_manager
+    profile = browser_profiles.get_profile(config.browser_profile)
+    if profile is None or not profile.is_enrolled or not browser_profiles.is_origin_trusted(profile, config.tenant_origin):
+        raise SharePointAuditError("named browser profile must be enrolled and trusted for tenant origin")
+    session = browser_manager.acquire(profile=config.browser_profile, headless=True, session_key=f"ericsson-sharepoint::{config.browser_profile}::audit", attach_global=False)
+    try:
+        defaults = {"max_sites": min(config.max_items, 25), "max_pages_per_category": min(config.max_pages, 25), "max_rows_per_category": min(config.max_items, 1000), "max_total_rows": config.max_items, "max_total_bytes": config.max_bytes, "deadline": time.monotonic() + config.timeout_seconds, "cancel_check": cancel_check}
+        defaults.update(limits)
+        return await audit_runner(session, sites=sites, selected=selected, allowed_hosts={config.tenant_host}, **defaults)
+    finally:
+        session.release()
+
+
+def audit_ready(configuration) -> bool:
+    try:
+        config = SharePointConfiguration.from_runtime(configuration)
+        from tools import browser_profiles
+        profile = browser_profiles.get_profile(config.browser_profile)
+        return bool(profile and profile.is_enrolled and browser_profiles.is_origin_trusted(profile, config.tenant_origin))
+    except Exception:
+        return False
+
+
+async def list_owned_sites(configuration, *, max_pages=None, max_sites=None, max_metadata_bytes=None, cancel_check=None):
+    config = SharePointConfiguration.from_runtime(configuration)
+    client = client_from_configuration(configuration)
+    return await list_owned_sites_with_graph(
+        client.graph,
+        tenant_hosts={config.tenant_host},
+        max_pages=min(config.max_pages, int(max_pages or config.max_pages)),
+        max_sites=min(config.max_items, int(max_sites or min(config.max_items, 100))),
+        max_metadata_bytes=min(config.max_bytes, int(max_metadata_bytes or min(config.max_bytes, 1024 * 1024))),
+        deadline=time.monotonic() + config.timeout_seconds,
+        cancel_check=cancel_check,
+    )
+
+
+async def audit_permissions(configuration, *, sites, selected, cancel_check=None, **limits):
+    config = SharePointConfiguration.from_runtime(configuration)
+    return await audit_permissions_with_browser(
+        config, sites=sites, selected=selected, cancel_check=cancel_check, **limits
     )

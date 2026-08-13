@@ -1,0 +1,8 @@
+{
+  "metadata": {"Title": "Governance", "Description": "Controls", "Url": "https://tenant.sharepoint.com/sites/Governance", "Created": "2024-01-01", "LastItemModifiedDate": "2026-08-01", "WebTemplate": "GROUP", "Language": 1033},
+  "users": [{"Id": 1, "Title": "Owner", "LoginName": "i:0#.f|membership|owner@example.com", "Email": "owner@example.com", "IsSiteAdmin": true, "PrincipalType": 1}],
+  "roles": [{"principal_id": 1, "principal_type": 1, "principal_name": "Owner", "principal_login": "owner@example.com", "principal_email": "owner@example.com", "role": "Full Control", "group_id": null, "group_name": ""}, {"principal_id": 8, "principal_type": 8, "principal_name": "Members", "principal_login": "Members", "principal_email": "", "role": "Edit", "group_id": 8, "group_name": "Members"}],
+  "members": [{"group_id": 8, "group_name": "Members", "member_id": 2, "member_name": "Member", "member_email": "member@example.com", "member_login": "member@example.com"}],
+  "lists": [{"Id": "list-1", "Title": "Documents", "Description": "Docs", "BaseType": 1, "ItemCount": 4, "Created": "2024-01-01", "LastItemModifiedDate": "2026-08-01"}],
+  "subsites": [{"Title": "Child", "Url": "https://tenant.sharepoint.com/sites/Governance/Child", "Created": "2025-01-01", "WebTemplate": "STS"}]
+}

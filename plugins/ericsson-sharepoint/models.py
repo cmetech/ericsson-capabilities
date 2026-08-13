@@ -87,7 +87,10 @@ def _local_root(value: Any, *, home: Path, default: str) -> Path:
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = home / candidate
-    return candidate.resolve(strict=False)
+    # Preserve the lexical path so the operation boundary can reject any
+    # symlink component before resolving it. Resolving here would erase the
+    # evidence that a configured root itself is a symlink.
+    return Path(os.path.abspath(os.path.normpath(candidate)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,3 +228,15 @@ class SharePointSetupError(RuntimeError):
 
 class SharePointResolutionError(RuntimeError):
     """Raised when a URL or explicit ID does not resolve unambiguously."""
+
+
+class SharePointCancelledError(RuntimeError):
+    """Raised when cooperative cancellation stops a connector operation."""
+
+
+class SharePointDeadlineError(RuntimeError):
+    """Raised when a connector operation exceeds its monotonic deadline."""
+
+
+class SharePointFileBoundaryError(RuntimeError):
+    """Raised when a local path is outside the admitted operation boundary."""

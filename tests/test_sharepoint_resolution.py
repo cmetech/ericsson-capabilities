@@ -225,7 +225,7 @@ def test_resolution_tool_schemas_are_connector_owned_and_bounded():
         if name.endswith(".tools") and name.startswith("ericsson_sharepoint_resolution_test")
     )
 
-    assert set(tools.SCHEMAS) == {"sharepoint_resolve_url", "sharepoint_get_item"}
+    assert {"sharepoint_resolve_url", "sharepoint_get_item"} <= set(tools.SCHEMAS)
     assert tools.SCHEMAS["sharepoint_resolve_url"]["parameters"]["additionalProperties"] is False
     assert tools.SCHEMAS["sharepoint_get_item"]["parameters"]["additionalProperties"] is False
 

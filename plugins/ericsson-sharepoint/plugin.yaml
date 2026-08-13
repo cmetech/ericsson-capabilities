@@ -7,3 +7,5 @@ config_schema: config.schema.json
 provides_tools:
   - sharepoint_resolve_url
   - sharepoint_get_item
+  - sharepoint_list_items
+  - sharepoint_download

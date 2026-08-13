@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 
 from . import auth, client, tools  # noqa: F401
-from .models import SharePointConfigurationError, SharePointResolutionError
+from .models import (
+    SharePointConfigurationError,
+    SharePointFileBoundaryError,
+    SharePointResolutionError,
+)
 
 
 def _json(value) -> str:
@@ -31,10 +35,24 @@ def register(ctx) -> None:
         async def invoke(arguments: dict, **_kwargs) -> str:
             try:
                 configuration = ctx.configuration()
-                result = await tools.invoke(name, arguments or {}, configuration)
+                try:
+                    from tools.interrupt import is_interrupted
+                except ImportError:
+                    def is_interrupted():
+                        return False
+                result = await tools.invoke(
+                    name,
+                    arguments or {},
+                    configuration,
+                    file_authorization=_kwargs.get("file_authorization"),
+                    unattended=_kwargs.get("unattended") is True,
+                    cancel_check=is_interrupted,
+                )
                 return _json({"success": True, "result": result})
             except SharePointConfigurationError:
                 category = "configuration_required"
+            except SharePointFileBoundaryError:
+                category = "permission_denied"
             except (SharePointResolutionError, ValueError, TypeError, KeyError):
                 category = "invalid_input"
             except Exception:

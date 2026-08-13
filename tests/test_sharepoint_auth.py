@@ -9,9 +9,6 @@ import sys
 import threading
 import types
 
-import pytest
-
-
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "ericsson-sharepoint"
 

@@ -83,8 +83,10 @@ def test_b15_audit_readiness_is_independent_from_graph_tools(tmp_path):
         def __init__(self):
             self.tools = []
             self.actions = []
+            self.hooks = []
         def configuration(self): return {"invalid": True}
         def register_setup_action(self, *args, **kwargs): self.actions.append((args, kwargs))
+        def register_hook(self, name, handler): self.hooks.append((name, handler))
         def register_tool(self, **kwargs): self.tools.append(kwargs)
 
     ctx = Context()

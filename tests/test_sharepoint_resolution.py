@@ -234,6 +234,7 @@ def test_resolution_tool_schemas_are_connector_owned_and_bounded():
     class Context:
         def __init__(self):
             self.actions = []
+            self.hooks = []
             self.tools = []
 
         def register_setup_action(self, name, handler, **kwargs):
@@ -241,6 +242,9 @@ def test_resolution_tool_schemas_are_connector_owned_and_bounded():
 
         def register_tool(self, **kwargs):
             self.tools.append(kwargs)
+
+        def register_hook(self, name, handler):
+            self.hooks.append((name, handler))
 
     context = Context()
     package.register(context)

@@ -167,6 +167,39 @@ async def test_w03_upload_source_boundary_rejects_traversal_symlink_and_special_
 
 
 @pytest.mark.anyio
+async def test_upload_rejects_symlink_swap_after_boundary_validation(
+    tmp_path, monkeypatch
+):
+    operations, models = _load()
+    config = _config(models, tmp_path)
+    config.upload_root.mkdir(parents=True)
+    source = config.upload_root / "source.bin"
+    source.write_bytes(b"authorized")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside secret")
+    original = operations._upload_source
+
+    def swap_after_validation(config, candidate):
+        validated = original(config, candidate)
+        validated.unlink()
+        validated.symlink_to(outside)
+        return validated
+
+    monkeypatch.setattr(operations, "_upload_source", swap_after_validation)
+    graph = Graph()
+
+    with pytest.raises(models.SharePointFileBoundaryError):
+        await operations.upload_with_client(
+            Client(graph),
+            config,
+            folder_url="https://tenant.sharepoint.com/Destination",
+            source=source,
+        )
+
+    assert graph.calls == []
+
+
+@pytest.mark.anyio
 async def test_upload_rejects_bad_conflict_chunk_and_cancel_before_remote_call(
     tmp_path,
 ):

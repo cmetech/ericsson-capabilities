@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import fnmatch
 import json
@@ -908,6 +909,66 @@ def _upload_source(config: SharePointConfiguration, source: Path | str) -> Path:
     return candidate
 
 
+@contextmanager
+def _staged_upload_source(
+    config: SharePointConfiguration,
+    source: Path | str,
+    *,
+    deadline=None,
+    cancel_check=None,
+):
+    """Copy one no-follow validated source into a private immutable staging path."""
+    candidate = _upload_source(config, source)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError:
+        raise SharePointFileBoundaryError("upload source is unavailable") from None
+    try:
+        opened = os.fstat(descriptor)
+        try:
+            current = candidate.lstat()
+            current_resolved = candidate.resolve(strict=True)
+            root_resolved = config.upload_root.resolve(strict=True)
+        except OSError:
+            raise SharePointFileBoundaryError("upload source changed during validation") from None
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or not _is_within(current_resolved, root_resolved)
+        ):
+            raise SharePointFileBoundaryError("upload source changed during validation")
+        if opened.st_size > config.max_bytes:
+            raise SharePointFileBoundaryError(
+                "upload source exceeds configured byte limit"
+            )
+
+        with tempfile.TemporaryDirectory(prefix=".sharepoint-upload-") as temp:
+            staged = Path(temp) / "payload"
+            copied = 0
+            with os.fdopen(os.dup(descriptor), "rb") as source_handle, staged.open(
+                "xb"
+            ) as staged_handle:
+                for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
+                    _control(deadline=deadline, cancel_check=cancel_check)
+                    copied += len(chunk)
+                    if copied > config.max_bytes:
+                        raise SharePointFileBoundaryError(
+                            "upload source exceeds configured byte limit"
+                        )
+                    staged_handle.write(chunk)
+            if copied != opened.st_size:
+                raise SharePointFileBoundaryError(
+                    "upload source changed while it was being staged"
+                )
+            staged.chmod(0o600)
+            yield staged, copied, candidate.name
+    finally:
+        os.close(descriptor)
+
+
 async def upload_with_client(
     client,
     config,
@@ -924,33 +985,32 @@ async def upload_with_client(
     _control(deadline=deadline, cancel_check=cancel_check)
     if conflict_behavior not in {"fail", "replace", "rename"}:
         raise SharePointWriteError("upload conflict behavior is invalid")
-    local = _upload_source(config, source)
-    size = local.stat().st_size
-    if size > config.max_bytes:
-        raise SharePointFileBoundaryError("upload source exceeds configured byte limit")
-    destination = await client.get_item(url=folder_url)
-    if destination["item"].get("kind") != "folder":
-        raise SharePointWriteError("upload destination must be a folder")
-    remote_name = _write_name(name or local.name)
-    encoded = quote(remote_name, safe="")
-    base = f"/drives/{destination['drive']['id']}/items/{destination['item']['id']}:/{encoded}:"
-    if size <= 4 * 1024 * 1024:
-        raw = await client.graph.upload_small(
-            f"{base}/content?@microsoft.graph.conflictBehavior={conflict_behavior}",
-            local.read_bytes(),
-            max_bytes=4 * 1024 * 1024,
-        )
-    else:
-        raw = await client.graph.upload_via_session(
-            f"{base}/createUploadSession",
-            local,
-            max_bytes=config.max_bytes,
-            chunk_size=chunk_size,
-            max_chunks=max_chunks,
-            conflict_behavior=conflict_behavior,
-            deadline=deadline,
-            cancel_check=cancel_check,
-        )
+    with _staged_upload_source(
+        config, source, deadline=deadline, cancel_check=cancel_check
+    ) as (local, size, source_name):
+        destination = await client.get_item(url=folder_url)
+        if destination["item"].get("kind") != "folder":
+            raise SharePointWriteError("upload destination must be a folder")
+        remote_name = _write_name(name or source_name)
+        encoded = quote(remote_name, safe="")
+        base = f"/drives/{destination['drive']['id']}/items/{destination['item']['id']}:/{encoded}:"
+        if size <= 4 * 1024 * 1024:
+            raw = await client.graph.upload_small(
+                f"{base}/content?@microsoft.graph.conflictBehavior={conflict_behavior}",
+                local.read_bytes(),
+                max_bytes=4 * 1024 * 1024,
+            )
+        else:
+            raw = await client.graph.upload_via_session(
+                f"{base}/createUploadSession",
+                local,
+                max_bytes=config.max_bytes,
+                chunk_size=chunk_size,
+                max_chunks=max_chunks,
+                conflict_behavior=conflict_behavior,
+                deadline=deadline,
+                cancel_check=cancel_check,
+            )
     return {
         "id": _bounded_text(raw.get("id"), "item id", 1024),
         "name": _bounded_text(raw.get("name"), "item name", 1024),

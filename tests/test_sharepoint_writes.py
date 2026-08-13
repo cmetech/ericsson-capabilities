@@ -37,26 +37,53 @@ def _load(name="sharepoint_writes_test"):
 class Graph:
     def __init__(self):
         self.calls = []
+        self.controls = []
 
     async def post_json(
-        self, path, *, json_body=None, headers=None, retry_ambiguous=True
+        self,
+        path,
+        *,
+        json_body=None,
+        headers=None,
+        retry_ambiguous=True,
+        deadline=None,
+        cancel_check=None,
     ):
+        self.controls.append((deadline, cancel_check))
         self.calls.append(("post", path, json_body, headers, retry_ambiguous))
         return {"id": "created", "name": json_body.get("name", "")}
 
     async def patch_json(
-        self, path, *, json_body=None, headers=None, retry_ambiguous=True
+        self,
+        path,
+        *,
+        json_body=None,
+        headers=None,
+        retry_ambiguous=True,
+        deadline=None,
+        cancel_check=None,
     ):
+        self.controls.append((deadline, cancel_check))
         self.calls.append(("patch", path, json_body, headers, retry_ambiguous))
         return {"id": "source", "name": json_body.get("name", "Moved")}
 
-    async def delete(self, path, *, headers=None, retry_ambiguous=True):
+    async def delete(
+        self,
+        path,
+        *,
+        headers=None,
+        retry_ambiguous=True,
+        deadline=None,
+        cancel_check=None,
+    ):
+        self.controls.append((deadline, cancel_check))
         self.calls.append(("delete", path, headers, retry_ambiguous))
         return {"deleted": True, "status_code": 204}
 
     async def start_async_operation(
         self, path, *, json_body, max_polls, deadline=None, cancel_check=None
     ):
+        self.controls.append((deadline, cancel_check))
         self.calls.append(("async", path, json_body, max_polls, deadline, cancel_check))
         return {"status": "completed"}
 
@@ -65,8 +92,18 @@ class Client:
     def __init__(self, graph=None, *, destination_drive="drive"):
         self.graph = graph or Graph()
         self.destination_drive = destination_drive
+        self.controls = []
 
-    async def get_item(self, *, url=None, drive_id=None, item_id=None):
+    async def get_item(
+        self,
+        *,
+        url=None,
+        drive_id=None,
+        item_id=None,
+        deadline=None,
+        cancel_check=None,
+    ):
+        self.controls.append((deadline, cancel_check))
         if url and "Destination" in url:
             drive_id, item_id = self.destination_drive, "dest"
         else:
@@ -93,12 +130,15 @@ async def test_w04_create_folder_conflict_policy_and_optimistic_header():
     _, operations, _ = _load()
     graph = Graph()
     client = Client(graph)
+    cancel_check = lambda: False
     result = await operations.create_folder_with_client(
         client,
         parent_url="https://tenant.sharepoint.com/Destination",
         name="New Folder",
         exist_ok=True,
         etag='"etag"',
+        deadline=99.0,
+        cancel_check=cancel_check,
     )
     assert result == {"id": "created", "name": "New Folder", "kind": "folder"}
     assert graph.calls == [
@@ -114,6 +154,8 @@ async def test_w04_create_folder_conflict_policy_and_optimistic_header():
             False,
         )
     ]
+    assert client.controls == [(99.0, cancel_check)]
+    assert graph.controls == [(99.0, cancel_check)]
 
 
 @pytest.mark.anyio
@@ -121,12 +163,15 @@ async def test_w05_move_requires_same_tenant_and_validates_cross_drive_parent():
     _, operations, models = _load()
     graph = Graph()
     client = Client(graph, destination_drive="other-drive")
+    cancel_check = lambda: False
     result = await operations.move_item_with_client(
         client,
         source_url="https://tenant.sharepoint.com/Source.docx",
         destination_url="https://tenant.sharepoint.com/Destination",
         name="Renamed.docx",
         etag='"etag"',
+        deadline=99.0,
+        cancel_check=cancel_check,
     )
     assert result["id"] == "source"
     assert graph.calls[0] == (
@@ -139,6 +184,8 @@ async def test_w05_move_requires_same_tenant_and_validates_cross_drive_parent():
         {"If-Match": '"etag"'},
         False,
     )
+    assert client.controls == [(99.0, cancel_check), (99.0, cancel_check)]
+    assert graph.controls == [(99.0, cancel_check)]
     bad = Client()
 
     async def foreign(**kwargs):
@@ -161,6 +208,7 @@ async def test_w06_copy_polls_async_completion_once_without_duplicate_create():
     _, operations, _ = _load()
     graph = Graph()
     client = Client(graph, destination_drive="other")
+    cancel_check = lambda: False
     result = await operations.copy_item_with_client(
         client,
         source_url="https://tenant.sharepoint.com/Source",
@@ -168,7 +216,7 @@ async def test_w06_copy_polls_async_completion_once_without_duplicate_create():
         name="Copy.docx",
         max_polls=8,
         deadline=99,
-        cancel_check=lambda: False,
+        cancel_check=cancel_check,
     )
     assert result == {"status": "completed"}
     assert len(graph.calls) == 1
@@ -178,6 +226,8 @@ async def test_w06_copy_polls_async_completion_once_without_duplicate_create():
         {"parentReference": {"driveId": "other", "id": "dest"}, "name": "Copy.docx"},
         8,
     )
+    assert client.controls == [(99, cancel_check), (99, cancel_check)]
+    assert graph.controls == [(99, cancel_check)]
 
 
 @pytest.mark.anyio
@@ -185,13 +235,20 @@ async def test_w07_recycle_uses_driveitem_delete_not_permanent_delete():
     _, operations, _ = _load()
     graph = Graph()
     client = Client(graph)
+    cancel_check = lambda: False
     result = await operations.recycle_item_with_client(
-        client, url="https://tenant.sharepoint.com/Source", etag='"etag"'
+        client,
+        url="https://tenant.sharepoint.com/Source",
+        etag='"etag"',
+        deadline=99.0,
+        cancel_check=cancel_check,
     )
     assert result == {"recycled": True, "item_id": "source", "drive_id": "drive"}
     assert graph.calls == [
         ("delete", "/drives/drive/items/source", {"If-Match": '"etag"'}, False)
     ]
+    assert client.controls == [(99.0, cancel_check)]
+    assert graph.controls == [(99.0, cancel_check)]
     assert "permanent" not in repr(result).lower()
 
 

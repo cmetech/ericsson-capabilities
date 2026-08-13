@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, Collection, Mapping
+from typing import Any, Callable, Collection, Mapping
 from urllib.parse import quote, unquote, urlsplit
 
 from .models import SharePointResolutionError
@@ -86,13 +86,29 @@ class SharePointClient:
             raise SharePointResolutionError(f"Graph returned invalid {label} metadata")
         return value
 
-    async def resolve_url(self, url: str) -> dict[str, Any]:
+    async def resolve_url(
+        self,
+        url: str,
+        *,
+        deadline: float | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         parsed = parse_sharepoint_url(url, allowed_hosts=self.tenant_hosts)
         if parsed.kind == "sharing":
-            return await self._resolve_sharing(parsed)
-        return await self._resolve_path(parsed)
+            return await self._resolve_sharing(
+                parsed, deadline=deadline, cancel_check=cancel_check
+            )
+        return await self._resolve_path(
+            parsed, deadline=deadline, cancel_check=cancel_check
+        )
 
-    async def _resolve_path(self, parsed: ParsedSharePointURL) -> dict[str, Any]:
+    async def _resolve_path(
+        self,
+        parsed: ParsedSharePointURL,
+        *,
+        deadline: float | None,
+        cancel_check: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
         site_ref = (
             f"{parsed.host}:/{quote(parsed.site_path, safe='/')}"
             if parsed.site_path
@@ -102,17 +118,27 @@ class SharePointClient:
             await self.graph.get_json(
                 f"/sites/{site_ref}",
                 params={"$select": "id,displayName,webUrl"},
+                deadline=deadline,
+                cancel_check=cancel_check,
             ),
             "site",
         )
         site_id = _safe_id(site.get("id"), "site id")
         site_url = self._safe_web_url(site.get("webUrl"))
-        drive_id, drive_name = await self._resolve_drive(site_id, parsed.library)
+        drive_id, drive_name = await self._resolve_drive(
+            site_id,
+            parsed.library,
+            deadline=deadline,
+            cancel_check=cancel_check,
+        )
         item_path = parsed.item_path
         item_endpoint = self._item_endpoint(drive_id, item_path)
         item = self._mapping(
             await self.graph.get_json(
-                item_endpoint, params={"$select": _ITEM_SELECT}
+                item_endpoint,
+                params={"$select": _ITEM_SELECT},
+                deadline=deadline,
+                cancel_check=cancel_check,
             ),
             "DriveItem",
         )
@@ -127,11 +153,21 @@ class SharePointClient:
             item_path=item_path,
         )
 
-    async def _resolve_drive(self, site_id: str, library: str) -> tuple[str, str]:
+    async def _resolve_drive(
+        self,
+        site_id: str,
+        library: str,
+        *,
+        deadline: float | None,
+        cancel_check: Callable[[], bool] | None,
+    ) -> tuple[str, str]:
         if library.casefold() in _DEFAULT_LIBRARIES or library.startswith("_"):
             drive = self._mapping(
                 await self.graph.get_json(
-                    f"/sites/{site_id}/drive", params={"$select": "id,name"}
+                    f"/sites/{site_id}/drive",
+                    params={"$select": "id,name"},
+                    deadline=deadline,
+                    cancel_check=cancel_check,
                 ),
                 "drive",
             )
@@ -145,6 +181,8 @@ class SharePointClient:
         async for page in self.graph.iterate_pages(
             f"/sites/{site_id}/drives",
             params={"$select": "id,name,webUrl", "$top": min(200, self.max_items)},
+            deadline=deadline,
+            cancel_check=cancel_check,
         ):
             pages += 1
             if pages > self.max_pages:
@@ -174,11 +212,19 @@ class SharePointClient:
             raise SharePointResolutionError("document library identity is ambiguous")
         return next(iter(matches.items()))
 
-    async def _resolve_sharing(self, parsed: ParsedSharePointURL) -> dict[str, Any]:
+    async def _resolve_sharing(
+        self,
+        parsed: ParsedSharePointURL,
+        *,
+        deadline: float | None,
+        cancel_check: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
         item = self._mapping(
             await self.graph.get_json(
                 f"/shares/{encode_share_id(parsed.sharing_url)}/driveItem",
                 params={"$select": _ITEM_SELECT},
+                deadline=deadline,
+                cancel_check=cancel_check,
             ),
             "shared DriveItem",
         )
@@ -202,11 +248,15 @@ class SharePointClient:
         url: str | None = None,
         drive_id: str | None = None,
         item_id: str | None = None,
+        deadline: float | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         if url:
             if drive_id or item_id:
                 raise SharePointResolutionError("URL and explicit IDs are ambiguous")
-            return await self.resolve_url(url)
+            return await self.resolve_url(
+                url, deadline=deadline, cancel_check=cancel_check
+            )
         if not drive_id or not item_id:
             raise SharePointResolutionError("drive_id and item_id are required together")
         safe_drive = _safe_id(drive_id, "drive id")
@@ -215,6 +265,8 @@ class SharePointClient:
             await self.graph.get_json(
                 f"/drives/{safe_drive}/items/{safe_item}",
                 params={"$select": _ITEM_SELECT},
+                deadline=deadline,
+                cancel_check=cancel_check,
             ),
             "DriveItem",
         )
@@ -293,4 +345,3 @@ class SharePointClient:
 
 
 __all__ = ["SharePointClient", "encode_share_id"]
-

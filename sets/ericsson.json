@@ -1,11 +1,12 @@
 {
   "name": "ericsson",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Shared Ericsson coworker capabilities (OTTO + LOOP24)",
   "skills": [
     "skills/ericsson/opportunity-visuals",
     "skills/ericsson/onboard-ericsson-capabilities",
     "skills/ericsson/gitlab",
+    "skills/ericsson/jira",
     "skills/ericsson/jira-to-gitlab"
   ],
   "plugins": [
@@ -38,6 +39,7 @@
   "workflows": [
     "workflows/my-tickets-summary.yml",
     "workflows/inbox-digest.yml",
+    "workflows/jira-single-ticket-showcase.yml",
     "workflows/jira-to-gitlab.yml"
   ],
   "personas": [],

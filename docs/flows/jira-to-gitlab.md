@@ -33,7 +33,7 @@ Inputs include Jira/GitLab auth, ticket key, branch prefix, file extension allow
 
 ## Supporting capabilities and configuration
 
-Jira read/comment tools and the bounded GitLab project/read/write tools now exist. See [Jira](../configuration.md#jira) and [GitLab configuration](../configuration.md#gitlab).
+Standalone Jira read/search/comment tools and bounded GitLab project/read/write tools now exist. Both connectors remain disabled until explicitly enabled and configured per profile. See [Jira](../configuration.md#jira) and [GitLab configuration](../configuration.md#gitlab).
 
 ## Failure, safety, and privacy behavior
 
@@ -45,4 +45,4 @@ Intent ported: the source now supplies Jira reads/comments, nine bounded GitLab 
 
 ## How Hermes should explain and configure it
 
-Explain every write before setup. Ask for the ticket, permitted project, desired branch prefix, target branch, file scope, and approval policy. Validate Jira and GitLab read-only first, preview mutations, and obtain current-invocation host approval for each outward action.
+Explain every write before setup. Enable/configure both standalone connectors, ask for exactly one ticket, the permitted project, branch prefix, target branch, file scope, and approval policy. Validate Jira and GitLab read-only first, preview mutations, and obtain current-invocation host approval for each outward action.

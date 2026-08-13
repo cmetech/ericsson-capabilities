@@ -62,7 +62,10 @@ basic auth also requires the Jira account email. Secret values are write-only an
 never projected back into the UI, CLI output, logs, or tool results. Do not put Jira
 credentials in `.env`, workflow YAML, prompts, or chat.
 
-The plugin preserves `jira_my_tickets`, `jira_get_issue`, and `jira_add_comment`.
+The plugin preserves `jira_my_tickets`, `jira_get_issue`, and `jira_add_comment`,
+and adds bounded `jira_search_issues` with explicit JQL, result limit, safe fields,
+filters, and truncation facts. Qualified `ericsson-jira:ticket-research` and
+`ericsson-jira:defect-triage` guidance appears only while the plugin is enabled.
 Browsing issues requires read permission; `jira_add_comment` additionally requires
 comment permission and host-authored approval.
 
@@ -74,6 +77,11 @@ comment permission and host-authored approval.
 4. If a real comment is later needed, preview the exact issue and text and obtain explicit approval. Never post a comment merely to validate configuration.
 
 Common errors: missing keys; `401` for an invalid/expired token; `403` for insufficient project permission; HTML/SSO responses when the base URL or token type is wrong; network/TLS restrictions on internal Jira.
+
+The native transport is the default. `auto` selects the private curl compatibility
+path only for the bounded proven Cloudflare error-1010 response; other deployments
+that require it must explicitly select `curl` and an approved executable. Transport
+selection never weakens origin, timeout, output, cancellation, or secret boundaries.
 
 ## Glean MCP
 

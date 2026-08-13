@@ -319,6 +319,7 @@ def test_manifest_content():
         "skills/ericsson/opportunity-visuals",
         "skills/ericsson/onboard-ericsson-capabilities",
         "skills/ericsson/gitlab",
+        "skills/ericsson/jira",
         "skills/ericsson/jira-to-gitlab",
     ]
     assert doc["plugins"] == [
@@ -349,6 +350,7 @@ def test_manifest_content():
     assert set(doc["workflows"]) == {
         "workflows/my-tickets-summary.yml",
         "workflows/inbox-digest.yml",
+        "workflows/jira-single-ticket-showcase.yml",
         "workflows/jira-to-gitlab.yml",
     }
     assert doc["personas"] == []
@@ -360,7 +362,7 @@ def test_manifest_content():
     assert "GLEAN_MCP_URL" not in keys
     assert {e["category"] for e in doc["env"]} == {"tool"}
     assert "ERICSSON_ENV" not in {e["key"] for e in doc["env"]}
-    assert doc["version"] == "0.5.0"
+    assert doc["version"] == "0.6.0"
     assert "requiresEnv" not in doc
     assert "disabledByDefault" not in doc
     assert "ERICSSON_ENV" not in MANIFEST.read_text()
@@ -393,7 +395,7 @@ def test_guides_record_frozen_loop24_inventory_and_reviewed_flow_provenance():
 
     flow_pages = sorted((REPO / "docs/flows").glob("*.md"))
     flow_pages = [path for path in flow_pages if path.name != "_template.md"]
-    assert len(flow_pages) == 11
+    assert len(flow_pages) == 12
     for path in flow_pages:
         assert f"source_commit: {LEGACY_FLOW_SHA}" in path.read_text()
 

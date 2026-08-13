@@ -85,6 +85,7 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         True,
         EMPTY_IMPLEMENTATION
         | {
+            "skills": ["skills/ericsson/jira"],
             "plugins": ["plugins/ericsson-jira"],
             "workflows": ["workflows/my-tickets-summary.yml"],
             "tools": ["jira_my_tickets"],
@@ -95,8 +96,15 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         True,
         EMPTY_IMPLEMENTATION
         | {
+            "skills": ["skills/ericsson/jira"],
             "plugins": ["plugins/ericsson-jira"],
-            "tools": ["jira_my_tickets", "jira_get_issue", "jira_add_comment"],
+            "workflows": ["workflows/jira-single-ticket-showcase.yml"],
+            "tools": [
+                "jira_my_tickets",
+                "jira_search_issues",
+                "jira_get_issue",
+                "jira_add_comment",
+            ],
         },
     ),
     "gitlab-tools": (
@@ -246,18 +254,28 @@ EXPECTED_CRITICAL_CONFIGURATION = {
         ("Chromium", "local-software", False),
     },
     "jira-assigned-ticket-summary": {
-        ("JIRA_BASE_URL", "static-setting", True),
-        ("JIRA_PAT", "static-secret", True),
-        ("deliver_to", "workflow-input", False),
-        ("Windows", "local-software", False),
-        ("Classic Outlook desktop", "local-software", False),
-        ("PowerShell and Outlook COM", "local-software", False),
-        ("Outlook mailbox access", "permission", False),
-        ("Outlook MCP", "local-software", False),
+        ("base_url", "static-setting", True),
+        ("auth_mode", "static-setting", True),
+        ("pat", "static-secret", True),
+        ("email", "static-setting", True),
+        ("api_token", "static-secret", True),
+        ("rest_api_version", "static-setting", True),
+        ("transport", "static-setting", True),
+        ("curl_executable", "static-setting", False),
+        ("request_timeout_seconds", "static-setting", False),
+        ("default_max_results", "static-setting", False),
     },
     "jira-tools": {
-        ("JIRA_BASE_URL", "static-setting", True),
-        ("JIRA_PAT", "static-secret", True),
+        ("base_url", "static-setting", True),
+        ("auth_mode", "static-setting", True),
+        ("pat", "static-secret", True),
+        ("email", "static-setting", True),
+        ("api_token", "static-secret", True),
+        ("rest_api_version", "static-setting", True),
+        ("transport", "static-setting", True),
+        ("curl_executable", "static-setting", False),
+        ("request_timeout_seconds", "static-setting", False),
+        ("default_max_results", "static-setting", False),
     },
     "gitlab-tools": {
         ("origin", "static-setting", True),
@@ -487,6 +505,32 @@ def test_real_repository_runtime_and_onboarding_contracts_are_reconciled() -> No
     assert validate_repository(repo, load_entries(repo)) == []
 
 
+def test_jira_onboarding_uses_standalone_descriptor_names_and_complete_tool_surface() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    entries = {entry["id"]: entry for entry in load_entries(repo)}
+    jira = entries["jira-tools"]
+    names = {item["name"] for item in jira["configuration"]}
+    assert names == {
+        "base_url",
+        "auth_mode",
+        "pat",
+        "email",
+        "api_token",
+        "rest_api_version",
+        "transport",
+        "curl_executable",
+        "request_timeout_seconds",
+        "default_max_results",
+    }
+    assert set(jira["implementation"]["tools"]) == {
+        "jira_my_tickets",
+        "jira_search_issues",
+        "jira_get_issue",
+        "jira_add_comment",
+    }
+    assert "skills/ericsson/jira" in jira["implementation"]["skills"]
+
+
 def test_real_catalog_maturity_is_honest() -> None:
     repo = Path(__file__).resolve().parents[1]
     entries = {entry["id"]: entry for entry in load_entries(repo)}
@@ -610,7 +654,7 @@ def test_real_entry_demonstration_modes_use_approved_vocabulary() -> None:
         assert set(entry["demonstrations"]) <= ALLOWED_DEMONSTRATION_MODES, entry["id"]
 
 
-def test_assigned_ticket_entry_separates_fixed_workflow_from_optional_email() -> None:
+def test_assigned_ticket_entry_documents_fixed_read_only_workflow() -> None:
     repo = Path(__file__).resolve().parents[1]
     body = (
         repo
@@ -619,7 +663,7 @@ def test_assigned_ticket_entry_separates_fixed_workflow_from_optional_email() ->
     ).read_text(encoding="utf-8")
     assert "bundled workflow is fixed at 25" in body
     assert "direct `jira_my_tickets(max_results=...)`" in body
-    assert "Email readiness additionally requires Windows" in body
+    assert "performs no Jira\nwrite or email delivery" in body
     assert "whether the default 25-ticket limit is suitable" not in body
 
 
@@ -631,7 +675,7 @@ def test_jira_and_teams_entries_teach_only_supported_narrowing() -> None:
     jira = (entry_dir / "jira-tools.md").read_text(encoding="utf-8")
     teams = (entry_dir / "teams-tools.md").read_text(encoding="utf-8")
     assert "supported result limit" in jira
-    assert "status or project filter" not in jira
+    assert "bounded explicit search" in jira
     assert "supported team, channel, and message count" in teams
     assert "date filter" not in teams
 

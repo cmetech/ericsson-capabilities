@@ -6,8 +6,12 @@ import workflow_ctl as wc
 
 REPO = Path(__file__).resolve().parents[1]
 REFS = sorted((REPO / "workflows").glob("*.yml"))
-LEGACY_V1 = {"my-tickets-summary", "inbox-digest"}
-FLAT_ARCHON = {"jira-to-gitlab"}
+LEGACY_V1 = {"inbox-digest"}
+FLAT_ARCHON = {
+    "jira-to-gitlab",
+    "my-tickets-summary",
+    "jira-single-ticket-showcase",
+}
 sys.path.insert(0, str(REPO / "scripts"))
 from lint_manifest import _lint_archon_workflow  # noqa: E402
 
@@ -58,9 +62,14 @@ def test_reference_workflows_do_not_require_ericsson_toggle():
         assert "ERICSSON_ENV" not in path.read_text()
 
 
-def test_tickets_summary_has_approval_and_side_effect():
-    doc = wc.load_workflow(REPO / "workflows/my-tickets-summary.yml")
-    kinds = {n["id"]: n["kind"] for n in doc["nodes"]}
-    assert "approval" in kinds.values()
-    send = [n for n in doc["nodes"] if n.get("side_effects")]
-    assert send, "delivery node must declare side_effects: true"
+def test_tickets_summary_is_read_only_and_showcase_comment_has_approval_ancestor():
+    summary = yaml.safe_load((REPO / "workflows/my-tickets-summary.yml").read_text())
+    assert {
+        tool for node in summary["nodes"] for tool in node.get("allowed_tools", [])
+    } == {"jira_my_tickets"}
+    showcase = yaml.safe_load(
+        (REPO / "workflows/jira-single-ticket-showcase.yml").read_text()
+    )
+    nodes = {node["id"]: node for node in showcase["nodes"]}
+    assert "approve-comment" in nodes["post-comment"]["depends_on"]
+    assert nodes["post-comment"]["allowed_tools"] == ["jira_add_comment"]

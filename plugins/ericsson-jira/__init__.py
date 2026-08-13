@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from . import tools as jira_tools
 from .models import JiraError, SAFE_ERROR_MESSAGES
 
 
 _WRITE_TOOLS = frozenset({"jira_add_comment"})
+_PLUGIN_SKILLS = (
+    ("ticket-research", "Research one bounded Jira ticket."),
+    ("defect-triage", "Triage one Jira defect and prepare an approved comment."),
+)
 
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -129,3 +134,9 @@ def register(ctx) -> None:
             check_fn=available,
             emoji="🎫",
         )
+
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is not None:
+        skill_root = Path(__file__).parent / "skills"
+        for name, description in _PLUGIN_SKILLS:
+            register_skill(name, skill_root / name / "SKILL.md", description)

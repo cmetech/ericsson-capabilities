@@ -42,7 +42,7 @@ def _group(group_id=10, full_path="sd-macs-att-rnam-hosting", parent_id=None):
         "id": group_id,
         "name": full_path.rsplit("/", 1)[-1],
         "full_path": full_path,
-        "web_url": f"{ORIGIN}/{full_path}",
+        "web_url": f"{ORIGIN}/groups/{full_path}",
         "parent_id": parent_id,
     }
 
@@ -146,6 +146,7 @@ def _merge_request(iid=17, *, state="opened", draft=False):
     [
         "sd-macs-att-rnam-hosting",
         f"{ORIGIN}/sd-macs-att-rnam-hosting",
+        f"{ORIGIN}/groups/sd-macs-att-rnam-hosting",
         "10",
     ],
 )

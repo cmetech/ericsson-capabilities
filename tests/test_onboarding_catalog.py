@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,9 @@ from catalog_lib import (  # noqa: E402
     load_entries,
     read_frontmatter,
     serialize_catalog,
+    validate_entry_paths,
     validate_repository,
+    validate_workflow_sidecar,
 )
 
 
@@ -40,6 +43,7 @@ EXPECTED_IDS = {
     "opportunity-visuals",
     "jira-assigned-ticket-summary",
     "jira-tools",
+    "gitlab-tools",
     "teams-tools",
     "outlook-tools",
     "outlook-inbox-digest",
@@ -74,8 +78,7 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
     "opportunity-visuals": (
         "available",
         True,
-        EMPTY_IMPLEMENTATION
-        | {"skills": ["skills/ericsson/opportunity-visuals"]},
+        EMPTY_IMPLEMENTATION | {"skills": ["skills/ericsson/opportunity-visuals"]},
     ),
     "jira-assigned-ticket-summary": (
         "available",
@@ -94,6 +97,34 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         | {
             "plugins": ["plugins/ericsson-jira"],
             "tools": ["jira_my_tickets", "jira_get_issue", "jira_add_comment"],
+        },
+    ),
+    "gitlab-tools": (
+        "available",
+        True,
+        EMPTY_IMPLEMENTATION
+        | {
+            "skills": ["skills/ericsson/gitlab"],
+            "plugins": ["plugins/ericsson-gitlab"],
+            "tools": [
+                "gitlab_resolve_project",
+                "gitlab_list_group_projects",
+                "gitlab_list_repository_tree",
+                "gitlab_read_file",
+                "gitlab_read_merge_request",
+                "gitlab_list_commits",
+                "gitlab_read_commit",
+                "gitlab_list_commit_comments",
+                "gitlab_list_commit_discussions",
+                "gitlab_list_merge_requests",
+                "gitlab_list_merge_request_commits",
+                "gitlab_list_merge_request_discussions",
+                "gitlab_list_pipelines",
+                "gitlab_inspect_ci",
+                "gitlab_create_branch",
+                "gitlab_commit_changes",
+                "gitlab_create_merge_request",
+            ],
         },
     ),
     "teams-tools": (
@@ -135,20 +166,56 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         "available",
         True,
         EMPTY_IMPLEMENTATION
-        | {"skills": ["skills/ericsson/workflow-orchestrator"]},
+        | {
+            "skills": ["skills/productivity/workflow"],
+            "plugins": ["plugins/workflow"],
+        },
     ),
     "workflow-builder": (
         "available",
         True,
-        EMPTY_IMPLEMENTATION | {"skills": ["skills/ericsson/workflow-builder"]},
+        EMPTY_IMPLEMENTATION
+        | {
+            "skills": ["skills/software-development/workflow-builder"],
+            "plugins": ["plugins/workflow"],
+        },
     ),
     "ci-file-auditor": (
-        "planned-not-implemented",
+        "partially-ported",
         False,
-        EMPTY_IMPLEMENTATION,
+        EMPTY_IMPLEMENTATION
+        | {
+            "plugins": ["plugins/ericsson-gitlab"],
+            "tools": [
+                "gitlab_resolve_project",
+                "gitlab_read_file",
+                "gitlab_list_pipelines",
+                "gitlab_inspect_ci",
+            ],
+        },
     ),
     "tol-generation": ("planned-not-implemented", False, EMPTY_IMPLEMENTATION),
-    "jira-to-gitlab": ("partially-ported", False, EMPTY_IMPLEMENTATION),
+    "jira-to-gitlab": (
+        "available",
+        True,
+        EMPTY_IMPLEMENTATION
+        | {
+            "skills": ["skills/ericsson/jira-to-gitlab"],
+            "plugins": ["plugins/ericsson-jira", "plugins/ericsson-gitlab"],
+            "workflows": ["workflows/jira-to-gitlab.yml"],
+            "tools": [
+                "jira_get_issue",
+                "jira_add_comment",
+                "gitlab_resolve_project",
+                "gitlab_list_repository_tree",
+                "gitlab_read_file",
+                "gitlab_read_merge_request",
+                "gitlab_create_branch",
+                "gitlab_commit_changes",
+                "gitlab_create_merge_request",
+            ],
+        },
+    ),
     "jira-defect-loop": ("partially-ported", False, EMPTY_IMPLEMENTATION),
     "third-party-support-lcm-tracker": (
         "planned-not-implemented",
@@ -191,6 +258,12 @@ EXPECTED_CRITICAL_CONFIGURATION = {
     "jira-tools": {
         ("JIRA_BASE_URL", "static-setting", True),
         ("JIRA_PAT", "static-secret", True),
+    },
+    "gitlab-tools": {
+        ("origin", "static-setting", True),
+        ("pat", "static-secret", True),
+        ("client_certificate_path", "static-setting", False),
+        ("client_key_path", "static-setting", False),
     },
     "teams-tools": {
         ("ERICSSON_GRAPH_CLIENT_ID", "static-setting", False),
@@ -251,11 +324,13 @@ class RepoFixture:
             {
                 "name": "ericsson",
                 "version": "1.2.3",
+                "description": "Example Ericsson capability set.",
                 "skills": ["skills/ericsson/example"],
                 "plugins": ["plugins/ericsson-example"],
                 "mcpServers": "mcp/mcp-servers.yaml",
                 "mcpLocal": ["mcp/example-mcp"],
                 "workflows": ["workflows/example.yml"],
+                "personas": [],
                 "env": [],
             },
         )
@@ -294,7 +369,7 @@ class RepoFixture:
             "def register(ctx):\n"
             "    handlers = {'example_tool': lambda args: args}\n"
             "    for name, schema in example_tools.SCHEMAS.items():\n"
-            "        ctx.register_tool(name=name, schema=schema, handler=handlers[name])\n",
+            "        ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handlers[name])\n",
         )
         self._write_text("mcp/example-mcp/run_server.py", "")
         self._write_yaml(
@@ -355,10 +430,7 @@ class RepoFixture:
     ) -> None:
         self._write_text(
             relative,
-            "---\n"
-            + yaml.safe_dump(frontmatter, sort_keys=False)
-            + "---\n\n"
-            + body,
+            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n" + body,
         )
 
     def write_entry(self, frontmatter: object, filename: str = "example.md") -> Path:
@@ -419,15 +491,13 @@ def test_real_catalog_maturity_is_honest() -> None:
     repo = Path(__file__).resolve().parents[1]
     entries = {entry["id"]: entry for entry in load_entries(repo)}
 
-    assert entries["pseudonymization"]["maturity"] == (
-        "not-supported-no-port-planned"
-    )
+    assert entries["pseudonymization"]["maturity"] == ("not-supported-no-port-planned")
     assert entries["pseudonymization"]["recommendation_eligible"] is False
-    assert entries["jira-to-gitlab"]["maturity"] == "partially-ported"
+    assert entries["jira-to-gitlab"]["maturity"] == "available"
+    assert entries["ci-file-auditor"]["maturity"] == "partially-ported"
     assert entries["jira-defect-loop"]["maturity"] == "partially-ported"
 
     planned = {
-        "ci-file-auditor",
         "tol-generation",
         "third-party-support-lcm-tracker",
         "re-identification",
@@ -438,6 +508,68 @@ def test_real_catalog_maturity_is_honest() -> None:
         for entry_id in planned
         if entries[entry_id]["maturity"] != "planned-not-implemented"
     } == set()
+
+
+def test_source_onboarding_uses_brand_cli_and_builtin_workflow_authority() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    onboarding = (
+        repo / "skills/ericsson/onboard-ericsson-capabilities/SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "PRODUCT_CLI" in onboarding
+    assert "$HERMES_HOME/brand.json" in onboarding
+    assert "neutral Hermes Agent" in onboarding
+
+    entry_dir = (
+        repo / "skills/ericsson/onboard-ericsson-capabilities/references/capabilities"
+    )
+    builder = read_frontmatter(entry_dir / "workflow-builder.md")
+    orchestrator = read_frontmatter(entry_dir / "workflow-orchestrator.md")
+    assert builder["implementation"] == {
+        "skills": ["skills/software-development/workflow-builder"],
+        "plugins": ["plugins/workflow"],
+        "mcp_servers": [],
+        "workflows": [],
+        "tools": [],
+    }
+    assert orchestrator["implementation"] == {
+        "skills": ["skills/productivity/workflow"],
+        "plugins": ["plugins/workflow"],
+        "mcp_servers": [],
+        "workflows": [],
+        "tools": [],
+    }
+    assert "PRODUCT_CLI workflow doctor" in (
+        entry_dir / "workflow-builder.md"
+    ).read_text(encoding="utf-8")
+    assert "RunStore" in (entry_dir / "workflow-orchestrator.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_host_owned_workflow_references_are_bounded_exceptions(
+    repo_fixture: RepoFixture,
+) -> None:
+    entry = repo_fixture.complete_entry_metadata(
+        implementation={
+            "skills": ["skills/software-development/workflow-builder"],
+            "plugins": ["plugins/workflow"],
+            "mcp_servers": [],
+            "workflows": [],
+            "tools": [],
+        }
+    )
+    assert validate_entry_paths(repo_fixture.root, [entry]) == []
+    entry["implementation"] = {
+        "skills": ["skills/software-development/not-a-builtin"],
+        "plugins": ["plugins/not-a-builtin"],
+        "mcp_servers": [],
+        "workflows": [],
+        "tools": [],
+    }
+    assert validate_entry_paths(repo_fixture.root, [entry]) == [
+        "missing entry path: example: skills/software-development/not-a-builtin",
+        "missing entry path: example: plugins/not-a-builtin",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -475,9 +607,7 @@ def test_real_entry_contract_pins_critical_configuration(
 def test_real_entry_demonstration_modes_use_approved_vocabulary() -> None:
     repo = Path(__file__).resolve().parents[1]
     for entry in load_entries(repo):
-        assert set(entry["demonstrations"]) <= ALLOWED_DEMONSTRATION_MODES, entry[
-            "id"
-        ]
+        assert set(entry["demonstrations"]) <= ALLOWED_DEMONSTRATION_MODES, entry["id"]
 
 
 def test_assigned_ticket_entry_separates_fixed_workflow_from_optional_email() -> None:
@@ -496,8 +626,7 @@ def test_assigned_ticket_entry_separates_fixed_workflow_from_optional_email() ->
 def test_jira_and_teams_entries_teach_only_supported_narrowing() -> None:
     repo = Path(__file__).resolve().parents[1]
     entry_dir = (
-        repo
-        / "skills/ericsson/onboard-ericsson-capabilities/references/capabilities"
+        repo / "skills/ericsson/onboard-ericsson-capabilities/references/capabilities"
     )
     jira = (entry_dir / "jira-tools.md").read_text(encoding="utf-8")
     teams = (entry_dir / "teams-tools.md").read_text(encoding="utf-8")
@@ -615,7 +744,9 @@ def test_read_frontmatter_rejects_attached_closing_marker(
 ) -> None:
     path = repo_fixture.entry_dir / "attached.md"
     path.write_text("---\nid: accepted---\n# body\n", encoding="utf-8")
-    with pytest.raises(CatalogError, match="missing YAML frontmatter closing delimiter"):
+    with pytest.raises(
+        CatalogError, match="missing YAML frontmatter closing delimiter"
+    ):
         read_frontmatter(path)
 
 
@@ -624,7 +755,9 @@ def test_read_frontmatter_rejects_missing_closing_marker(
 ) -> None:
     path = repo_fixture.entry_dir / "unclosed.md"
     path.write_text("---\nid: unclosed\n# body\n", encoding="utf-8")
-    with pytest.raises(CatalogError, match="missing YAML frontmatter closing delimiter"):
+    with pytest.raises(
+        CatalogError, match="missing YAML frontmatter closing delimiter"
+    ):
         read_frontmatter(path)
 
 
@@ -642,7 +775,9 @@ def test_read_frontmatter_ignores_body_horizontal_rule(
 def test_entry_validation_rejects_duplicate_ids(repo_fixture: RepoFixture) -> None:
     repo_fixture.write_complete_entry()
     entry = yaml.safe_load(
-        repo_fixture.write_complete_entry().read_text(encoding="utf-8").split("---\n")[1]
+        repo_fixture.write_complete_entry()
+        .read_text(encoding="utf-8")
+        .split("---\n")[1]
     )
     repo_fixture.write_entry(entry, "second.md")
     with pytest.raises(CatalogError, match="duplicate entry id: example"):
@@ -756,9 +891,30 @@ def test_validation_reconciles_all_repository_inventory(
     repo_fixture: RepoFixture,
 ) -> None:
     repo_fixture.write_complete_entry()
-    assert validate_repository(
-        repo_fixture.root, load_entries(repo_fixture.root)
-    ) == []
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+
+def test_validation_normalizes_object_plugins_and_omits_missing_disabled_plans(
+    repo_fixture: RepoFixture,
+) -> None:
+    manifest_path = repo_fixture.root / "sets/ericsson.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["plugins"] = [
+        {
+            "path": "plugins/ericsson-example",
+            "id": "ericsson-example",
+            "enabled": False,
+        },
+        {
+            "path": "plugins/ericsson-planned",
+            "id": "ericsson-planned",
+            "enabled": False,
+        },
+    ]
+    repo_fixture._write_json("sets/ericsson.json", manifest)
+    repo_fixture.write_complete_entry()
+
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
 
 
 @pytest.mark.parametrize(
@@ -826,9 +982,18 @@ def test_validation_reconciles_flow_metadata(repo_fixture: RepoFixture) -> None:
         "# Example flow\n",
     )
     problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
-    assert "flow maturity mismatch: docs/flows/example.md: intent-ported requires available, entry example has partially-ported" in problems
-    assert "unrepresented flow target artifact: docs/flows/example.md: missing-artifact" in problems
-    assert "flow platform mismatch: docs/flows/example.md: entry example does not cover linux, macos" in problems
+    assert (
+        "flow maturity mismatch: docs/flows/example.md: intent-ported requires available, entry example has partially-ported"
+        in problems
+    )
+    assert (
+        "unrepresented flow target artifact: docs/flows/example.md: missing-artifact"
+        in problems
+    )
+    assert (
+        "flow platform mismatch: docs/flows/example.md: entry example does not cover linux, macos"
+        in problems
+    )
 
 
 def test_validation_uses_union_for_outlook_style_split(
@@ -896,9 +1061,7 @@ def test_validation_uses_union_for_outlook_style_split(
         "outlook-inbox-digest.md",
     )
 
-    assert validate_repository(
-        repo_fixture.root, load_entries(repo_fixture.root)
-    ) == []
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
 
 
 def test_validation_parses_malformed_unrepresented_flow(
@@ -934,9 +1097,7 @@ def test_validation_accepts_documented_target_artifact_suffixes(
         },
         "# Example flow\n",
     )
-    assert validate_repository(
-        repo_fixture.root, load_entries(repo_fixture.root)
-    ) == []
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
 
 
 def test_validation_reports_runtime_component_missing_from_manifest(
@@ -971,7 +1132,9 @@ def test_available_entry_requires_nonempty_implementation(
         ),
         "ghost.md",
     )
-    with pytest.raises(CatalogError, match="available entry must reference an implementation"):
+    with pytest.raises(
+        CatalogError, match="available entry must reference an implementation"
+    ):
         load_entries(repo_fixture.root)
 
 
@@ -999,9 +1162,7 @@ def test_local_mcp_binding_ignores_remote_url_collision(
             }
         },
     )
-    repo_fixture.write_complete_entry(
-        implementation={"mcp_servers": ["remote"]}
-    )
+    repo_fixture.write_complete_entry(implementation={"mcp_servers": ["remote"]})
     problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
     assert "unrepresented manifest local MCP: mcp/example-mcp" in problems
 
@@ -1070,9 +1231,7 @@ def test_local_mcp_binding_supports_outlook_path_and_server_name_mismatch(
             "tools": ["example_tool"],
         }
     )
-    assert validate_repository(
-        repo_fixture.root, load_entries(repo_fixture.root)
-    ) == []
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
 
 
 def test_validation_reconciles_configuration_names(repo_fixture: RepoFixture) -> None:
@@ -1136,7 +1295,10 @@ def test_validation_rejects_required_configuration_marked_optional(
         ]
     )
     problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
-    assert "configuration requiredness mismatch: entry example: REQUIRED_TOKEN must set required: true" in problems
+    assert (
+        "configuration requiredness mismatch: entry example: REQUIRED_TOKEN must set required: true"
+        in problems
+    )
 
 
 def test_validation_rejects_optional_configuration_marked_required(
@@ -1160,7 +1322,10 @@ def test_validation_rejects_optional_configuration_marked_required(
         ]
     )
     problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
-    assert "configuration requiredness mismatch: entry example: OPTIONAL_OVERRIDE must set required: false" in problems
+    assert (
+        "configuration requiredness mismatch: entry example: OPTIONAL_OVERRIDE must set required: false"
+        in problems
+    )
 
 
 def test_validation_rejects_plugin_tool_missing_from_runtime_schemas(
@@ -1177,6 +1342,961 @@ def test_validation_rejects_plugin_tool_missing_from_runtime_schemas(
         "plugin tool declaration not registered: plugins/ericsson-example: example_tool"
         in problems
     )
+
+
+def test_validation_accepts_direct_handler_factory_bound_to_schema_loop(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_text(
+        "plugins/ericsson-example/__init__.py",
+        "import example_tools\n\n"
+        "def register(ctx):\n"
+        "    def handler(name):\n"
+        "        return lambda args: (name, args)\n"
+        "    for name, schema in example_tools.SCHEMAS.items():\n"
+        "        ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handler(name))\n",
+    )
+    repo_fixture.write_complete_entry()
+
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+
+def test_validation_preserves_literal_handler_map_registration(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture.write_complete_entry()
+
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=resolve(name))",
+        "ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handler(schema))",
+        "ctx.register_tool(name=name, toolset='ericsson-example', schema=schema, handler=handler(name))",
+    ],
+    ids=("dynamic-factory", "wrong-loop-variable", "undefined-factory"),
+)
+def test_validation_fails_closed_for_ambiguous_schema_loop_handlers(
+    repo_fixture: RepoFixture,
+    registration: str,
+) -> None:
+    prefix = (
+        "import example_tools\n\n"
+        "def register(ctx):\n"
+        "    for name, schema in example_tools.SCHEMAS.items():\n"
+        f"        {registration}\n"
+    )
+    repo_fixture._write_text("plugins/ericsson-example/__init__.py", prefix)
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert (
+        "plugin tool missing handler: plugins/ericsson-example: example_tool"
+        in problems
+    )
+
+
+def test_validation_rejects_literal_handler_without_schema(
+    repo_fixture: RepoFixture,
+) -> None:
+    init = (repo_fixture.root / "plugins/ericsson-example/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    repo_fixture._write_text(
+        "plugins/ericsson-example/__init__.py",
+        init.replace(
+            "handlers = {'example_tool': lambda args: args}",
+            "handlers = {'example_tool': lambda args: args, 'ghost_tool': lambda args: args}",
+        ),
+    )
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert (
+        "plugin handler missing schema: plugins/ericsson-example: ghost_tool"
+        in problems
+    )
+
+
+def _configure_descriptor_fixture(repo_fixture: RepoFixture) -> None:
+    plugin_path = repo_fixture.root / "plugins/ericsson-example/plugin.yaml"
+    plugin = yaml.safe_load(plugin_path.read_text(encoding="utf-8"))
+    plugin["config_schema"] = "config.schema.json"
+    repo_fixture._write_yaml("plugins/ericsson-example/plugin.yaml", plugin)
+    repo_fixture._write_json(
+        "plugins/ericsson-example/config.schema.json",
+        {
+            "version": 1,
+            "fields": [
+                {
+                    "id": "origin",
+                    "type": "string",
+                    "storage": "setting",
+                    "required": True,
+                },
+                {
+                    "id": "token",
+                    "type": "string",
+                    "storage": "secret",
+                    "required": True,
+                },
+                {
+                    "id": "certificate_path",
+                    "type": "string",
+                    "storage": "setting",
+                },
+            ],
+        },
+    )
+
+
+def _descriptor_configuration() -> list[dict[str, object]]:
+    return [
+        {
+            "name": "origin",
+            "kind": "static-setting",
+            "required": True,
+            "guidance": "Configure the service origin through protected settings.",
+        },
+        {
+            "name": "token",
+            "kind": "static-secret",
+            "required": True,
+            "guidance": "Enter the token only through protected secret entry.",
+        },
+        {
+            "name": "certificate_path",
+            "kind": "static-setting",
+            "required": False,
+            "guidance": "Configure the optional certificate path in settings.",
+        },
+    ]
+
+
+def test_validation_reconciles_descriptor_backed_settings_and_secrets(
+    repo_fixture: RepoFixture,
+) -> None:
+    _configure_descriptor_fixture(repo_fixture)
+    repo_fixture.write_complete_entry(configuration=_descriptor_configuration())
+
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+
+def test_validation_reports_descriptor_configuration_missing_from_onboarding(
+    repo_fixture: RepoFixture,
+) -> None:
+    _configure_descriptor_fixture(repo_fixture)
+    repo_fixture.write_complete_entry(configuration=[])
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert "unrepresented configuration: origin" in problems
+    assert "unrepresented configuration: token" in problems
+    assert "unrepresented configuration: certificate_path" in problems
+
+
+def test_validation_rejects_unknown_onboarding_name_with_descriptor_configuration(
+    repo_fixture: RepoFixture,
+) -> None:
+    _configure_descriptor_fixture(repo_fixture)
+    configuration = _descriptor_configuration()
+    configuration.append(
+        {
+            "name": "invented_setting",
+            "kind": "static-setting",
+            "required": False,
+            "guidance": "This setting is intentionally not implemented.",
+        }
+    )
+    repo_fixture.write_complete_entry(configuration=configuration)
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert (
+        "unknown onboarding configuration: entry example: invented_setting" in problems
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema_reference", "schema", "expected"),
+    [
+        ("../outside.json", None, "unsafe plugin config schema"),
+        ("missing.json", None, "missing plugin config schema"),
+        (
+            "config.schema.json",
+            {
+                "version": 1,
+                "fields": [
+                    {"id": "same", "type": "string", "storage": "setting"},
+                    {"id": "same", "type": "string", "storage": "secret"},
+                ],
+            },
+            "duplicate plugin configuration field",
+        ),
+        (
+            "config.schema.json",
+            {
+                "version": 1,
+                "fields": [{"id": "bad", "type": "string", "storage": "elsewhere"}],
+            },
+            "invalid plugin configuration field",
+        ),
+        (
+            "config.schema.json",
+            {"version": 2, "fields": []},
+            "unsupported plugin config schema version",
+        ),
+    ],
+)
+def test_validation_fails_closed_for_malformed_plugin_config_schemas(
+    repo_fixture: RepoFixture,
+    schema_reference: str,
+    schema: object,
+    expected: str,
+) -> None:
+    plugin_path = repo_fixture.root / "plugins/ericsson-example/plugin.yaml"
+    plugin = yaml.safe_load(plugin_path.read_text(encoding="utf-8"))
+    plugin["config_schema"] = schema_reference
+    repo_fixture._write_yaml("plugins/ericsson-example/plugin.yaml", plugin)
+    if schema is not None:
+        repo_fixture._write_json(f"plugins/ericsson-example/{schema_reference}", schema)
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert any(expected in problem for problem in problems), problems
+
+
+def test_validation_accepts_flat_archon_requires_and_allowed_tools(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the example_tool tool for bounded evidence.",
+                    "allowed_tools": ["example_tool"],
+                },
+                {
+                    "id": "summarize",
+                    "depends_on": ["inspect"],
+                    "prompt": "Summarize the bounded evidence.",
+                    "allowed_tools": [],
+                },
+            ],
+        },
+    )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
+    )
+    repo_fixture.write_complete_entry()
+
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+
+@pytest.mark.parametrize(
+    "requires",
+    [["ericsson-example", {"toolsets": ["other"]}], "ericsson-example"],
+)
+def test_validation_rejects_mixed_or_invalid_flat_requires(
+    repo_fixture: RepoFixture,
+    requires: object,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {"name": "example", "requires": requires, "nodes": []},
+    )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
+    )
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert "invalid workflow requires: workflows/example.yml" in problems
+
+
+def test_validation_rejects_unknown_flat_required_toolset(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {"name": "example", "requires": ["missing-service"], "nodes": []},
+    )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
+    )
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert (
+        "unknown workflow toolset: workflows/example.yml: missing-service" in problems
+    )
+
+
+def test_validation_rejects_unknown_flat_allowed_tool(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the removed_runtime_tool tool.",
+                    "allowed_tools": ["removed_runtime_tool"],
+                }
+            ],
+        },
+    )
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"},
+    )
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert (
+        "unknown workflow tool: workflows/example.yml: inspect: removed_runtime_tool"
+        in problems
+    )
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "expected"),
+    [
+        (None, "missing Archon workflow sidecar: workflows/example.yml"),
+        (
+            {"language_compatibility": "hermes-legacy"},
+            "incompatible workflow sidecar: workflows/example.yml",
+        ),
+    ],
+)
+def test_validation_rejects_flat_workflow_without_archon_sidecar(
+    repo_fixture: RepoFixture,
+    sidecar: dict[str, object] | None,
+    expected: str,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the example_tool tool.",
+                    "allowed_tools": ["example_tool"],
+                }
+            ],
+        },
+    )
+    if sidecar is not None:
+        repo_fixture._write_yaml("workflows/example.hermes.yaml", sidecar)
+    repo_fixture.write_complete_entry()
+
+    problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert expected in problems
+
+
+def test_catalog_rejects_every_schema_invalid_or_uncompilable_archon_sidecar(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "description": "Example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the example_tool tool.",
+                    "allowed_tools": ["example_tool"],
+                }
+            ],
+        },
+    )
+    valid = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {},
+        "required_services": ["ericsson-example"],
+        "retention": {},
+        "tags": ["example"],
+        "outward_action_nodes": ["inspect"],
+        "outward_action_policy": "approval_required",
+        "execution_environment": "trusted_local",
+        "overlap_policy": "queue",
+        "pause_lane_policy": "hold",
+        "concurrency_key": "example",
+        "limits": {"max_parallel_nodes": 2},
+        "resource_limits": {"max_descendants": 2},
+        "required_secrets": ["EXAMPLE_TOKEN"],
+        "scheduling": {},
+    }
+    repo_fixture._write_yaml("workflows/example.hermes.yaml", valid)
+    repo_fixture.write_complete_entry()
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+    invalid_overrides = {
+        "unknown_policy": True,
+        "outward_action_nodes": "inspect",
+        "outward_action_policy": 1,
+        "execution_environment": "remote",
+        "overlap_policy": "sometimes",
+        "pause_lane_policy": "sometimes",
+        "delivery_defaults": [],
+        "required_services": "ericsson-example",
+        "retention": [],
+        "tags": [1],
+        "concurrency_key": "",
+        "limits": [],
+        "resource_limits": [],
+        "required_secrets": [""],
+        "scheduling": [],
+    }
+    for field, invalid_value in invalid_overrides.items():
+        sidecar = valid | {field: invalid_value}
+        repo_fixture._write_yaml("workflows/example.hermes.yaml", sidecar)
+        problems = validate_repository(
+            repo_fixture.root, load_entries(repo_fixture.root)
+        )
+        assert any(
+            "invalid workflow sidecar" in problem and field in problem
+            for problem in problems
+        ), (field, problems)
+
+    for sidecar in (
+        valid | {"outward_action_nodes": ["missing"]},
+        valid | {"pause_lane_policy": "hold", "overlap_policy": "forbid"},
+        valid | {"limits": {"max_iterations": 12}},
+        valid | {"limits": {"max_parallel_nodes": 0}},
+        valid | {"limits": {"heartbeat_seconds": 5, "lease_seconds": 10}},
+        valid
+        | {"limits": {"ai_idle_timeout_seconds": 20, "ai_wall_timeout_seconds": 10}},
+        valid
+        | {
+            "limits": {
+                "provider_request_timeout_seconds": 20,
+                "ai_wall_timeout_seconds": 10,
+            }
+        },
+        valid | {"resource_limits": {"unknown": 1}},
+    ):
+        repo_fixture._write_yaml("workflows/example.hermes.yaml", sidecar)
+        problems = validate_repository(
+            repo_fixture.root, load_entries(repo_fixture.root)
+        )
+        assert any("invalid workflow sidecar" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "nested_mapping",
+    [
+        {"delivery_defaults": {"inputs": {7: {"kind": "text"}}}},
+        {"retention": {7: 1}},
+        {"limits": {"max_parallel_nodes": 2, 7: 1}},
+        {"resource_limits": {"max_descendants": 2, 7: 1}},
+        {"scheduling": {"cron": {7: "daily"}}},
+    ],
+)
+def test_catalog_library_rejects_nested_mixed_sidecar_key_types_with_fixed_error(
+    repo_fixture: RepoFixture,
+    nested_mapping: dict[str, object],
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {"language_compatibility": "archon-2026-07"} | nested_mapping,
+    )
+    repo_fixture.write_complete_entry()
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar field names must be strings"
+
+
+def test_validate_catalog_cli_reports_mixed_sidecar_keys_without_traceback(
+    repo_fixture: RepoFixture,
+) -> None:
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {
+            "language_compatibility": "archon-2026-07",
+            "limits": {"max_parallel_nodes": 2, 7: 1},
+        },
+    )
+    repo_fixture.write_complete_entry()
+    script = SCRIPTS_DIR / "validate_catalog.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--repo", str(repo_fixture.root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar field names must be strings"],
+    }
+
+
+def test_catalog_library_rejects_cyclic_sidecar_with_fixed_error(
+    repo_fixture: RepoFixture,
+) -> None:
+    # A missing identity-aware active-path check recurses forever on a real
+    # PyYAML self-alias instead of returning one bounded catalog diagnostic.
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {
+            "language_compatibility": "archon-2026-07",
+            "delivery_defaults": cyclic,
+        },
+    )
+    repo_fixture.write_complete_entry()
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar structure must not contain cycles"
+
+
+def test_validate_catalog_cli_reports_cyclic_sidecar_without_traceback(
+    repo_fixture: RepoFixture,
+) -> None:
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    repo_fixture._write_yaml(
+        "workflows/example.hermes.yaml",
+        {
+            "language_compatibility": "archon-2026-07",
+            "delivery_defaults": cyclic,
+        },
+    )
+    repo_fixture.write_complete_entry()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "validate_catalog.py"),
+            "--repo",
+            str(repo_fixture.root),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar structure must not contain cycles"],
+    }
+
+
+def _nested_sidecar_value(container_depth: int) -> object:
+    value: object = "leaf"
+    for index in range(container_depth):
+        value = {"next": value} if index % 2 else [value]
+    return value
+
+
+def test_catalog_library_bounds_sidecar_depth_and_entries() -> None:
+    # The safe structure convention permits depth 24 and 2,048 visited entries,
+    # then rejects the immediately adjacent values without Python recursion.
+    at_depth_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {"value": _nested_sidecar_value(22)},
+    }
+    above_depth_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {"value": _nested_sidecar_value(23)},
+    }
+    at_entry_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {f"field-{index}": "x" for index in range(2045)},
+    }
+    above_entry_limit = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {f"field-{index}": "x" for index in range(2046)},
+    }
+
+    assert validate_workflow_sidecar(at_depth_limit, node_ids=set()) == []
+    assert validate_workflow_sidecar(at_entry_limit, node_ids=set()) == []
+    for sidecar in (above_depth_limit, above_entry_limit):
+        with pytest.raises(CatalogError) as exc:
+            validate_workflow_sidecar(sidecar, node_ids=set())
+        assert str(exc.value) == "workflow sidecar exceeds safe structure limits"
+
+
+def test_catalog_library_rejects_oversized_mapping_before_key_or_value_iteration() -> (
+    None
+):
+    # The remaining entry budget is knowable from len(); scanning any key or
+    # materializing values first defeats the capacity boundary.
+    class InstrumentedMapping(dict[str, object]):
+        key_iterations = 0
+        value_iterations = 0
+
+        def __iter__(self):
+            self.key_iterations += 1
+            return super().__iter__()
+
+        def values(self):
+            self.value_iterations += 1
+            return super().values()
+
+    oversized = InstrumentedMapping({f"field-{index}": "x" for index in range(2046)})
+    sidecar = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": oversized,
+    }
+
+    with pytest.raises(CatalogError) as exc:
+        validate_workflow_sidecar(sidecar, node_ids=set())
+
+    assert str(exc.value) == "workflow sidecar exceeds safe structure limits"
+    assert oversized.key_iterations == 0
+    assert oversized.value_iterations == 0
+
+
+def test_catalog_library_allows_acyclic_shared_aliases() -> None:
+    # Completed container identities may be reused; only an identity on the
+    # active traversal path is a cycle.
+    shared = {"values": ["one", {"two": "three"}]}
+    sidecar = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": {"first": shared, "second": shared},
+    }
+
+    assert validate_workflow_sidecar(sidecar, node_ids=set()) == []
+
+
+def test_catalog_library_rejects_very_deep_mixed_sidecar_without_recursion() -> None:
+    sidecar = {
+        "language_compatibility": "archon-2026-07",
+        "delivery_defaults": _nested_sidecar_value(1101),
+    }
+
+    with pytest.raises(CatalogError) as exc:
+        validate_workflow_sidecar(sidecar, node_ids=set())
+
+    assert str(exc.value) == "workflow sidecar exceeds safe structure limits"
+
+
+def test_validate_catalog_cli_bounds_very_deep_sidecar_without_traceback(
+    repo_fixture: RepoFixture,
+) -> None:
+    deep_value = "[" * 1101 + "{7: value}" + "]" * 1101
+    repo_fixture._write_text(
+        "workflows/example.hermes.yaml",
+        f"language_compatibility: archon-2026-07\ndelivery_defaults: {deep_value}\n",
+    )
+    repo_fixture.write_complete_entry()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "validate_catalog.py"),
+            "--repo",
+            str(repo_fixture.root),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar exceeds safe structure limits"],
+    }
+
+
+def _configure_flat_archon_fixture(repo_fixture: RepoFixture) -> Path:
+    repo_fixture._write_yaml(
+        "workflows/example.yml",
+        {
+            "name": "example",
+            "description": "Example",
+            "requires": ["ericsson-example"],
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "prompt": "Use the example_tool tool.",
+                    "allowed_tools": ["example_tool"],
+                }
+            ],
+        },
+    )
+    repo_fixture.write_complete_entry()
+    return repo_fixture.root / "workflows/example.hermes.yaml"
+
+
+def _sidecar_bytes(size: int) -> bytes:
+    prefix = b"language_compatibility: archon-2026-07\n"
+    assert size >= len(prefix) + 2
+    return prefix + b"#" + (b"x" * (size - len(prefix) - 2)) + b"\n"
+
+
+def test_catalog_library_enforces_sidecar_byte_boundary_before_read(
+    repo_fixture: RepoFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024))
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
+
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024 + 1))
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+    reads: list[str] = []
+
+    def tracked_read_bytes(path: Path) -> bytes:
+        if path == sidecar:
+            reads.append("bytes")
+        return original_read_bytes(path)
+
+    def tracked_read_text(path: Path, *args, **kwargs) -> str:
+        if path == sidecar:
+            reads.append("text")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read_bytes)
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar exceeds safe byte limit"
+    assert reads == []
+
+
+def test_validate_catalog_cli_enforces_exact_sidecar_byte_boundary(
+    repo_fixture: RepoFixture,
+) -> None:
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    script = SCRIPTS_DIR / "validate_catalog.py"
+
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024))
+    exact = subprocess.run(
+        [sys.executable, str(script), "--repo", str(repo_fixture.root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert exact.returncode == 0
+    assert exact.stderr == ""
+    assert json.loads(exact.stdout) == {"ok": True, "problems": []}
+
+    sidecar.write_bytes(_sidecar_bytes(64 * 1024 + 1))
+    overflow = subprocess.run(
+        [sys.executable, str(script), "--repo", str(repo_fixture.root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert overflow.returncode == 1
+    assert overflow.stderr == ""
+    assert json.loads(overflow.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar exceeds safe byte limit"],
+    }
+
+
+def test_catalog_library_bounds_read_when_sidecar_grows_after_open(
+    repo_fixture: RepoFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A path-size check cannot authorize the later read: the same open file may
+    # grow before its first read. The loader must request and retain at most one
+    # byte beyond the 64 KiB boundary so overflow can be classified safely.
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(1024))
+    replacement = _sidecar_bytes(256 * 1024)
+    import bounded_source
+
+    original_read = bounded_source._read_descriptor
+    requests: list[int] = []
+    returned: list[int] = []
+    grown = False
+    identity = (sidecar.stat().st_dev, sidecar.stat().st_ino)
+
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal grown
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != identity:
+            return original_read(descriptor, size)
+        if not grown:
+            grown = True
+            sidecar.write_bytes(replacement)
+        requests.append(size)
+        content = original_read(descriptor, size)
+        returned.append(len(content))
+        return content
+
+    monkeypatch.setattr(bounded_source, "_read_descriptor", tracked_read)
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar exceeds safe byte limit"
+    assert requests == [64 * 1024 + 1]
+    assert returned == [64 * 1024 + 1]
+
+
+def test_catalog_library_accumulates_bounded_short_reads_after_sidecar_growth(
+    repo_fixture: RepoFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A regular-file read is usually complete, but the loader's capacity
+    # contract must remain correct when the underlying stream returns early.
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(1024))
+    replacement = _sidecar_bytes(64 * 1024 + 1)
+    import bounded_source
+
+    original_read = bounded_source._read_descriptor
+    requests: list[int] = []
+    total_returned = 0
+    grown = False
+    identity = (sidecar.stat().st_dev, sidecar.stat().st_ino)
+
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal grown, total_returned
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != identity:
+            return original_read(descriptor, size)
+        if not grown:
+            grown = True
+            sidecar.write_bytes(replacement)
+        requests.append(size)
+        content = original_read(descriptor, min(size, 997))
+        total_returned += len(content)
+        return content
+
+    monkeypatch.setattr(bounded_source, "_read_descriptor", tracked_read)
+
+    with pytest.raises(CatalogError) as exc:
+        validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
+
+    assert str(exc.value) == "workflow sidecar exceeds safe byte limit"
+    assert all(0 < request <= 64 * 1024 + 1 for request in requests)
+    assert total_returned == 64 * 1024 + 1
+
+
+def test_validate_catalog_cli_bounds_growth_race_read_before_yaml(
+    repo_fixture: RepoFixture,
+    tmp_path: Path,
+) -> None:
+    sidecar = _configure_flat_archon_fixture(repo_fixture)
+    sidecar.write_bytes(_sidecar_bytes(1024))
+    marker = tmp_path / "read.json"
+    hook_dir = tmp_path / "hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        """\
+import json
+import os
+from pathlib import Path
+
+target = Path(os.environ["SIDECAR_RACE_TARGET"])
+marker = Path(os.environ["SIDECAR_RACE_MARKER"])
+original_read = os.read
+replacement = (b"language_compatibility: archon-2026-07\\n#" + b"x" * (256 * 1024))
+identity = (target.stat().st_dev, target.stat().st_ino)
+grown = False
+
+def tracked_read(descriptor, size):
+    global grown
+    metadata = os.fstat(descriptor)
+    if (metadata.st_dev, metadata.st_ino) != identity:
+        return original_read(descriptor, size)
+    if not grown:
+        grown = True
+        target.write_bytes(replacement)
+    content = original_read(descriptor, size)
+    marker.write_text(json.dumps({"requested": size, "returned": len(content)}))
+    return content
+
+os.read = tracked_read
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(hook_dir), environment.get("PYTHONPATH", "")])
+    )
+    environment["SIDECAR_RACE_TARGET"] = str(sidecar)
+    environment["SIDECAR_RACE_MARKER"] = str(marker)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "validate_catalog.py"),
+            "--repo",
+            str(repo_fixture.root),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "problems": ["workflow sidecar exceeds safe byte limit"],
+    }
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "requested": 64 * 1024 + 1,
+        "returned": 64 * 1024 + 1,
+    }
+
+
+def test_validation_preserves_legacy_workflow_mapping_contract(
+    repo_fixture: RepoFixture,
+) -> None:
+    workflow = yaml.safe_load(
+        (repo_fixture.root / "workflows/example.yml").read_text(encoding="utf-8")
+    )
+    workflow["requires"]["toolsets"] = ["ericsson-example"]
+    workflow["nodes"] = [
+        {
+            "id": "inspect",
+            "kind": "tool",
+            "tools": ["example_tool"],
+            "prompt": "Use the example_tool tool.",
+        }
+    ]
+    repo_fixture._write_yaml("workflows/example.yml", workflow)
+    repo_fixture.write_complete_entry()
+
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
 
 
 def test_validation_rejects_renamed_implementation_environment_variable(
@@ -1253,7 +2373,9 @@ def test_validation_rejects_unknown_onboarding_static_configuration(
 
     problems = validate_repository(repo_fixture.root, load_entries(repo_fixture.root))
 
-    assert "unknown onboarding configuration: entry example: FICTIONAL_TOKEN" in problems
+    assert (
+        "unknown onboarding configuration: entry example: FICTIONAL_TOKEN" in problems
+    )
 
 
 def test_validation_reconciles_workflow_input_requiredness(
@@ -1415,9 +2537,7 @@ def test_validation_does_not_treat_workflow_input_as_invoked_tool(
         ]
     )
 
-    assert validate_repository(
-        repo_fixture.root, load_entries(repo_fixture.root)
-    ) == []
+    assert validate_repository(repo_fixture.root, load_entries(repo_fixture.root)) == []
 
 
 def test_validation_rejects_manifest_environment_unused_by_implementation(

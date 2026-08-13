@@ -18,7 +18,7 @@ This is the configuration source of truth for the documented flows and the imple
 | Glean | `GLEAN_API_TOKEN` | Bearer token for the supplied remote MCP endpoint | Internal search when a workflow elects to use Glean |
 | Teams | `teams_auth`; optional `ERICSSON_GRAPH_CLIENT_ID` | MSAL device-code sign-in | Teams list/read/send/reply and future notifications |
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
-| GitLab | Source flow uses a PAT; Hermes key names are not yet implemented | PAT with `api` scope; optional mTLS | CI audit; Jira→GitLab; defect loop |
+| GitLab | `origin`, protected `pat`; optional `client_certificate_path` and `client_key_path` | PAT with appropriate scope; optional mTLS | Repository research; CI inspection; Jira→GitLab |
 | Document parsing/export | Local Python packages | No key | TOL generation; 3PP tracker |
 | Opportunity Visuals | Python/local files; optional openpyxl and Playwright/Chromium | No API key | Opportunity progression visual artifacts |
 | Pseudonymization | No configuration; explicitly unsupported | None | Historical questions only; no port roadmap |
@@ -26,6 +26,26 @@ This is the configuration source of truth for the documented flows and the imple
 | Windows diagnostics | PowerShell and reviewed local script | No key; elevation only when justified | Windows Laptop Diagnostic |
 | Workflow engine | Baked skills/workflows under the active `HERMES_HOME` | No key | All deterministic workflow ports |
 | Hermes model | Product-level provider/model configuration | Provider-specific, outside this capability set | All prompt nodes |
+
+## Plugin lifecycle and profile defaults
+
+`sets/ericsson.json` distinguishes existing backend infrastructure from standalone
+connectors without a capability-set toggle:
+
+- a string in `plugins[]` is an existing enabled backend; the Jira and Teams entries
+  retain their current behavior, and `plugins/workflow` records Hermes' enabled built-in
+  workflow backend;
+- a `{path, id, enabled: false}` object is a standalone connector bundled for explicit
+  per-profile opt-in. Every new profile starts every such connector disabled; and
+- optional `lifecycleMigration` metadata is reserved for a disabled standalone connector
+  that had previously been auto-seeded. Its stable id and exact
+  `from: auto_seeded_backend` transition live only in the manifest.
+
+Do not use connector metadata to disable source skills or workflows, add a set-wide
+`disabledByDefault` switch, or infer that a declared connector is implemented. The
+GitLab object declares the Release 1 lifecycle contract and the implemented plugin
+remains disabled until explicit per-profile opt-in. Jira remains an existing backend for this
+release, while SharePoint and Confluence have no production connector placeholders.
 
 ## Jira
 
@@ -87,13 +107,22 @@ Requirements:
 
 Validate in increasing-risk order: start the MCP server/list its tools; list mailboxes; list a small number of messages; read one known message; only then test draft/send/calendar mutations with explicit approval. Distinguish “MCP server did not start,” “PowerShell unavailable,” “Outlook COM unavailable,” “Outlook closed/offline,” and “mailbox item not found.”
 
-## GitLab (planned Hermes capability)
+## GitLab
 
 The Loop24 flows accept a GitLab personal access token in each component and require `api` scope for project discovery, repository reads, branch/commit creation, merge requests, CI variables, and review data. Some internal deployments also use an mTLS client certificate and key beneath `~/.config/edpctl/auth/`.
 
-No GitLab capability or manifest keys currently exist in `ericsson-capabilities`. The port design must choose stable names—likely a base URL plus secret PAT—and add them to the manifest before a setup skill presents them as available. It must also decide whether certificates are file paths, environment configuration, or delegated to an existing GitLab client.
+The manifest bundles `ericsson-gitlab` at `plugins/ericsson-gitlab` with `enabled: false` and no migration from an older auto-seeded backend. Enable it explicitly, configure the exact HTTP(S) `origin` and protected `pat`, and optionally configure both `client_certificate_path` and `client_key_path`. The optional pair must identify bounded regular files and load as a matching certificate/key pair; certificate contents never enter diagnostics.
 
-Validation should be staged: identify the current user; resolve a permitted project; read its default branch; list repository files; inspect CI metadata; then, only with approval and a test project, create a branch/MR. Never test by pushing to a production default branch. Expected permission for the full write path is GitLab `api`; a read-only auditor should use a narrower token if the server supports it.
+After enablement start a fresh conversation, then validate by resolving a permitted project and reading its default branch before bounded repository or CI inspection. Only with explicit intent, a dry-run preview, and host approval should a test project receive a branch, atomic commit, or merge request. Never validate by pushing to a production default branch. Use least privilege supported by the server; the full write path commonly requires GitLab `api`.
+
+The read surface is `gitlab_resolve_project`, `gitlab_list_repository_tree`,
+`gitlab_read_file`, `gitlab_read_merge_request`, `gitlab_list_pipelines`, and
+`gitlab_inspect_ci`. The write surface is `gitlab_create_branch`,
+`gitlab_commit_changes`, and `gitlab_create_merge_request`. Enabled profiles also
+receive the qualified `ericsson-gitlab:repository-research`,
+`ericsson-gitlab:merge-request-review`, and
+`ericsson-gitlab:ci-investigation` skills. The reviewed cross-connector workflow is
+`jira-to-gitlab`.
 
 ## Model and embedded Langflow LLM settings
 
@@ -101,9 +130,9 @@ Loop24 flows contain ACP/Ollama base URLs and sometimes expose `ANTHROPIC_API_KE
 
 ## Workflow engine and artifact locations
 
-The workflow orchestrator and builder require no API key. Baked startup seeding copies reference workflow YAML into the active brand's `$HERMES_HOME/workflows/`; run state and node artifacts live below that workflow area. `workflow_ctl.py` requires Python plus PyYAML and is the only supported writer of workflow run state.
+Hermes' built-in workflow backend and skills require no API key. The manifest records that backend as the enabled string entry `plugins/workflow`; it is not a standalone connector. Baked startup seeding copies reference workflow YAML into the active brand's `$HERMES_HOME/workflows/`; run state and node artifacts live below that workflow area. Historical source workflows remain validation/read-compatibility inputs while the portable workflow package becomes the accepted runtime shape.
 
-The onboarding router resolves the active brand home instead of assuming `~/.hermes`, confirms the orchestrator skill and selected workflow are installed, runs structural validation, and uses a scratch/read-only lifecycle check before a real run. `report.kanban: auto` is optional and must degrade safely when the Kanban toolset is unavailable. Never edit `state.json` directly to “fix” a run.
+The onboarding router resolves the active brand home instead of assuming `~/.hermes`, confirms the built-in workflow capability and selected workflow are installed, runs structural validation, and uses a scratch/read-only lifecycle check before a real run. `report.kanban: auto` is optional and must degrade safely when the Kanban toolset is unavailable. Never edit workflow state directly to “fix” a run.
 
 ## Document parsing and spreadsheet output
 

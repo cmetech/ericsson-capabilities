@@ -6,7 +6,8 @@ This handbook explains the Loop24 Langflow automations translated into native Co
 
 - Source checkout: Loop24 repository `loop_24` (location varies by environment)
 - Git remote: `git@git.rosetta.ericssondevops.com:sd-americas-css/sd-americas-ai/loop_24.git`
-- Inventory snapshot: commit `3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e`
+- Inventory snapshot: commit `fc3bf26d64e05cc3703ee39e323bbf3c1eaa4cd6`
+- Inventory size: 30 live, non-archived flow JSON files (excluding `flows/manifest.json`)
 - Source areas: `flows/`, `custom_components/`, `mcp/`, and supporting scripts under `utils/`
 
 The goal is to port each flow's intent, controls, and user outcome—not reproduce the Langflow graph node for node. In Hermes:
@@ -17,15 +18,22 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 - an embedded Langflow LLM node becomes work performed by the active Hermes agent;
 - secrets stay in Hermes configuration, never in workflows or these documents.
 
-## Flow inventory
+## Reviewed legacy flow inventory
+
+The source snapshot contains 30 live flow JSON files. The table below covers the 11
+legacy flows already reviewed and documented in this repository; it is not the complete
+current inventory. Each page intentionally retains `source_commit`
+`3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e`: comparison against the frozen snapshot
+found the corresponding JSON moved byte-for-byte to `flows/archieve/`, so restamping
+those pages would falsely claim review of newer live replacements and newly added flows.
 
 | Original flow | Current status | Hermes counterpart or likely target |
 |---|---|---|
-| [CI File Auditor](flows/ci-file-auditor.md) | Not ported | GitLab tools plus audit workflow |
+| [CI File Auditor](flows/ci-file-auditor.md) | Partially ported | Bounded GitLab CI reads exist; multi-project policy reports remain |
 | [Search and Read E-Mails](flows/search-and-read-emails.md) | Intent ported | Outlook MCP plus `inbox-digest` workflow |
 | [TOL Generation](flows/tol-generation.md) | Not ported | Document parser, prompt workflow, spreadsheet artifact |
 | [Image Generation](flows/image-generation.md) | Intent ported | [`opportunity-visuals` skill](../skills/ericsson/opportunity-visuals/SKILL.md); [reproducible showcase](showcases/opportunity-visuals.md) |
-| [Jira to GitLab](flows/jira-to-gitlab.md) | Partially ported | Jira tools exist; GitLab write path and workflow are missing |
+| [Jira to GitLab](flows/jira-to-gitlab.md) | Intent ported | Jira and GitLab tools plus the approved `jira-to-gitlab` workflow |
 | [Jira Assigned Tickets Summary](flows/jira-assigned-tickets-summary.md) | Intent ported | Jira tools plus `my-tickets-summary` workflow |
 | [Jira Defect Loop](flows/jira-defect-loop.md) | Partially ported | Jira tools exist; triage, GitLab tools, loop, reviews, and summary remain |
 | [3PP Support and LCM Tracker](flows/third-party-support-lcm-tracker.md) | Not ported | Spreadsheet tools plus lifecycle-research workflow |
@@ -33,7 +41,13 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 | [Re-Identification](flows/re-identification.md) | Planned, not implemented | No runnable mapping capability is available |
 | [Windows Laptop Diagnostic](flows/windows-laptop-diagnostic.md) | Not ported | Windows-only diagnostic skill with reviewed script |
 
-Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and the workflow orchestrator/builder.
+Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and Hermes' enabled built-in workflow backend and skills. The implemented GitLab standalone connector is bundled disabled for explicit opt-in; after enablement, configuration, readiness, and a fresh conversation it exposes bounded reads, approval-gated writes, and three qualified skills.
+
+GitLab repository, merge-request, and CI conversations route to the qualified
+`ericsson-gitlab:repository-research`, `ericsson-gitlab:merge-request-review`, and
+`ericsson-gitlab:ci-investigation` skills. Ticket delivery uses the reviewed
+`jira-to-gitlab` skill and workflow. See the [configuration guide](configuration.md#gitlab)
+for the exact nine-tool surface and approval boundary.
 
 ## Onboarding, configuration, and maintenance
 

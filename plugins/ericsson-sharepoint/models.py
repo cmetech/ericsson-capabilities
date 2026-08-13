@@ -15,6 +15,23 @@ _TENANT_HOST = re.compile(
 )
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _AUTH_MODES = frozenset({"auto", "delegated_msal", "app_only", "azure_cli"})
+_SETTING_FIELDS = (
+    "tenant_host",
+    "auth_mode",
+    "tenant_id",
+    "client_id",
+    "scopes",
+    "authority_url",
+    "account_id",
+    "azure_cli_enabled",
+    "max_pages",
+    "max_items",
+    "max_bytes",
+    "timeout_seconds",
+    "download_root",
+    "upload_root",
+    "browser_profile",
+)
 
 
 class SharePointConfigurationError(ValueError):
@@ -92,6 +109,23 @@ class SharePointConfiguration:
     upload_root: Path
     browser_profile: str
     cache_path: Path
+
+    @classmethod
+    def from_runtime(cls, configuration: Any) -> "SharePointConfiguration":
+        """Resolve only descriptor-authorized fields from an opaque host accessor."""
+        if isinstance(configuration, Mapping):
+            return cls.from_mapping(configuration)
+        values: dict[str, Any] = {}
+        for field_id in _SETTING_FIELDS:
+            try:
+                values[field_id] = configuration.setting(field_id)
+            except (KeyError, TypeError, ValueError):
+                continue
+        try:
+            values["client_secret"] = configuration.secret("client_secret")
+        except (KeyError, TypeError, ValueError):
+            pass
+        return cls.from_mapping(values)
 
     @classmethod
     def from_mapping(
@@ -187,3 +221,7 @@ class SharePointConfiguration:
 
 class SharePointSetupError(RuntimeError):
     """Credential-free setup-action failure."""
+
+
+class SharePointResolutionError(RuntimeError):
+    """Raised when a URL or explicit ID does not resolve unambiguously."""

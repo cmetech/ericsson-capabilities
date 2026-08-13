@@ -4,5 +4,6 @@ description: "Bounded Ericsson SharePoint files, folders, sites, and permission 
 author: Ericsson (cmetech)
 kind: standalone
 config_schema: config.schema.json
-provides_tools: []
-
+provides_tools:
+  - sharepoint_resolve_url
+  - sharepoint_get_item

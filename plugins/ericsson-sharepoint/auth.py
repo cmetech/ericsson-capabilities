@@ -270,7 +270,7 @@ def clear_session(run, *, browser_registry=None) -> dict[str, Any]:
 
 def graph_ready(configuration) -> bool:
     try:
-        config = SharePointConfiguration.from_mapping(configuration)
+        config = SharePointConfiguration.from_runtime(configuration)
         return identity_status(config)["graph"]["status"] == "ready"
     except Exception:
         return False

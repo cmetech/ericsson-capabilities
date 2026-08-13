@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from . import auth
+import json
+
+from . import auth, client, tools  # noqa: F401
+from .models import SharePointConfigurationError, SharePointResolutionError
+
+
+def _json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def register(ctx) -> None:
@@ -14,3 +21,43 @@ def register(ctx) -> None:
     ctx.register_setup_action("enroll_browser", auth.enroll_browser)
     ctx.register_setup_action("clear_session", auth.clear_session)
 
+    def available() -> bool:
+        try:
+            return auth.graph_ready(ctx.configuration())
+        except Exception:
+            return False
+
+    def handler(name):
+        async def invoke(arguments: dict, **_kwargs) -> str:
+            try:
+                configuration = ctx.configuration()
+                result = await tools.invoke(name, arguments or {}, configuration)
+                return _json({"success": True, "result": result})
+            except SharePointConfigurationError:
+                category = "configuration_required"
+            except (SharePointResolutionError, ValueError, TypeError, KeyError):
+                category = "invalid_input"
+            except Exception:
+                category = "remote_unavailable"
+            return _json(
+                {
+                    "success": False,
+                    "error": {
+                        "category": category,
+                        "message": "SharePoint operation could not be completed.",
+                    },
+                }
+            )
+
+        return invoke
+
+    for name, schema in tools.SCHEMAS.items():
+        ctx.register_tool(
+            name=name,
+            toolset="ericsson-sharepoint",
+            schema=schema,
+            handler=handler(name),
+            check_fn=available,
+            is_async=True,
+            emoji="📁",
+        )

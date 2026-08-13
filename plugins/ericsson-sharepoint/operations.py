@@ -18,6 +18,7 @@ from urllib.parse import quote, urlsplit
 from .auth import build_identity_config
 from .client import SharePointClient
 from .models import (
+    SharePointAmbiguousWriteError,
     SharePointAuditError,
     SharePointCancelledError,
     SharePointConfiguration,
@@ -1021,7 +1022,7 @@ async def upload_with_client(
     }
 
 
-async def write_operation(name, configuration, arguments, *, cancel_check=None):
+async def _write_operation(name, configuration, arguments, *, cancel_check=None):
     config = SharePointConfiguration.from_runtime(configuration)
     client = client_from_configuration(configuration)
     deadline = time.monotonic() + config.timeout_seconds
@@ -1069,3 +1070,20 @@ async def write_operation(name, configuration, arguments, *, cancel_check=None):
             client, url=arguments.get("url"), etag=arguments.get("etag")
         )
     raise SharePointWriteError("unknown write operation")
+
+
+async def write_operation(name, configuration, arguments, *, cancel_check=None):
+    try:
+        return await _write_operation(
+            name, configuration, arguments, cancel_check=cancel_check
+        )
+    except Exception as error:
+        try:
+            from tools.microsoft_graph_client import MicrosoftGraphAmbiguousWriteError
+        except ImportError:
+            raise error
+        if isinstance(error, MicrosoftGraphAmbiguousWriteError):
+            raise SharePointAmbiguousWriteError(
+                "SharePoint write outcome requires reconciliation"
+            ) from None
+        raise

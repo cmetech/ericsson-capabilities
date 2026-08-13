@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import audit, auth, client, operations, tools  # noqa: F401
 from .models import (
+    SharePointAmbiguousWriteError,
     SharePointConfigurationError,
     SharePointFileBoundaryError,
     SharePointResolutionError,
@@ -114,6 +115,8 @@ def register(ctx) -> None:
                 category = "configuration_required"
             except SharePointFileBoundaryError:
                 category = "permission_denied"
+            except SharePointAmbiguousWriteError:
+                category = "ambiguous_write"
             except SharePointWriteError:
                 category = "invalid_input"
             except (SharePointResolutionError, ValueError, TypeError, KeyError):
@@ -125,7 +128,12 @@ def register(ctx) -> None:
                     "success": False,
                     "error": {
                         "category": category,
-                        "message": "SharePoint operation could not be completed.",
+                        "message": (
+                            "SharePoint write outcome is uncertain; inspect the remote "
+                            "destination before any retry."
+                            if category == "ambiguous_write"
+                            else "SharePoint operation could not be completed."
+                        ),
                     },
                 }
             )

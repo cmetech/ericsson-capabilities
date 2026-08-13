@@ -244,3 +244,72 @@ def test_write_schemas_have_no_permanent_delete_or_approval_claims():
     for name in WRITE_TOOLS:
         props = tools.SCHEMAS[name]["parameters"]["properties"]
         assert not {"approved", "approval", "permanent", "hard_delete"} & props.keys()
+
+
+def test_ambiguous_write_result_requires_reconciliation_before_retry(monkeypatch):
+    package, _, models = _load("sharepoint_ambiguous_write_test")
+
+    class Context:
+        def __init__(self):
+            self.tools = []
+
+        def register_setup_action(self, *_args, **_kwargs):
+            pass
+
+        def register_hook(self, *_args, **_kwargs):
+            pass
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+        def configuration(self):
+            return {}
+
+    async def ambiguous(*_args, **_kwargs):
+        raise models.SharePointAmbiguousWriteError("private remote detail")
+
+    monkeypatch.setattr(package.tools, "invoke", ambiguous)
+    context = Context()
+    package.register(context)
+    handler = next(
+        tool["handler"]
+        for tool in context.tools
+        if tool["name"] == "sharepoint_upload"
+    )
+    admission = types.SimpleNamespace(
+        approved=True,
+        policy="plugin_approve",
+        tool_name="sharepoint_upload",
+    )
+
+    result = json.loads(
+        __import__("asyncio").run(handler({}, tool_admission=admission))
+    )
+
+    assert result["error"]["category"] == "ambiguous_write"
+    assert "inspect" in result["error"]["message"].lower()
+    assert "retry" in result["error"]["message"].lower()
+    assert "private remote detail" not in repr(result)
+
+
+@pytest.mark.anyio
+async def test_generic_graph_ambiguity_is_translated_to_connector_error(monkeypatch):
+    _, operations, models = _load("sharepoint_ambiguity_translation_test")
+
+    class GenericAmbiguousWriteError(RuntimeError):
+        pass
+
+    async def ambiguous(*_args, **_kwargs):
+        raise GenericAmbiguousWriteError("private graph detail")
+
+    tools_package = types.ModuleType("tools")
+    graph_module = types.ModuleType("tools.microsoft_graph_client")
+    graph_module.MicrosoftGraphAmbiguousWriteError = GenericAmbiguousWriteError
+    monkeypatch.setitem(sys.modules, "tools", tools_package)
+    monkeypatch.setitem(sys.modules, "tools.microsoft_graph_client", graph_module)
+    monkeypatch.setattr(operations, "_write_operation", ambiguous)
+
+    with pytest.raises(models.SharePointAmbiguousWriteError) as caught:
+        await operations.write_operation("sharepoint_upload", {}, {})
+
+    assert "private graph detail" not in str(caught.value)

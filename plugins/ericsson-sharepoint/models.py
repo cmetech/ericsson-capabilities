@@ -248,3 +248,7 @@ class SharePointAuditError(RuntimeError):
 
 class SharePointWriteError(RuntimeError):
     """Raised when a SharePoint mutation request is invalid or unsafe."""
+
+
+class SharePointAmbiguousWriteError(SharePointWriteError):
+    """Raised when a mutation may have completed and must be reconciled."""

@@ -8,6 +8,7 @@ import fnmatch
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 import threading
@@ -35,6 +36,9 @@ _WINDOWS_DEVICE_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
+)
+_COPY_MONITOR_PATH = re.compile(
+    r"^/(?:(?:sites|teams)/[^/]+/)?_api/v2\.[01]/monitor/[A-Za-z0-9._~-]+/?$"
 )
 
 
@@ -824,6 +828,25 @@ def _write_name(value: Any, label="name") -> str:
     return name
 
 
+def _validate_copy_monitor_url(location: str, tenant_host: str) -> None:
+    try:
+        parts = urlsplit(location)
+        port = parts.port
+    except (TypeError, ValueError):
+        raise SharePointWriteError("copy monitor URL is invalid") from None
+    if (
+        parts.scheme.casefold() != "https"
+        or (parts.hostname or "").casefold().rstrip(".")
+        != str(tenant_host).casefold().rstrip(".")
+        or parts.username is not None
+        or parts.password is not None
+        or port not in {None, 443}
+        or bool(parts.fragment)
+        or _COPY_MONITOR_PATH.fullmatch(parts.path) is None
+    ):
+        raise SharePointWriteError("copy monitor URL escaped tenant authority")
+
+
 async def create_folder_with_client(
     client,
     *,
@@ -935,6 +958,9 @@ async def copy_item_with_client(
         max_polls=max_polls,
         deadline=deadline,
         cancel_check=cancel_check,
+        monitor_url_validator=lambda location: _validate_copy_monitor_url(
+            location, source["tenant_host"]
+        ),
     )
 
 

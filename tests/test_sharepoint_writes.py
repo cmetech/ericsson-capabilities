@@ -38,6 +38,7 @@ class Graph:
     def __init__(self):
         self.calls = []
         self.controls = []
+        self.monitor_validators = []
 
     async def post_json(
         self,
@@ -81,8 +82,16 @@ class Graph:
         return {"deleted": True, "status_code": 204}
 
     async def start_async_operation(
-        self, path, *, json_body, max_polls, deadline=None, cancel_check=None
+        self,
+        path,
+        *,
+        json_body,
+        max_polls,
+        deadline=None,
+        cancel_check=None,
+        monitor_url_validator=None,
     ):
+        self.monitor_validators.append(monitor_url_validator)
         self.controls.append((deadline, cancel_check))
         self.calls.append(("async", path, json_body, max_polls, deadline, cancel_check))
         return {"status": "completed"}
@@ -205,7 +214,7 @@ async def test_w05_move_requires_same_tenant_and_validates_cross_drive_parent():
 
 @pytest.mark.anyio
 async def test_w06_copy_polls_async_completion_once_without_duplicate_create():
-    _, operations, _ = _load()
+    _, operations, models = _load()
     graph = Graph()
     client = Client(graph, destination_drive="other")
     cancel_check = lambda: False
@@ -228,6 +237,23 @@ async def test_w06_copy_polls_async_completion_once_without_duplicate_create():
     )
     assert client.controls == [(99, cancel_check), (99, cancel_check)]
     assert graph.controls == [(99, cancel_check)]
+    validator = graph.monitor_validators[0]
+    validator(
+        "https://tenant.sharepoint.com/sites/Governance/"
+        "_api/v2.1/monitor/4A7547A801E905B3E06BD113D18C4D48"
+    )
+    validator(
+        "https://tenant.sharepoint.com/_api/v2.0/monitor/"
+        "4A7547A801E905B3E06BD113D18C4D48?token=opaque"
+    )
+    for unsafe in (
+        "https://other.sharepoint.com/_api/v2.0/monitor/copy-1",
+        "https://tenant.sharepoint.com/download/copy-1",
+        "https://tenant.sharepoint.com/_api/v2.0/monitor/copy-1#fragment",
+        "https://user@tenant.sharepoint.com/_api/v2.0/monitor/copy-1",
+    ):
+        with pytest.raises(models.SharePointWriteError, match="monitor"):
+            validator(unsafe)
 
 
 @pytest.mark.anyio

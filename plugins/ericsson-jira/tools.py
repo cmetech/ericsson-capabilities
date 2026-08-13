@@ -78,6 +78,7 @@ SCHEMAS = {
             "properties": {
                 "key": {"type": "string", "minLength": 3, "maxLength": 128},
                 "body": {"type": "string", "minLength": 1, "maxLength": 32000},
+                "dry_run": {"type": "boolean", "default": False},
             },
             "required": ["key", "body"],
             "additionalProperties": False,
@@ -103,6 +104,24 @@ def client_from_configuration(configuration, **options) -> JiraClient:
 def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
     if not isinstance(args, Mapping):
         raise JiraError("invalid_input")
+    allowed_arguments = {
+        "jira_my_tickets": {"max_results"},
+        "jira_search_issues": {
+            "jql",
+            "max_results",
+            "fields",
+            "statuses",
+            "issue_types",
+            "priorities",
+            "labels",
+            "min_age_days",
+            "max_age_days",
+        },
+        "jira_get_issue": {"key"},
+        "jira_add_comment": {"key", "body", "dry_run"},
+    }
+    if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
+        raise JiraError("invalid_input")
     with client_from_configuration(configuration, **client_options) as client:
         operations = JiraOperations(client)
         handlers = {
@@ -112,6 +131,4 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_add_comment": operations.add_comment,
         }
         handler = handlers.get(name)
-        if handler is None:
-            raise JiraError("invalid_input")
         return handler(**dict(args))

@@ -8,6 +8,8 @@ from . import tools as jira_tools
 from .models import JiraError, SAFE_ERROR_MESSAGES
 
 
+_WRITE_TOOLS = frozenset({"jira_add_comment"})
+
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -18,6 +20,17 @@ def _interrupt_authority():
     except ImportError:
         return lambda: False
     return is_interrupted
+
+
+def _has_write_admission(admission, tool_name: str) -> bool:
+    try:
+        return (
+            getattr(admission, "approved", None) is True
+            and getattr(admission, "policy", None) == "plugin_approve"
+            and getattr(admission, "tool_name", None) == tool_name
+        )
+    except Exception:
+        return False
 
 
 def register(ctx) -> None:
@@ -31,6 +44,18 @@ def register(ctx) -> None:
 
     def handler(name):
         def invoke(args: dict, **_kwargs) -> str:
+            if name in _WRITE_TOOLS and not _has_write_admission(
+                _kwargs.get("tool_admission"), name
+            ):
+                return _json(
+                    {
+                        "success": False,
+                        "error": {
+                            "category": "permission",
+                            "message": SAFE_ERROR_MESSAGES["permission"],
+                        },
+                    }
+                )
             try:
                 configuration = ctx.configuration()
             except Exception:
@@ -83,6 +108,17 @@ def register(ctx) -> None:
                 )
 
         return invoke
+
+    def require_write_approval(tool_name: str, args: dict, **_kwargs):
+        if tool_name not in _WRITE_TOOLS:
+            return None
+        return {
+            "action": "approve",
+            "message": "Approve Ericsson Jira comment",
+            "rule_key": tool_name,
+        }
+
+    ctx.register_hook("pre_tool_call", require_write_approval)
 
     for name, schema in jira_tools.SCHEMAS.items():
         ctx.register_tool(

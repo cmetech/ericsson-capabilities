@@ -216,6 +216,7 @@ class JiraClient:
         *,
         params: Mapping[str, Any] | None = None,
         json_body: Any | None = None,
+        json_body_by_version: Mapping[str, Any] | None = None,
         deadline: float | None = None,
     ) -> Any:
         method = method.upper() if isinstance(method, str) else ""
@@ -229,11 +230,22 @@ class JiraClient:
             if self.auth.rest_api_version == "auto"
             else (self.auth.rest_api_version,)
         )
+        if json_body_by_version is not None and (
+            not isinstance(json_body_by_version, Mapping)
+            or set(json_body_by_version) != {"3", "2"}
+        ):
+            raise JiraError("invalid_input")
+
+        def body_for(version: str):
+            if json_body_by_version is None:
+                return json_body
+            return json_body_by_version[version]
+
         first = self._perform(
             method,
             f"/rest/api/{versions[0]}/{resource}",
             params=params,
-            json_body=json_body,
+            json_body=body_for(versions[0]),
             deadline=deadline,
         )
         if len(versions) == 2 and is_rest_version_unsupported(first):
@@ -241,7 +253,7 @@ class JiraClient:
                 method,
                 f"/rest/api/{versions[1]}/{resource}",
                 params=params,
-                json_body=json_body,
+                json_body=body_for(versions[1]),
                 deadline=deadline,
             )
         return self._decode(first, method)

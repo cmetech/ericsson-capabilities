@@ -85,6 +85,9 @@ class Context:
     def register_tool(self, **registration):
         self.registrations[registration["name"]] = registration
 
+    def register_hook(self, name, callback):
+        pass
+
 
 def _load_plugin():
     module_name = f"ericsson_jira_task3_test_{uuid.uuid4().hex}"
@@ -183,11 +186,21 @@ def test_get_issue_and_add_comment(configuration):
         issue = jira_tools.get_issue("PROJ-1", client=client)
     assert issue["summary"] == "s" and issue["comments"][0]["body"] == "hi"
 
+    respx.get(f"{BASE}/rest/api/2/issue/PROJ-1/comment").mock(
+        return_value=httpx.Response(200, json={"comments": [], "total": 0})
+    )
     respx.post(f"{BASE}/rest/api/2/issue/PROJ-1/comment").mock(
         return_value=httpx.Response(201, json={"id": "10001"}))
     with jira_tools.client_from_configuration(configuration) as client:
         out = jira_tools.add_comment("PROJ-1", "done", client=client)
-    assert out == {"ok": True, "id": "10001"}
+    assert out == {
+        "ok": True,
+        "id": "10001",
+        "created": True,
+        "duplicate": False,
+        "reconciled": False,
+        "dry_run": False,
+    }
 
 
 def test_schemas_are_openai_function_shaped():

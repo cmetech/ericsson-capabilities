@@ -340,7 +340,11 @@ def test_manifest_content():
             "id": "ericsson-gitlab",
             "enabled": False,
         },
-        "plugins/ericsson-sharepoint",
+        {
+            "path": "plugins/ericsson-sharepoint",
+            "id": "ericsson-sharepoint",
+            "enabled": False,
+        },
     ]
     assert doc["mcpServers"] == "mcp/mcp-servers.yaml"
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]

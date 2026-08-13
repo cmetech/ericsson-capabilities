@@ -27,7 +27,11 @@
       "id": "ericsson-gitlab",
       "enabled": false
     },
-    "plugins/ericsson-sharepoint"
+    {
+      "path": "plugins/ericsson-sharepoint",
+      "id": "ericsson-sharepoint",
+      "enabled": false
+    }
   ],
   "mcpServers": "mcp/mcp-servers.yaml",
   "mcpLocal": ["mcp/outlook-mcp"],

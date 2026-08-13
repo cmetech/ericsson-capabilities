@@ -1,101 +1,153 @@
-"""Pure Jira REST helpers for the ericsson-jira plugin.
+"""Compatibility facade for the Ericsson Jira connector's public tools."""
 
-No Hermes imports — unit-testable standalone. __init__.py wires these into
-the Hermes tool registry. Auth: JIRA_BASE_URL + JIRA_PAT (Bearer) env vars.
-"""
 from __future__ import annotations
 
 import json
-import os
 import re
+from typing import Any, Mapping
 
-import httpx
-
-
-class JiraError(RuntimeError):
-    pass
+if __package__:
+    from .auth import authentication_from_configuration
+    from .client import JiraClient
+    from .models import JiraAuth, JiraError
+else:
+    from auth import authentication_from_configuration
+    from client import JiraClient
+    from models import JiraAuth, JiraError
 
 
 GITLAB_URL_RE = re.compile(r"https?://[^\s|\]>)\"',]*gitlab[^\s|\]>)\"',]*", re.I)
-
-MY_TICKETS_JQL = ("assignee = currentUser() AND resolution = Unresolved "
-                  "ORDER BY priority DESC, updated DESC")
+MY_TICKETS_JQL = (
+    "assignee = currentUser() AND resolution = Unresolved "
+    "ORDER BY priority DESC, updated DESC"
+)
 
 
 def _clean_urls(urls):
-    """Strip trailing punctuation from extracted URLs."""
-    return [u.rstrip(".,;:!?") for u in urls]
+    return [url.rstrip(".,;:!?") for url in urls]
 
 
-def check_available() -> bool:
-    return bool(os.environ.get("JIRA_BASE_URL")) and bool(os.environ.get("JIRA_PAT"))
+def _text(value) -> str:
+    return json.dumps(value) if isinstance(value, dict) else (value or "")
 
 
-def _client() -> httpx.Client:
-    base = (os.environ.get("JIRA_BASE_URL") or "").rstrip("/")
-    if not base:
-        raise JiraError("JIRA_BASE_URL is not set — add it on the Keys page")
-    pat = os.environ.get("JIRA_PAT")
-    if not pat:
-        raise JiraError("JIRA_PAT is not set — add it on the Keys page")
-    return httpx.Client(base_url=base, timeout=30,
-                        headers={"Authorization": f"Bearer {pat}"})
+def check_available(configuration=None) -> bool:
+    """Configuration presence is diagnostic only; plugin enablement is host-owned."""
+
+    if configuration is None:
+        return False
+    try:
+        authentication_from_configuration(configuration)
+        return True
+    except JiraError:
+        return False
 
 
-def _check(r: httpx.Response) -> None:
-    if r.status_code == 401:
-        raise JiraError("Jira authentication failed (401) — check JIRA_PAT")
-    if r.status_code >= 400:
-        raise JiraError(f"Jira API error {r.status_code}: {r.text[:300]}")
+def client_from_configuration(configuration, **options) -> JiraClient:
+    return JiraClient(authentication_from_configuration(configuration), **options)
 
 
-def _text(desc) -> str:
-    return json.dumps(desc) if isinstance(desc, dict) else (desc or "")
-
-
-def my_tickets(max_results: int = 25) -> list[dict]:
-    with _client() as c:
-        r = c.get("/rest/api/2/search", params={
-            "jql": MY_TICKETS_JQL, "maxResults": max_results,
-            "fields": "summary,status,priority,updated,description"})
-        _check(r)
-        out = []
-        for issue in r.json().get("issues", []):
-            f = issue.get("fields", {})
-            desc = _text(f.get("description"))
-            out.append({
+def my_tickets(
+    max_results: int | None = None,
+    *,
+    client: JiraClient,
+) -> list[dict[str, Any]]:
+    if max_results is None:
+        max_results = client.auth.default_max_results
+    if type(max_results) is not int or not 1 <= max_results <= 100:
+        raise JiraError("invalid_input")
+    payload = client.rest_json(
+        "GET",
+        "search",
+        params={
+            "jql": MY_TICKETS_JQL,
+            "maxResults": max_results,
+            "fields": "summary,status,priority,updated,description",
+        },
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("issues", []), list):
+        raise JiraError("invalid_remote_data")
+    output = []
+    for issue in payload.get("issues", []):
+        if not isinstance(issue, dict) or not isinstance(issue.get("fields", {}), dict):
+            raise JiraError("invalid_remote_data")
+        fields = issue.get("fields", {})
+        description = _text(fields.get("description"))
+        output.append(
+            {
                 "key": issue.get("key"),
-                "summary": f.get("summary"),
-                "status": (f.get("status") or {}).get("name"),
-                "priority": (f.get("priority") or {}).get("name"),
-                "updated": f.get("updated"),
-                "gitlab_urls": _clean_urls(GITLAB_URL_RE.findall(desc)),
-            })
-        return out
+                "summary": fields.get("summary"),
+                "status": (fields.get("status") or {}).get("name"),
+                "priority": (fields.get("priority") or {}).get("name"),
+                "updated": fields.get("updated"),
+                "gitlab_urls": _clean_urls(GITLAB_URL_RE.findall(description)),
+            }
+        )
+    return output
 
 
-def get_issue(key: str) -> dict:
-    with _client() as c:
-        r = c.get(f"/rest/api/2/issue/{key}", params={
-            "fields": "summary,status,priority,description,comment"})
-        _check(r)
-        f = r.json().get("fields", {})
-        comments = [{"author": (cm.get("author") or {}).get("displayName"),
-                     "body": _text(cm.get("body")), "created": cm.get("created")}
-                    for cm in (f.get("comment") or {}).get("comments", [])[-5:]]
-        return {"key": r.json().get("key"), "summary": f.get("summary"),
-                "status": (f.get("status") or {}).get("name"),
-                "priority": (f.get("priority") or {}).get("name"),
-                "description": _text(f.get("description")),
-                "gitlab_urls": _clean_urls(GITLAB_URL_RE.findall(_text(f.get("description")))),
-                "comments": comments}
+def get_issue(key: str, *, client: JiraClient) -> dict[str, Any]:
+    if not isinstance(key, str) or not key or len(key) > 128:
+        raise JiraError("invalid_input")
+    payload = client.rest_json(
+        "GET",
+        f"issue/{key}",
+        params={"fields": "summary,status,priority,description,comment"},
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("fields"), dict):
+        raise JiraError("invalid_remote_data")
+    fields = payload["fields"]
+    raw_comments = (fields.get("comment") or {}).get("comments", [])
+    if not isinstance(raw_comments, list):
+        raise JiraError("invalid_remote_data")
+    comments = [
+        {
+            "author": (comment.get("author") or {}).get("displayName"),
+            "body": _text(comment.get("body")),
+            "created": comment.get("created"),
+        }
+        for comment in raw_comments[-5:]
+        if isinstance(comment, dict)
+    ]
+    description = _text(fields.get("description"))
+    return {
+        "key": payload.get("key"),
+        "summary": fields.get("summary"),
+        "status": (fields.get("status") or {}).get("name"),
+        "priority": (fields.get("priority") or {}).get("name"),
+        "description": description,
+        "gitlab_urls": _clean_urls(GITLAB_URL_RE.findall(description)),
+        "comments": comments,
+    }
 
 
-def add_comment(key: str, body: str) -> dict:
-    with _client() as c:
-        r = c.post(f"/rest/api/2/issue/{key}/comment", json={"body": body})
-        _check(r)
-        return {"ok": True, "id": r.json().get("id")}
+def add_comment(key: str, body: str, *, client: JiraClient) -> dict[str, Any]:
+    if not isinstance(key, str) or not key or not isinstance(body, str) or not body:
+        raise JiraError("invalid_input")
+    payload = client.rest_json(
+        "POST", f"issue/{key}/comment", json_body={"body": body}
+    )
+    if not isinstance(payload, dict):
+        raise JiraError("invalid_remote_data")
+    return {"ok": True, "id": payload.get("id")}
+
+
+def invoke(
+    name: str,
+    args: Mapping[str, Any],
+    configuration,
+    **client_options,
+):
+    operations = {
+        "jira_my_tickets": my_tickets,
+        "jira_get_issue": get_issue,
+        "jira_add_comment": add_comment,
+    }
+    operation = operations.get(name)
+    if operation is None or not isinstance(args, Mapping):
+        raise JiraError("invalid_input")
+    with client_from_configuration(configuration, **client_options) as client:
+        return operation(**dict(args), client=client)
 
 
 _STR = {"type": "string"}
@@ -103,19 +155,37 @@ SCHEMAS = {
     "jira_my_tickets": {
         "name": "jira_my_tickets",
         "description": "List open Jira tickets assigned to the current user, with any GitLab URLs found in their descriptions.",
-        "parameters": {"type": "object", "properties": {
-            "max_results": {"type": "integer", "description": "Max tickets (default 25)"}}},
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum tickets (configured default 25)",
+                }
+            },
+            "additionalProperties": False,
+        },
     },
     "jira_get_issue": {
         "name": "jira_get_issue",
         "description": "Fetch one Jira issue: summary, status, priority, description, last 5 comments, GitLab URLs.",
-        "parameters": {"type": "object", "properties": {"key": _STR}, "required": ["key"]},
+        "parameters": {
+            "type": "object",
+            "properties": {"key": _STR},
+            "required": ["key"],
+            "additionalProperties": False,
+        },
     },
     "jira_add_comment": {
         "name": "jira_add_comment",
         "description": "Add a comment to a Jira issue.",
-        "parameters": {"type": "object",
-                        "properties": {"key": _STR, "body": _STR},
-                        "required": ["key", "body"]},
+        "parameters": {
+            "type": "object",
+            "properties": {"key": _STR, "body": _STR},
+            "required": ["key", "body"],
+            "additionalProperties": False,
+        },
     },
 }

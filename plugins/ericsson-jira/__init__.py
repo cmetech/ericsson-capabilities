@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from . import jira_tools
+from . import tools as jira_tools
 from .models import JiraError, SAFE_ERROR_MESSAGES
 
 

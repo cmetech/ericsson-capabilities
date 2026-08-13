@@ -33,6 +33,7 @@ def test_descriptor_is_standalone_and_preserves_stable_public_identity():
     assert manifest["config_schema"] == "config.schema.json"
     assert manifest["provides_tools"] == [
         "jira_my_tickets",
+        "jira_search_issues",
         "jira_get_issue",
         "jira_add_comment",
     ]
@@ -127,6 +128,7 @@ def test_plugin_registers_stable_toolset_and_resolves_fresh_configuration(monkey
 
     assert set(context.registrations) == {
         "jira_my_tickets",
+        "jira_search_issues",
         "jira_get_issue",
         "jira_add_comment",
     }

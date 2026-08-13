@@ -4,4 +4,4 @@ description: "Ericsson Jira tools — assigned-ticket listing (with GitLab-URL e
 author: Ericsson (cmetech)
 kind: standalone
 config_schema: config.schema.json
-provides_tools: [jira_my_tickets, jira_get_issue, jira_add_comment]
+provides_tools: [jira_my_tickets, jira_search_issues, jira_get_issue, jira_add_comment]

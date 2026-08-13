@@ -1,0 +1,46 @@
+{
+  "type": "doc",
+  "version": 1,
+  "content": [
+    {
+      "type": "paragraph",
+      "content": [
+        {"type": "text", "text": "See "},
+        {
+          "type": "text",
+          "text": "the runbook",
+          "marks": [{"type": "link", "attrs": {"href": "https://docs.example.test/runbook"}}]
+        },
+        {"type": "text", "text": " and "},
+        {"type": "mention", "attrs": {"text": "Alice"}}
+      ]
+    },
+    {
+      "type": "bulletList",
+      "content": [
+        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "first"}]}]},
+        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "second"}]}]}
+      ]
+    },
+    {"type": "codeBlock", "content": [{"type": "text", "text": "raise RuntimeError()"}]},
+    {
+      "type": "table",
+      "content": [
+        {
+          "type": "tableRow",
+          "content": [
+            {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Key"}]}]},
+            {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Value"}]}]}
+          ]
+        },
+        {
+          "type": "tableRow",
+          "content": [
+            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "mode"}]}]},
+            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "safe"}]}]}
+          ]
+        }
+      ]
+    }
+  ]
+}

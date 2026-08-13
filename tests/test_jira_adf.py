@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
-
-PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-jira"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "jira"
-sys.path.insert(0, str(PLUGIN))
 
-from operations import adf_to_text, extract_gitlab_urls  # noqa: E402
+from jira_test_support import operations
+
+
+adf_to_text = operations.adf_to_text
+extract_gitlab_urls = operations.extract_gitlab_urls
 
 
 def test_rich_adf_preserves_paragraph_link_mention_list_code_and_table():

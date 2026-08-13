@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import base64
-import sys
-from pathlib import Path
 
 import pytest
 
+from jira_test_support import auth, models
 
-PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-jira"
-sys.path.insert(0, str(PLUGIN))
 
-from auth import authentication_from_configuration  # noqa: E402
-from models import JiraError  # noqa: E402
+authentication_from_configuration = auth.authentication_from_configuration
+JiraError = models.JiraError
 
 
 class Configuration:

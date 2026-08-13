@@ -9,8 +9,7 @@ import pytest
 import respx
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/ericsson-jira"))
-import jira_tools  # noqa: E402
+from jira_test_support import jira_tools
 
 REPO = Path(__file__).resolve().parents[1]
 BASE = "https://jira.internal.ericsson.com"
@@ -115,6 +114,17 @@ def test_plugins_do_not_declare_ericsson_toggle():
     for name in ("ericsson-jira", "ericsson-teams"):
         text = (REPO / "plugins" / name / "plugin.yaml").read_text()
         assert "ERICSSON_ENV" not in text
+
+
+def test_jira_source_imports_do_not_occupy_generic_module_names():
+    """Jira and GitLab source tests must coexist in one pytest process."""
+
+    plugin_root = (REPO / "plugins" / "ericsson-jira").resolve()
+    for name in ("auth", "client", "models", "operations", "tools", "transport"):
+        module = sys.modules.get(name)
+        module_file = getattr(module, "__file__", None)
+        if module_file is not None:
+            assert plugin_root not in Path(module_file).resolve().parents
 
 
 def test_plugin_registers_stable_toolset_and_resolves_fresh_configuration(monkeypatch):

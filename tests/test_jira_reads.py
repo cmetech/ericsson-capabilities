@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import sys
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
+from jira_test_support import models, operations, tools
 
-PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-jira"
-sys.path.insert(0, str(PLUGIN))
-
-from models import JiraAuth, JiraError  # noqa: E402
-from operations import JiraOperations  # noqa: E402
-from tools import SCHEMAS  # noqa: E402
+JiraAuth = models.JiraAuth
+JiraError = models.JiraError
+JiraOperations = operations.JiraOperations
+SCHEMAS = tools.SCHEMAS
 
 
 AUTH = JiraAuth(

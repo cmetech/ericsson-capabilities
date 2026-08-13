@@ -3,19 +3,19 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import textwrap
 from pathlib import Path
 
 import httpx
 import pytest
 
+from jira_test_support import models, transport
 
-PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-jira"
-sys.path.insert(0, str(PLUGIN))
-
-from models import JiraAuth, JiraError, TransportResponse  # noqa: E402
-from transport import CurlTransport, NativeTransport  # noqa: E402
+JiraAuth = models.JiraAuth
+JiraError = models.JiraError
+TransportResponse = models.TransportResponse
+CurlTransport = transport.CurlTransport
+NativeTransport = transport.NativeTransport
 
 
 def auth(executable: Path, *, transport="curl") -> JiraAuth:

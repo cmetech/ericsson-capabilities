@@ -1,24 +1,21 @@
 from __future__ import annotations
 
 import json
-import sys
 from collections import deque
-from pathlib import Path
 
 import httpx
 import pytest
 
+from jira_test_support import client, models, transport
 
-PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-jira"
-sys.path.insert(0, str(PLUGIN))
 
-from client import (  # noqa: E402
-    JiraClient,
-    is_cloudflare_1010_response,
-    is_rest_version_unsupported,
-)
-from models import JiraAuth, JiraError, TransportResponse  # noqa: E402
-from transport import NativeTransport  # noqa: E402
+JiraClient = client.JiraClient
+is_cloudflare_1010_response = client.is_cloudflare_1010_response
+is_rest_version_unsupported = client.is_rest_version_unsupported
+JiraAuth = models.JiraAuth
+JiraError = models.JiraError
+TransportResponse = models.TransportResponse
+NativeTransport = transport.NativeTransport
 
 
 def auth(**overrides):

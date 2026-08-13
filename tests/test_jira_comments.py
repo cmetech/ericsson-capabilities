@@ -10,15 +10,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from jira_test_support import client, jira_tools, models, operations
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-jira"
-sys.path.insert(0, str(PLUGIN))
-
-from models import JiraAuth, JiraError  # noqa: E402
-from models import TransportResponse  # noqa: E402
-from client import JiraClient  # noqa: E402
-from operations import JiraOperations  # noqa: E402
-import tools as jira_tools  # noqa: E402
+JiraAuth = models.JiraAuth
+JiraError = models.JiraError
+TransportResponse = models.TransportResponse
+JiraClient = client.JiraClient
+JiraOperations = operations.JiraOperations
 
 
 def auth(version="3"):

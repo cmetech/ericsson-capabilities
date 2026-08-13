@@ -370,17 +370,30 @@ def test_manifest_content():
 
 def test_workflow_package_is_complete_and_digest_bound():
     package = REPO / "capabilities/workflow-packages/ericsson"
-    expected = {
-        "commands/collect-inbox.md", "commands/fetch-tickets.md",
-        "commands/summarize-inbox.md", "commands/summarize-tickets.md",
-        "digests.json", "workflows/inbox-digest.yaml",
-        "workflows/my-tickets-summary.hermes.yaml",
-        "workflows/my-tickets-summary.yaml",
-    }
-    assert {path.relative_to(package).as_posix() for path in package.rglob("*") if path.is_file()} == expected
     digests = json.loads((package / "digests.json").read_text())
-    assert set(digests["packages"]) == {"inbox-digest", "my-tickets-summary"}
+    packaged_workflows = {
+        path.stem: path
+        for path in (package / "workflows").glob("*.yaml")
+        if not path.name.endswith(".hermes.yaml")
+    }
+    assert set(digests["packages"]) == set(packaged_workflows)
     assert all(len(value) == 64 for value in digests["packages"].values())
+
+    manifest = json.loads(MANIFEST.read_text())
+    jira_workflows = {}
+    for relative in manifest["workflows"]:
+        source = REPO / relative
+        document = yaml.safe_load(source.read_text(encoding="utf-8"))
+        if "ericsson-jira" in document.get("requires", []):
+            jira_workflows[source.stem] = source
+
+    assert jira_workflows
+    for name, source in jira_workflows.items():
+        packaged = package / "workflows" / f"{name}.yaml"
+        source_sidecar = source.with_name(f"{name}.hermes.yaml")
+        packaged_sidecar = packaged.with_name(f"{name}.hermes.yaml")
+        assert packaged.read_bytes() == source.read_bytes()
+        assert packaged_sidecar.read_bytes() == source_sidecar.read_bytes()
 
 
 def test_guides_record_frozen_loop24_inventory_and_reviewed_flow_provenance():

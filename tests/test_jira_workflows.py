@@ -18,6 +18,11 @@ WORKFLOWS = {
     "my-tickets-summary": REPO / "workflows" / "my-tickets-summary.yml",
     "jira-single-ticket-showcase": REPO / "workflows" / "jira-single-ticket-showcase.yml",
 }
+PACKAGED_JIRA_WORKFLOWS = {
+    "my-tickets-summary",
+    "jira-single-ticket-showcase",
+    "jira-to-gitlab",
+}
 
 
 def _document(name):
@@ -133,3 +138,40 @@ print(json.dumps(results, sort_keys=True))
     compiled = json.loads(result.stdout)
     assert set(compiled) == set(WORKFLOWS)
     assert all(value["requires"] == ["ericsson-jira"] for value in compiled.values())
+
+
+def test_authenticated_distribution_package_verifies_every_jira_workflow():
+    override = os.environ.get("HERMES_AGENT_DIR")
+    workspace = REPO.parents[2]
+    candidates = [Path(override)] if override else []
+    candidates.extend(
+        [
+            workspace / "hermes-agent/.worktrees/ericsson-jira-connector",
+            workspace / "hermes-agent",
+        ]
+    )
+    hermes = next(
+        path for path in candidates if (path / "hermes_cli/capability_staging.py").is_file()
+    )
+    package = REPO / "capabilities/workflow-packages/ericsson"
+    script = r"""
+import json
+from pathlib import Path
+import sys
+from hermes_cli.capability_staging import _verified_workflow_package
+
+package = Path(sys.argv[1])
+verified = _verified_workflow_package(package, package / "digests.json")
+print(json.dumps(sorted(name for name, _digest, _package, _compilation in verified)))
+"""
+    result = subprocess.run(
+        [str(hermes / ".venv/bin/python"), "-c", script, str(package)],
+        cwd=hermes,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert set(json.loads(result.stdout)) >= PACKAGED_JIRA_WORKFLOWS

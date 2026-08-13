@@ -84,7 +84,9 @@ def _control(*, deadline, cancel_check, clock=time.monotonic):
         raise SharePointDeadlineError("SharePoint audit deadline exceeded")
 
 
-def _safe_site(site: Mapping[str, Any], allowed_hosts: Collection[str]) -> dict[str, str]:
+def _safe_site(
+    site: Mapping[str, Any], allowed_hosts: Collection[str]
+) -> dict[str, str]:
     name = str(site.get("name") or "").strip()
     url = str(site.get("url") or "").strip().rstrip("/")
     try:
@@ -93,10 +95,15 @@ def _safe_site(site: Mapping[str, Any], allowed_hosts: Collection[str]) -> dict[
     except ValueError:
         raise SharePointAuditError("site is outside configured tenant origin") from None
     if (
-        not name or len(name) > 512 or parts.scheme != "https"
+        not name
+        or len(name) > 512
+        or parts.scheme != "https"
         or (parts.hostname or "").lower().rstrip(".") not in allowed_hosts
-        or parts.username is not None or parts.password is not None
-        or port not in {None, 443} or parts.query or parts.fragment
+        or parts.username is not None
+        or parts.password is not None
+        or port not in {None, 443}
+        or parts.query
+        or parts.fragment
     ):
         raise SharePointAuditError("site is outside configured tenant origin")
     return {"name": name, "url": url}
@@ -113,18 +120,57 @@ def _normalized(category: str, raw: Any) -> Any:
     if category == "metadata":
         row = raw if isinstance(raw, Mapping) else {}
         return {
-            "title": _text(row.get("Title")), "description": _text(row.get("Description")),
-            "url": _text(row.get("Url"), 8192), "created": _text(row.get("Created"), 128),
+            "title": _text(row.get("Title")),
+            "description": _text(row.get("Description")),
+            "url": _text(row.get("Url"), 8192),
+            "created": _text(row.get("Created"), 128),
             "modified": _text(row.get("LastItemModifiedDate"), 128),
-            "template": _text(row.get("WebTemplate"), 128), "language": row.get("Language"),
+            "template": _text(row.get("WebTemplate"), 128),
+            "language": row.get("Language"),
         }
     rows = raw if isinstance(raw, list) else []
     projections = {
-        "users": lambda r: {"id": r.get("Id"), "name": _text(r.get("Title")), "login": _text(r.get("LoginName")), "email": _text(r.get("Email")), "site_admin": r.get("IsSiteAdmin") is True, "principal_type": r.get("PrincipalType")},
-        "roles": lambda r: {"principal_id": r.get("principal_id"), "principal_type": r.get("principal_type"), "principal_name": _text(r.get("principal_name")), "principal_login": _text(r.get("principal_login")), "principal_email": _text(r.get("principal_email")), "role": _text(r.get("role")), "group_id": r.get("group_id"), "group_name": _text(r.get("group_name"))},
-        "members": lambda r: {"group_id": r.get("group_id"), "group_name": _text(r.get("group_name")), "member_id": r.get("member_id"), "member_name": _text(r.get("member_name")), "member_email": _text(r.get("member_email")), "member_login": _text(r.get("member_login"))},
-        "lists": lambda r: {"id": _text(r.get("Id")), "title": _text(r.get("Title")), "description": _text(r.get("Description")), "base_type": r.get("BaseType"), "item_count": r.get("ItemCount"), "created": _text(r.get("Created"), 128), "modified": _text(r.get("LastItemModifiedDate"), 128)},
-        "subsites": lambda r: {"title": _text(r.get("Title")), "url": _text(r.get("Url"), 8192), "created": _text(r.get("Created"), 128), "template": _text(r.get("WebTemplate"), 128)},
+        "users": lambda r: {
+            "id": r.get("Id"),
+            "name": _text(r.get("Title")),
+            "login": _text(r.get("LoginName")),
+            "email": _text(r.get("Email")),
+            "site_admin": r.get("IsSiteAdmin") is True,
+            "principal_type": r.get("PrincipalType"),
+        },
+        "roles": lambda r: {
+            "principal_id": r.get("principal_id"),
+            "principal_type": r.get("principal_type"),
+            "principal_name": _text(r.get("principal_name")),
+            "principal_login": _text(r.get("principal_login")),
+            "principal_email": _text(r.get("principal_email")),
+            "role": _text(r.get("role")),
+            "group_id": r.get("group_id"),
+            "group_name": _text(r.get("group_name")),
+        },
+        "members": lambda r: {
+            "group_id": r.get("group_id"),
+            "group_name": _text(r.get("group_name")),
+            "member_id": r.get("member_id"),
+            "member_name": _text(r.get("member_name")),
+            "member_email": _text(r.get("member_email")),
+            "member_login": _text(r.get("member_login")),
+        },
+        "lists": lambda r: {
+            "id": _text(r.get("Id")),
+            "title": _text(r.get("Title")),
+            "description": _text(r.get("Description")),
+            "base_type": r.get("BaseType"),
+            "item_count": r.get("ItemCount"),
+            "created": _text(r.get("Created"), 128),
+            "modified": _text(r.get("LastItemModifiedDate"), 128),
+        },
+        "subsites": lambda r: {
+            "title": _text(r.get("Title")),
+            "url": _text(r.get("Url"), 8192),
+            "created": _text(r.get("Created"), 128),
+            "template": _text(r.get("WebTemplate"), 128),
+        },
     }
     projection = projections[category]
     return [projection(row) for row in rows if isinstance(row, Mapping)]
@@ -149,7 +195,11 @@ async def audit_sites_with_session(
     normalized_sites = [_safe_site(site, allowed) for site in sites]
     wanted = {str(value).strip().casefold() for value in selected if str(value).strip()}
     if wanted:
-        normalized_sites = [site for site in normalized_sites if site["name"].casefold() in wanted or site["url"].casefold() in wanted]
+        normalized_sites = [
+            site
+            for site in normalized_sites
+            if site["name"].casefold() in wanted or site["url"].casefold() in wanted
+        ]
     truncated_reasons = []
     if len(normalized_sites) > max_sites:
         normalized_sites = normalized_sites[:max_sites]
@@ -162,10 +212,17 @@ async def audit_sites_with_session(
     for site in normalized_sites:
         _control(deadline=deadline, cancel_check=cancel_check, clock=clock)
         navigation = session.navigate(site["url"])
-        site_result = {"name": site["name"], "url": site["url"], "status": "complete", "warnings": []}
+        site_result = {
+            "name": site["name"],
+            "url": site["url"],
+            "status": "complete",
+            "warnings": [],
+        }
         if not isinstance(navigation, Mapping) or navigation.get("success") is not True:
             site_result["status"] = "unreachable"
-            site_result["warnings"].append({"category": "navigation", "status": "unreachable"})
+            site_result["warnings"].append(
+                {"category": "navigation", "status": "unreachable"}
+            )
             output.append(site_result)
             overall_partial = True
             continue
@@ -175,9 +232,16 @@ async def audit_sites_with_session(
             _control(deadline=deadline, cancel_check=cancel_check, clock=clock)
             expression = _expression(category, max_pages_per_category, groups)
             evaluated = session.eval(expression)
-            if not isinstance(evaluated, Mapping) or evaluated.get("success") is not True:
-                site_result[category if category != "roles" else "permissions"] = [] if category != "metadata" else {}
-                site_result["warnings"].append({"category": category, "status": "remote_unavailable"})
+            if (
+                not isinstance(evaluated, Mapping)
+                or evaluated.get("success") is not True
+            ):
+                site_result[category if category != "roles" else "permissions"] = (
+                    [] if category != "metadata" else {}
+                )
+                site_result["warnings"].append(
+                    {"category": category, "status": "remote_unavailable"}
+                )
                 site_result["status"] = "partial"
                 overall_partial = True
                 continue
@@ -195,13 +259,17 @@ async def audit_sites_with_session(
                     },
                     allowed,
                 )
-            key = {"roles": "permissions", "members": "group_members"}.get(category, category)
+            key = {"roles": "permissions", "members": "group_members"}.get(
+                category, category
+            )
             if isinstance(normalized, list):
                 available = min(max_rows_per_category, max_total_rows - total_rows)
                 if len(normalized) > available:
-                    normalized = normalized[:max(0, available)]
+                    normalized = normalized[: max(0, available)]
                     reason = f"{category} row limit reached"
-                    site_result["warnings"].append({"category": category, "status": "truncated"})
+                    site_result["warnings"].append(
+                        {"category": category, "status": "truncated"}
+                    )
                     if reason not in truncated_reasons:
                         truncated_reasons.append(reason)
                     site_result["status"] = "truncated"
@@ -222,10 +290,16 @@ async def audit_sites_with_session(
                         truncated_reasons.append(reason)
                     site_result["status"] = "truncated"
                     overall_truncated = True
-            encoded = len(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode())
+            encoded = len(
+                json.dumps(
+                    normalized, ensure_ascii=False, separators=(",", ":")
+                ).encode()
+            )
             if total_bytes + encoded > max_total_bytes:
                 normalized = [] if isinstance(normalized, list) else {}
-                site_result["warnings"].append({"category": category, "status": "truncated"})
+                site_result["warnings"].append(
+                    {"category": category, "status": "truncated"}
+                )
                 if "aggregate byte limit reached" not in truncated_reasons:
                     truncated_reasons.append("aggregate byte limit reached")
                 site_result["status"] = "truncated"
@@ -234,5 +308,18 @@ async def audit_sites_with_session(
                 total_bytes += encoded
             site_result[key] = normalized
         output.append(site_result)
-    status = "truncated" if overall_truncated else "partial" if overall_partial else "complete"
-    return {"status": status, "sites": output, "warnings": [], "truncated": overall_truncated, "truncation_reasons": truncated_reasons, "counts": {"sites": len(output), "rows": total_rows, "bytes": total_bytes}}
+    status = (
+        "truncated"
+        if overall_truncated
+        else "partial"
+        if overall_partial
+        else "complete"
+    )
+    return {
+        "status": status,
+        "sites": output,
+        "warnings": [],
+        "truncated": overall_truncated,
+        "truncation_reasons": truncated_reasons,
+        "counts": {"sites": len(output), "rows": total_rows, "bytes": total_bytes},
+    }

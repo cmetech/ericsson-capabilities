@@ -9,7 +9,27 @@ from .models import (
     SharePointConfigurationError,
     SharePointFileBoundaryError,
     SharePointResolutionError,
+    SharePointWriteError,
 )
+
+
+_WRITE_TOOLS = frozenset(
+    {
+        "sharepoint_upload",
+        "sharepoint_create_folder",
+        "sharepoint_move_item",
+        "sharepoint_copy_item",
+        "sharepoint_recycle_item",
+    }
+)
+
+
+def _has_write_admission(admission, tool_name: str) -> bool:
+    return bool(
+        getattr(admission, "approved", None) is True
+        and getattr(admission, "policy", None) == "plugin_approve"
+        and getattr(admission, "tool_name", None) == tool_name
+    )
 
 
 def _json(value) -> str:
@@ -25,6 +45,17 @@ def register(ctx) -> None:
     ctx.register_setup_action("enroll_browser", auth.enroll_browser)
     ctx.register_setup_action("clear_session", auth.clear_session)
 
+    def require_write_approval(tool_name, _arguments, **_kwargs):
+        if tool_name not in _WRITE_TOOLS:
+            return None
+        return {
+            "action": "approve",
+            "message": "Approve Ericsson SharePoint mutation",
+            "rule_key": tool_name,
+        }
+
+    ctx.register_hook("pre_tool_call", require_write_approval)
+
     def available() -> bool:
         try:
             return auth.graph_ready(ctx.configuration())
@@ -33,13 +64,27 @@ def register(ctx) -> None:
 
     def handler(name):
         async def invoke(arguments: dict, **_kwargs) -> str:
+            if name in _WRITE_TOOLS and not _has_write_admission(
+                _kwargs.get("tool_admission"), name
+            ):
+                return _json(
+                    {
+                        "success": False,
+                        "error": {
+                            "category": "approval_required",
+                            "message": "SharePoint mutation requires approval.",
+                        },
+                    }
+                )
             try:
                 configuration = ctx.configuration()
                 try:
                     from tools.interrupt import is_interrupted
                 except ImportError:
+
                     def is_interrupted():
                         return False
+
                 result = await tools.invoke(
                     name,
                     arguments or {},
@@ -53,6 +98,8 @@ def register(ctx) -> None:
                 category = "configuration_required"
             except SharePointFileBoundaryError:
                 category = "permission_denied"
+            except SharePointWriteError:
+                category = "invalid_input"
             except (SharePointResolutionError, ValueError, TypeError, KeyError):
                 category = "invalid_input"
             except Exception:
@@ -75,7 +122,9 @@ def register(ctx) -> None:
             toolset="ericsson-sharepoint",
             schema=schema,
             handler=handler(name),
-            check_fn=(lambda: operations.audit_ready(ctx.configuration())) if name == "sharepoint_audit_permissions" else available,
+            check_fn=(lambda: operations.audit_ready(ctx.configuration()))
+            if name == "sharepoint_audit_permissions"
+            else available,
             is_async=True,
             emoji="📁",
         )

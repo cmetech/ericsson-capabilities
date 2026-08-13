@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .auth import build_identity_config
 from .client import SharePointClient
@@ -23,6 +23,7 @@ from .models import (
     SharePointDeadlineError,
     SharePointFileBoundaryError,
     SharePointResolutionError,
+    SharePointWriteError,
 )
 from . import audit as sharepoint_audit
 
@@ -52,11 +53,17 @@ class OneOperationFileAuthorization:
                     "unattended operations cannot expand the configured file boundary"
                 )
             if self._consumed:
-                raise SharePointFileBoundaryError("file authorization was already consumed")
+                raise SharePointFileBoundaryError(
+                    "file authorization was already consumed"
+                )
             if not self.interactive or self.tool_name != tool_name:
-                raise SharePointFileBoundaryError("file authorization is not valid for this operation")
+                raise SharePointFileBoundaryError(
+                    "file authorization is not valid for this operation"
+                )
             if not _is_within(destination, self.root):
-                raise SharePointFileBoundaryError("destination is outside the authorized root")
+                raise SharePointFileBoundaryError(
+                    "destination is outside the authorized root"
+                )
             self._consumed = True
             return self.root
 
@@ -96,11 +103,15 @@ def _safe_remote_web_url(value: Any, tenant_hosts) -> str:
         or parts.password is not None
         or port not in {None, 443}
     ):
-        raise SharePointResolutionError("Graph result escaped configured tenant authority")
+        raise SharePointResolutionError(
+            "Graph result escaped configured tenant authority"
+        )
     return text
 
 
-def _list_row(raw: Any, *, drive_id: str, parent_path: str, tenant_hosts) -> dict[str, Any]:
+def _list_row(
+    raw: Any, *, drive_id: str, parent_path: str, tenant_hosts
+) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise SharePointResolutionError("Graph returned invalid DriveItem metadata")
     item_id = _bounded_text(raw.get("id"), "item id", 1024)
@@ -109,7 +120,13 @@ def _list_row(raw: Any, *, drive_id: str, parent_path: str, tenant_hosts) -> dic
         raise SharePointResolutionError("Graph returned invalid DriveItem identity")
     folder = raw.get("folder")
     file_facet = raw.get("file")
-    kind = "folder" if isinstance(folder, Mapping) else "file" if isinstance(file_facet, Mapping) else "unknown"
+    kind = (
+        "folder"
+        if isinstance(folder, Mapping)
+        else "file"
+        if isinstance(file_facet, Mapping)
+        else "unknown"
+    )
     size = raw.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or size < 0:
         size = 0
@@ -127,7 +144,9 @@ def _list_row(raw: Any, *, drive_id: str, parent_path: str, tenant_hosts) -> dic
             512,
         ),
         "web_url": _safe_remote_web_url(raw.get("webUrl"), tenant_hosts),
-        "modified": _bounded_text(raw.get("lastModifiedDateTime"), "modified time", 128),
+        "modified": _bounded_text(
+            raw.get("lastModifiedDateTime"), "modified time", 128
+        ),
     }
 
 
@@ -172,8 +191,10 @@ async def list_items_with_client(
         for extension in extensions
         if str(extension).strip().lstrip(".")
     )
-    if len(patterns) > 64 or len(suffixes) > 64 or any(
-        len(value) > 256 for value in (*patterns, *suffixes)
+    if (
+        len(patterns) > 64
+        or len(suffixes) > 64
+        or any(len(value) > 256 for value in (*patterns, *suffixes))
     ):
         raise SharePointResolutionError("listing filters exceed supported bounds")
     queue: list[tuple[str, str, int]] = [(root_id, "", 0)]
@@ -231,9 +252,7 @@ async def list_items_with_client(
                     include = any(
                         fnmatch.fnmatchcase(
                             (
-                                row["relative_path"]
-                                if "/" in pattern
-                                else row["name"]
+                                row["relative_path"] if "/" in pattern else row["name"]
                             ).casefold(),
                             pattern,
                         )
@@ -247,7 +266,9 @@ async def list_items_with_client(
                     )
                 if include:
                     encoded_size = len(
-                        json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        json.dumps(
+                            row, ensure_ascii=False, separators=(",", ":")
+                        ).encode("utf-8")
                     )
                     if metadata_bytes + encoded_size > byte_limit:
                         warn("metadata byte limit reached")
@@ -287,7 +308,9 @@ async def list_items_with_client(
 
 def _safe_filename(value: str, fallback: str) -> str:
     normalized = "".join(
-        "_" if character in _INVALID_FILENAME_CHARACTERS or ord(character) < 32 else character
+        "_"
+        if character in _INVALID_FILENAME_CHARACTERS or ord(character) < 32
+        else character
         for character in str(value or "")
     ).strip(" .")
     if normalized in {"", ".", ".."}:
@@ -355,7 +378,9 @@ def _download_target(
     if _is_within(target, configured_root):
         return target, configured_root, "configured_download_root"
     if file_authorization is None:
-        raise SharePointFileBoundaryError("destination is outside the configured download root")
+        raise SharePointFileBoundaryError(
+            "destination is outside the configured download root"
+        )
     external_root = file_authorization.consume(
         tool_name="sharepoint_download", destination=target, unattended=unattended
     )
@@ -418,7 +443,9 @@ async def download_with_client(
         )
         info = temporary.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_size > effective_max:
-            raise SharePointFileBoundaryError("download did not produce a bounded regular file")
+            raise SharePointFileBoundaryError(
+                "download did not produce a bounded regular file"
+            )
         digest = hashlib.sha256()
         size = 0
         with temporary.open("rb") as handle:
@@ -430,7 +457,9 @@ async def download_with_client(
         try:
             os.link(temporary, target, follow_symlinks=False)
         except FileExistsError:
-            raise SharePointFileBoundaryError("download destination already exists") from None
+            raise SharePointFileBoundaryError(
+                "download destination already exists"
+            ) from None
         try:
             target.chmod(0o600)
         except OSError:
@@ -507,7 +536,8 @@ async def list_items(
         max_items=min(config.max_items, int(max_items or config.max_items)),
         max_depth=max_depth,
         max_metadata_bytes=min(
-            config.max_bytes, int(max_metadata_bytes or min(config.max_bytes, 1024 * 1024))
+            config.max_bytes,
+            int(max_metadata_bytes or min(config.max_bytes, 1024 * 1024)),
         ),
         name_patterns=name_patterns,
         extensions=extensions,
@@ -578,19 +608,40 @@ async def list_owned_sites_with_graph(
             if len(sites) >= max_sites:
                 reasons.append("site limit reached")
                 break
-            group_id = _bounded_text(group.get("id") if isinstance(group, Mapping) else "", "group id", 1024)
+            group_id = _bounded_text(
+                group.get("id") if isinstance(group, Mapping) else "", "group id", 1024
+            )
             if not group_id:
                 continue
             try:
-                raw = await graph.get_json(f"/groups/{group_id}/sites/root", params={"$select": "id,displayName,webUrl,description,createdDateTime"})
+                raw = await graph.get_json(
+                    f"/groups/{group_id}/sites/root",
+                    params={
+                        "$select": "id,displayName,webUrl,description,createdDateTime"
+                    },
+                )
                 if not isinstance(raw, Mapping):
                     raise ValueError
                 web_url = _safe_remote_web_url(raw.get("webUrl"), tenant_hosts)
-                row = {"id": _bounded_text(raw.get("id"), "site id", 1024), "name": _bounded_text(raw.get("displayName"), "site name"), "url": web_url, "description": _bounded_text(raw.get("description"), "description"), "created": _bounded_text(raw.get("createdDateTime"), "created", 128), "group_id": group_id, "group_name": _bounded_text(group.get("displayName"), "group name")}
+                row = {
+                    "id": _bounded_text(raw.get("id"), "site id", 1024),
+                    "name": _bounded_text(raw.get("displayName"), "site name"),
+                    "url": web_url,
+                    "description": _bounded_text(raw.get("description"), "description"),
+                    "created": _bounded_text(
+                        raw.get("createdDateTime"), "created", 128
+                    ),
+                    "group_id": group_id,
+                    "group_name": _bounded_text(group.get("displayName"), "group name"),
+                }
             except Exception:
-                warnings.append({"group_id": group_id, "category": "remote_unavailable"})
+                warnings.append(
+                    {"group_id": group_id, "category": "remote_unavailable"}
+                )
                 continue
-            size = len(json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode())
+            size = len(
+                json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode()
+            )
             if metadata_bytes + size > max_metadata_bytes:
                 reasons.append("metadata byte limit reached")
                 break
@@ -598,7 +649,18 @@ async def list_owned_sites_with_graph(
             metadata_bytes += size
         if reasons:
             break
-    return {"status": "partial" if warnings else "truncated" if reasons else "complete", "sites": sites, "warnings": warnings, "truncated": bool(reasons), "truncation_reasons": list(dict.fromkeys(reasons)), "counts": {"sites": len(sites), "pages": pages, "metadata_bytes": metadata_bytes}}
+    return {
+        "status": "partial" if warnings else "truncated" if reasons else "complete",
+        "sites": sites,
+        "warnings": warnings,
+        "truncated": bool(reasons),
+        "truncation_reasons": list(dict.fromkeys(reasons)),
+        "counts": {
+            "sites": len(sites),
+            "pages": pages,
+            "metadata_bytes": metadata_bytes,
+        },
+    }
 
 
 async def audit_permissions_with_browser(
@@ -615,16 +677,42 @@ async def audit_permissions_with_browser(
     if browser_profiles is None or browser_manager is None:
         from tools import browser_profiles as core_profiles
         from tools import browser_session_manager as core_manager
+
         browser_profiles = browser_profiles or core_profiles
         browser_manager = browser_manager or core_manager
     profile = browser_profiles.get_profile(config.browser_profile)
-    if profile is None or not profile.is_enrolled or not browser_profiles.is_origin_trusted(profile, config.tenant_origin):
-        raise SharePointAuditError("named browser profile must be enrolled and trusted for tenant origin")
-    session = browser_manager.acquire(profile=config.browser_profile, headless=True, session_key=f"ericsson-sharepoint::{config.browser_profile}::audit", attach_global=False)
+    if (
+        profile is None
+        or not profile.is_enrolled
+        or not browser_profiles.is_origin_trusted(profile, config.tenant_origin)
+    ):
+        raise SharePointAuditError(
+            "named browser profile must be enrolled and trusted for tenant origin"
+        )
+    session = browser_manager.acquire(
+        profile=config.browser_profile,
+        headless=True,
+        session_key=f"ericsson-sharepoint::{config.browser_profile}::audit",
+        attach_global=False,
+    )
     try:
-        defaults = {"max_sites": min(config.max_items, 25), "max_pages_per_category": min(config.max_pages, 25), "max_rows_per_category": min(config.max_items, 1000), "max_total_rows": config.max_items, "max_total_bytes": config.max_bytes, "deadline": time.monotonic() + config.timeout_seconds, "cancel_check": cancel_check}
+        defaults = {
+            "max_sites": min(config.max_items, 25),
+            "max_pages_per_category": min(config.max_pages, 25),
+            "max_rows_per_category": min(config.max_items, 1000),
+            "max_total_rows": config.max_items,
+            "max_total_bytes": config.max_bytes,
+            "deadline": time.monotonic() + config.timeout_seconds,
+            "cancel_check": cancel_check,
+        }
         defaults.update(limits)
-        return await audit_runner(session, sites=sites, selected=selected, allowed_hosts={config.tenant_host}, **defaults)
+        return await audit_runner(
+            session,
+            sites=sites,
+            selected=selected,
+            allowed_hosts={config.tenant_host},
+            **defaults,
+        )
     finally:
         session.release()
 
@@ -633,13 +721,25 @@ def audit_ready(configuration) -> bool:
     try:
         config = SharePointConfiguration.from_runtime(configuration)
         from tools import browser_profiles
+
         profile = browser_profiles.get_profile(config.browser_profile)
-        return bool(profile and profile.is_enrolled and browser_profiles.is_origin_trusted(profile, config.tenant_origin))
+        return bool(
+            profile
+            and profile.is_enrolled
+            and browser_profiles.is_origin_trusted(profile, config.tenant_origin)
+        )
     except Exception:
         return False
 
 
-async def list_owned_sites(configuration, *, max_pages=None, max_sites=None, max_metadata_bytes=None, cancel_check=None):
+async def list_owned_sites(
+    configuration,
+    *,
+    max_pages=None,
+    max_sites=None,
+    max_metadata_bytes=None,
+    cancel_check=None,
+):
     config = SharePointConfiguration.from_runtime(configuration)
     client = client_from_configuration(configuration)
     return await list_owned_sites_with_graph(
@@ -647,14 +747,262 @@ async def list_owned_sites(configuration, *, max_pages=None, max_sites=None, max
         tenant_hosts={config.tenant_host},
         max_pages=min(config.max_pages, int(max_pages or config.max_pages)),
         max_sites=min(config.max_items, int(max_sites or min(config.max_items, 100))),
-        max_metadata_bytes=min(config.max_bytes, int(max_metadata_bytes or min(config.max_bytes, 1024 * 1024))),
+        max_metadata_bytes=min(
+            config.max_bytes,
+            int(max_metadata_bytes or min(config.max_bytes, 1024 * 1024)),
+        ),
         deadline=time.monotonic() + config.timeout_seconds,
         cancel_check=cancel_check,
     )
 
 
-async def audit_permissions(configuration, *, sites, selected, cancel_check=None, **limits):
+async def audit_permissions(
+    configuration, *, sites, selected, cancel_check=None, **limits
+):
     config = SharePointConfiguration.from_runtime(configuration)
     return await audit_permissions_with_browser(
         config, sites=sites, selected=selected, cancel_check=cancel_check, **limits
     )
+
+
+def _write_headers(etag: str | None) -> dict[str, str] | None:
+    if etag is None:
+        return None
+    value = str(etag).strip()
+    if not value or len(value) > 1024 or "\r" in value or "\n" in value:
+        raise SharePointWriteError("ETag is invalid")
+    return {"If-Match": value}
+
+
+def _write_name(value: Any, label="name") -> str:
+    name = str(value or "").strip()
+    if (
+        not name
+        or len(name) > 255
+        or name in {".", ".."}
+        or any(c in name for c in "/\\\x00")
+    ):
+        raise SharePointWriteError(f"{label} is invalid")
+    return name
+
+
+async def create_folder_with_client(
+    client, *, parent_url, name, exist_ok=False, etag=None
+):
+    parent = await client.get_item(url=parent_url)
+    if parent["item"].get("kind") != "folder":
+        raise SharePointWriteError("destination must be a folder")
+    safe_name = _write_name(name, "folder name")
+    raw = await client.graph.post_json(
+        f"/drives/{parent['drive']['id']}/items/{parent['item']['id']}/children",
+        json_body={
+            "name": safe_name,
+            "folder": {},
+            "@microsoft.graph.conflictBehavior": "replace" if exist_ok else "fail",
+        },
+        headers=_write_headers(etag),
+    )
+    return {
+        "id": _bounded_text(raw.get("id"), "item id", 1024),
+        "name": _bounded_text(raw.get("name"), "item name", 1024),
+        "kind": "folder",
+    }
+
+
+async def move_item_with_client(
+    client, *, source_url, destination_url=None, name=None, etag=None
+):
+    source = await client.get_item(url=source_url)
+    if source["item"].get("kind") == "folder" and not source["item"].get("id"):
+        raise SharePointWriteError("source root cannot be moved")
+    body = {}
+    if name is not None:
+        body["name"] = _write_name(name)
+    if destination_url is not None:
+        destination = await client.get_item(url=destination_url)
+        if source["tenant_host"] != destination["tenant_host"]:
+            raise SharePointWriteError("source and destination tenants differ")
+        if destination["item"].get("kind") != "folder":
+            raise SharePointWriteError("destination must be a folder")
+        body["parentReference"] = {
+            "driveId": destination["drive"]["id"],
+            "id": destination["item"]["id"],
+        }
+    if not body:
+        raise SharePointWriteError("move requires a new name or destination")
+    return await client.graph.patch_json(
+        f"/drives/{source['drive']['id']}/items/{source['item']['id']}",
+        json_body=body,
+        headers=_write_headers(etag),
+    )
+
+
+async def copy_item_with_client(
+    client,
+    *,
+    source_url,
+    destination_url,
+    name=None,
+    max_polls=30,
+    deadline=None,
+    cancel_check=None,
+):
+    source = await client.get_item(url=source_url)
+    destination = await client.get_item(url=destination_url)
+    if source["tenant_host"] != destination["tenant_host"]:
+        raise SharePointWriteError("source and destination tenants differ")
+    if destination["item"].get("kind") != "folder":
+        raise SharePointWriteError("destination must be a folder")
+    body = {
+        "parentReference": {
+            "driveId": destination["drive"]["id"],
+            "id": destination["item"]["id"],
+        }
+    }
+    if name is not None:
+        body["name"] = _write_name(name)
+    return await client.graph.start_async_operation(
+        f"/drives/{source['drive']['id']}/items/{source['item']['id']}/copy",
+        json_body=body,
+        max_polls=max_polls,
+        deadline=deadline,
+        cancel_check=cancel_check,
+    )
+
+
+async def recycle_item_with_client(client, *, url, etag=None):
+    source = await client.get_item(url=url)
+    if source["item"].get("id") in {"", None}:
+        raise SharePointWriteError("library root cannot be recycled")
+    await client.graph.delete(
+        f"/drives/{source['drive']['id']}/items/{source['item']['id']}",
+        headers=_write_headers(etag),
+    )
+    return {
+        "recycled": True,
+        "item_id": source["item"]["id"],
+        "drive_id": source["drive"]["id"],
+    }
+
+
+def _upload_source(config: SharePointConfiguration, source: Path | str) -> Path:
+    root = config.upload_root
+    _reject_symlink_components(root)
+    candidate = Path(source).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    _reject_symlink_components(candidate)
+    resolved = candidate.resolve(strict=False)
+    if not _is_within(resolved, root.resolve(strict=False)):
+        raise SharePointFileBoundaryError(
+            "upload source is outside configured upload root"
+        )
+    try:
+        info = candidate.lstat()
+    except OSError:
+        raise SharePointFileBoundaryError("upload source is unavailable") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise SharePointFileBoundaryError(
+            "upload source must be a regular non-symlink file"
+        )
+    return candidate
+
+
+async def upload_with_client(
+    client,
+    config,
+    *,
+    folder_url,
+    source,
+    name=None,
+    conflict_behavior="fail",
+    chunk_size=10 * 1024 * 1024,
+    max_chunks=10000,
+    deadline=None,
+    cancel_check=None,
+):
+    _control(deadline=deadline, cancel_check=cancel_check)
+    if conflict_behavior not in {"fail", "replace", "rename"}:
+        raise SharePointWriteError("upload conflict behavior is invalid")
+    local = _upload_source(config, source)
+    size = local.stat().st_size
+    if size > config.max_bytes:
+        raise SharePointFileBoundaryError("upload source exceeds configured byte limit")
+    destination = await client.get_item(url=folder_url)
+    if destination["item"].get("kind") != "folder":
+        raise SharePointWriteError("upload destination must be a folder")
+    remote_name = _write_name(name or local.name)
+    encoded = quote(remote_name, safe="")
+    base = f"/drives/{destination['drive']['id']}/items/{destination['item']['id']}:/{encoded}:"
+    if size <= 4 * 1024 * 1024:
+        raw = await client.graph.upload_small(
+            f"{base}/content?@microsoft.graph.conflictBehavior={conflict_behavior}",
+            local.read_bytes(),
+            max_bytes=4 * 1024 * 1024,
+        )
+    else:
+        raw = await client.graph.upload_via_session(
+            f"{base}/createUploadSession",
+            local,
+            max_bytes=config.max_bytes,
+            chunk_size=chunk_size,
+            max_chunks=max_chunks,
+            conflict_behavior=conflict_behavior,
+            deadline=deadline,
+            cancel_check=cancel_check,
+        )
+    return {
+        "id": _bounded_text(raw.get("id"), "item id", 1024),
+        "name": _bounded_text(raw.get("name"), "item name", 1024),
+        "size": raw.get("size", size),
+    }
+
+
+async def write_operation(name, configuration, arguments, *, cancel_check=None):
+    config = SharePointConfiguration.from_runtime(configuration)
+    client = client_from_configuration(configuration)
+    deadline = time.monotonic() + config.timeout_seconds
+    if name == "sharepoint_upload":
+        return await upload_with_client(
+            client,
+            config,
+            folder_url=arguments.get("folder_url"),
+            source=arguments.get("source"),
+            name=arguments.get("name"),
+            conflict_behavior=arguments.get("conflict_behavior", "fail"),
+            chunk_size=int(arguments.get("chunk_size", 10 * 1024 * 1024)),
+            max_chunks=int(arguments.get("max_chunks", 10000)),
+            deadline=deadline,
+            cancel_check=cancel_check,
+        )
+    if name == "sharepoint_create_folder":
+        return await create_folder_with_client(
+            client,
+            parent_url=arguments.get("parent_url"),
+            name=arguments.get("name"),
+            exist_ok=arguments.get("exist_ok") is True,
+            etag=arguments.get("etag"),
+        )
+    if name == "sharepoint_move_item":
+        return await move_item_with_client(
+            client,
+            source_url=arguments.get("source_url"),
+            destination_url=arguments.get("destination_url"),
+            name=arguments.get("name"),
+            etag=arguments.get("etag"),
+        )
+    if name == "sharepoint_copy_item":
+        return await copy_item_with_client(
+            client,
+            source_url=arguments.get("source_url"),
+            destination_url=arguments.get("destination_url"),
+            name=arguments.get("name"),
+            max_polls=int(arguments.get("max_polls", 30)),
+            deadline=deadline,
+            cancel_check=cancel_check,
+        )
+    if name == "sharepoint_recycle_item":
+        return await recycle_item_with_client(
+            client, url=arguments.get("url"), etag=arguments.get("etag")
+        )
+    raise SharePointWriteError("unknown write operation")

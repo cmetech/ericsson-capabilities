@@ -11,3 +11,10 @@ provides_tools:
   - sharepoint_download
   - sharepoint_list_owned_sites
   - sharepoint_audit_permissions
+  - sharepoint_upload
+  - sharepoint_create_folder
+  - sharepoint_move_item
+  - sharepoint_copy_item
+  - sharepoint_recycle_item
+provides_hooks:
+  - pre_tool_call

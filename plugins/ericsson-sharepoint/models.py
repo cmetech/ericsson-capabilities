@@ -244,3 +244,7 @@ class SharePointFileBoundaryError(RuntimeError):
 
 class SharePointAuditError(RuntimeError):
     """Raised when a browser-backed audit cannot preserve its authority contract."""
+
+
+class SharePointWriteError(RuntimeError):
+    """Raised when a SharePoint mutation request is invalid or unsafe."""

@@ -802,6 +802,7 @@ async def create_folder_with_client(
             "@microsoft.graph.conflictBehavior": "replace" if exist_ok else "fail",
         },
         headers=_write_headers(etag),
+        retry_ambiguous=False,
     )
     return {
         "id": _bounded_text(raw.get("id"), "item id", 1024),
@@ -835,6 +836,7 @@ async def move_item_with_client(
         f"/drives/{source['drive']['id']}/items/{source['item']['id']}",
         json_body=body,
         headers=_write_headers(etag),
+        retry_ambiguous=False,
     )
 
 
@@ -878,6 +880,7 @@ async def recycle_item_with_client(client, *, url, etag=None):
     await client.graph.delete(
         f"/drives/{source['drive']['id']}/items/{source['item']['id']}",
         headers=_write_headers(etag),
+        retry_ambiguous=False,
     )
     return {
         "recycled": True,

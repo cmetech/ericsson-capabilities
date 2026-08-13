@@ -38,16 +38,20 @@ class Graph:
     def __init__(self):
         self.calls = []
 
-    async def post_json(self, path, *, json_body=None, headers=None):
-        self.calls.append(("post", path, json_body, headers))
+    async def post_json(
+        self, path, *, json_body=None, headers=None, retry_ambiguous=True
+    ):
+        self.calls.append(("post", path, json_body, headers, retry_ambiguous))
         return {"id": "created", "name": json_body.get("name", "")}
 
-    async def patch_json(self, path, *, json_body=None, headers=None):
-        self.calls.append(("patch", path, json_body, headers))
+    async def patch_json(
+        self, path, *, json_body=None, headers=None, retry_ambiguous=True
+    ):
+        self.calls.append(("patch", path, json_body, headers, retry_ambiguous))
         return {"id": "source", "name": json_body.get("name", "Moved")}
 
-    async def delete(self, path, *, headers=None):
-        self.calls.append(("delete", path, headers))
+    async def delete(self, path, *, headers=None, retry_ambiguous=True):
+        self.calls.append(("delete", path, headers, retry_ambiguous))
         return {"deleted": True, "status_code": 204}
 
     async def start_async_operation(
@@ -107,6 +111,7 @@ async def test_w04_create_folder_conflict_policy_and_optimistic_header():
                 "@microsoft.graph.conflictBehavior": "replace",
             },
             {"If-Match": '"etag"'},
+            False,
         )
     ]
 
@@ -132,6 +137,7 @@ async def test_w05_move_requires_same_tenant_and_validates_cross_drive_parent():
             "parentReference": {"driveId": "other-drive", "id": "dest"},
         },
         {"If-Match": '"etag"'},
+        False,
     )
     bad = Client()
 
@@ -184,7 +190,7 @@ async def test_w07_recycle_uses_driveitem_delete_not_permanent_delete():
     )
     assert result == {"recycled": True, "item_id": "source", "drive_id": "drive"}
     assert graph.calls == [
-        ("delete", "/drives/drive/items/source", {"If-Match": '"etag"'})
+        ("delete", "/drives/drive/items/source", {"If-Match": '"etag"'}, False)
     ]
     assert "permanent" not in repr(result).lower()
 

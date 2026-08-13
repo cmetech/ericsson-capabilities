@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from . import operations
 
 
+_COMMON_URL = {"type": "string", "minLength": 1, "maxLength": 8192}
 SCHEMAS = {
     "sharepoint_resolve_url": {
         "name": "sharepoint_resolve_url",
@@ -153,11 +154,6 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
-}
-
-_COMMON_URL = {"type": "string", "minLength": 1, "maxLength": 8192}
-SCHEMAS.update(
-    {
         "sharepoint_upload": {
             "name": "sharepoint_upload",
             "description": "Upload an authorized local file to a SharePoint folder.",
@@ -236,8 +232,7 @@ SCHEMAS.update(
                 "additionalProperties": False,
             },
         },
-    }
-)
+}
 
 
 async def invoke(

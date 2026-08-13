@@ -3,7 +3,7 @@ source_flow: flows/jira_gitlab/Jira_Defect_Loop.json
 source_commit: 3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e
 source_sha256: dfa08945d8f0ee215f772feb5098c7196fc5cc1d9b4ef313a19770f8376939de
 status: partially-ported
-target_artifacts: [ericsson-gitlab-plugin, jira-defect-loop-workflow]
+target_artifacts: [ericsson-jira-plugin, ericsson-gitlab-plugin, phase6-loop-group]
 supporting_capabilities: [jira, gitlab, outlook, hermes-agent]
 platforms: [macos, linux, windows]
 ---
@@ -30,7 +30,7 @@ Inputs cover Jira/GitLab auth, triage policy, file/branch limits, approval polic
 
 ## Supporting capabilities and configuration
 
-Jira and Outlook foundations exist; GitLab tools do not. See [configuration](../configuration.md). A future batch run should authenticate once but keep authorization and artifact state scoped per ticket.
+Jira and GitLab connector foundations and one-ticket workflows exist. See [configuration](../configuration.md). A future batch run should authenticate once but keep authorization and artifact state scoped per ticket.
 
 ## Failure, safety, and privacy behavior
 
@@ -38,8 +38,8 @@ Batching magnifies risk. Default to review-required rather than autonomous write
 
 ## Hermes port status and target shape
 
-Partially ported through Jira tools and the workflow orchestrator, but workflow schema v1 explicitly deferred loop support. The port needs GitLab tools and either safe loop semantics added to the workflow engine or a controller pattern that starts one child run per ticket. Prefer building the single-ticket Jira-to-GitLab path first and composing it only after its approvals/idempotency are proven.
+Partially ported through Jira/GitLab tools, triage guidance, the Jira-to-GitLab workflow, and the explicitly single-ticket showcase. Exact multi-ticket parity is deliberately deferred to Phase 6 `loop_group`: no Release 2 artifact loops over assigned issues, aggregates per-ticket side effects, or claims safe batch reruns. The future composition must preserve per-ticket approvals, idempotency, uncertainty, and terminal status before aggregation.
 
 ## How Hermes should explain and configure it
 
-Ask how many tickets may be processed, which classifications are eligible, whether skipped-ticket comments are allowed, where approval occurs, and how the final summary is delivered. Make the write count explicit. Until implemented, offer ticket summarization or one manually supervised fix at a time.
+Do not collect or authorize a batch. Explain the Phase 6 `loop_group` deferral and offer assigned-ticket summarization, bounded search, or exactly one manually supervised ticket through the current showcase/Jira-to-GitLab flow.

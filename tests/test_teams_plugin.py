@@ -9,6 +9,11 @@ import respx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/ericsson-teams"))
 import graph_auth  # noqa: E402
+
+
+def test_posix_only_ownership_guards_remain_explicitly_annotated():
+    source = (Path(__file__).resolve().parents[1] / "plugins/ericsson-teams/graph_auth.py").read_text()
+    assert source.count("windows-footgun: ok — POSIX-only path") == 4
 import teams_tools  # noqa: E402
 
 GRAPH = "https://graph.microsoft.com/v1.0"

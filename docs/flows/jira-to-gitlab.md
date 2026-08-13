@@ -2,8 +2,8 @@
 source_flow: flows/jira_gitlab/Jira -_ Gitlab.json
 source_commit: 3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e
 source_sha256: cf68ba438816621d3d2e30b2bff00a872060928ac60c9824e2f05f998f4c3815
-status: partially-ported
-target_artifacts: [ericsson-gitlab-plugin, jira-to-gitlab-workflow]
+status: intent-ported
+target_artifacts: [ericsson-gitlab, jira-to-gitlab]
 supporting_capabilities: [jira, gitlab, hermes-agent]
 platforms: [macos, linux, windows]
 ---
@@ -33,7 +33,7 @@ Inputs include Jira/GitLab auth, ticket key, branch prefix, file extension allow
 
 ## Supporting capabilities and configuration
 
-Jira read/comment tools exist. GitLab project/read/write/review tools do not. See [Jira](../configuration.md#jira) and [planned GitLab configuration](../configuration.md#gitlab-planned-hermes-capability).
+Standalone Jira read/search/comment tools and bounded GitLab project/read/write tools now exist. Both connectors remain disabled until explicitly enabled and configured per profile. See [Jira](../configuration.md#jira) and [GitLab configuration](../configuration.md#gitlab).
 
 ## Failure, safety, and privacy behavior
 
@@ -41,8 +41,8 @@ This is high-consequence automation. Require explicit approval before the first 
 
 ## Hermes port status and target shape
 
-Partially ported: Jira list/detail/comment and the workflow state machine exist. Missing are GitLab tools, a schema-validated fix contract, approvals, the end-to-end workflow, and tests. LLM context building/review should be prompt nodes; GitLab API operations should be reusable plugin tools.
+Intent ported: the source now supplies Jira reads/comments, nine bounded GitLab tools, active-agent guidance, condition-gated visible approvals, and a packaged flat workflow. The sibling `jira-to-gitlab.hermes.yaml` declares the `archon-2026-07` language profile, bounded required workflow arguments, outward action nodes, and the existing approval-required write policy. The workflow passes the ticket input through `$ARGUMENTS` and passes only typed direct-predecessor outputs into each fresh node. Each output is discriminated: success requires its canonical identities, while `not_found`, `permission`, `incomplete`, `failed`, `skipped`, and `zero_ticket` preserve nullable facts, bounded warnings, and attention without inventing a project or MR. The GitLab approval appears only after successful ticket, project, research, and proposal evidence and binds the exact project, source, proposed branch, commit/actions digest, MR title/description/target/options later used by the three writes. Branch preview, creation/reuse, commit, and MR prompts must preserve that approved branch byte-for-byte; real workflow conditions also require the created/reused branch to equal the approved proposal before commit or MR work can run. The Jira approval appears only for a successful review with an actual bounded comment proposal. Every application stage is gated on successful direct prerequisites. A failure or branch mismatch selects the one bounded terminal that depends only on outputs guaranteed at that stage, skips later approvals and writes, and reports attention without referencing skipped output; the completion terminal runs only after proposal, review, and Jira update all succeed. It deliberately replaces hidden aggregation and model clients with explicit tool contracts. Multi-ticket `loop_group` parity remains deferred.
 
 ## How Hermes should explain and configure it
 
-Explain every write before setup. Ask for the ticket, permitted project, desired branch prefix, target branch, file scope, and approval policy. Validate Jira and GitLab read-only first. Until the GitLab capability lands, state that the flow cannot run and offer a manual assisted-code workflow instead.
+Explain every write before setup. Enable/configure both standalone connectors, ask for exactly one ticket, the permitted project, branch prefix, target branch, file scope, and approval policy. Validate Jira and GitLab read-only first, preview mutations, and obtain current-invocation host approval for each outward action.

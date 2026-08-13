@@ -23,20 +23,20 @@ Fetches unresolved Jira issues assigned to the current user and turns them into 
 
 ## Inputs and outputs
 
-The source needs Jira URL/token and an optional result limit. The Hermes workflow fetches up to 25 tickets, writes `tickets.json`, writes `summary.md` grouped by priority, and adds at most three suggested-focus bullets. Optional email delivery is guarded by approval and uses Outlook.
+The source needs Jira authentication and an optional result limit. The flat Hermes workflow fetches up to 25 tickets, carries their bounded normalized result into a tool-free summary node, groups them by priority, and adds at most three suggested-focus bullets.
 
 ## Supporting capabilities and configuration
 
-Current keys are `JIRA_BASE_URL` and `JIRA_PAT`; email delivery additionally needs Outlook. See [Jira](../configuration.md#jira) and [Outlook](../configuration.md#outlook-mcp).
+Enable and configure the standalone Jira connector through Tools. It supports bearer PAT or basic email/API-token authentication. See [Jira](../configuration.md#jira).
 
 ## Failure, safety, and privacy behavior
 
-The summary must not invent status or priority, omit tickets without saying so, or expose issue content to an unapproved external model. Email is a side effect and requires review/approval. A Jira read failure must not produce an “empty workload” summary.
+The summary must not invent status or priority, omit tickets without saying so, or expose issue content to an unapproved external model. A Jira read failure must not produce an “empty workload” summary. This source workflow performs no remote write or email delivery.
 
 ## Hermes port status and target shape
 
-Intent is ported through the `ericsson-jira` plugin and `workflows/my-tickets-summary.yml`. The tool layer uses direct HTTP rather than the source's curl-based Langflow component; summarization belongs to the active agent. The capability is baked into every profile and readiness depends on Jira configuration and a safe read, not a capability-set toggle.
+Intent is ported through the standalone-disabled `ericsson-jira` plugin and flat `workflows/my-tickets-summary.yml`. The tool layer uses bounded native HTTP with a private compatibility transport; summarization belongs to the active agent. The thin Jira router remains indexed while connector tools and qualified plugin skills appear only after explicit per-profile enablement. Readiness requires configured authentication and a safe read.
 
 ## How Hermes should explain and configure it
 
-Ask whether the user wants chat or approved email delivery and whether the default 25-ticket limit is appropriate. Validate Jira with a small read-only query. Show where `tickets.json` and `summary.md` will be written, and require approval after the summary is visible before sending email.
+Explain the fixed 25-ticket workflow bound and offer `jira_search_issues` for a different explicit bounded query. Validate Jira with a small read-only query and preserve truncation or failure warnings in the summary.

@@ -1,0 +1,14 @@
+include:
+  - local: /.ci/local.yml
+  - project: division/shared/ci
+    file: /templates/build.yml
+    ref: $CI_TEMPLATE_REF
+  - remote: https://foreign.example.test/unsafe.yml
+  - template: Security/SAST.gitlab-ci.yml
+
+variables:
+  PUBLIC_BUILD_MODE: release
+
+build:
+  script:
+    - echo "fixture only; never execute"

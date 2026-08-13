@@ -4,7 +4,9 @@ Shared Ericsson coworker capabilities (skills, tool plugins, MCP servers, workfl
 **OTTO + LOOP24**. This repo is the **source-of-truth + test harness**. The content is
 **vendored (copied + committed) into `hermes-agent` on `base`** by
 `hermes-agent/scripts/vendor-ericsson.mjs`, then ships inside the backend clone like Hermes'
-core skills — **no runtime pull, no enable toggle.**
+core skills. There is **no runtime pull and no capability-set enable toggle**. Existing backend
+plugins remain enabled; standalone connector entries are disabled per profile until the user
+opts in.
 
 ## The manifest is the contract
 
@@ -16,7 +18,8 @@ injector, and the startup seed ALL read it. Everything you add must be listed th
 | Add a… | Do this here | Delivered by (after re-vendor) |
 |---|---|---|
 | Skill | drop `skills/ericsson/<name>/`; add path to manifest `skills[]` | skills_sync → Capabilities |
-| Tool plugin | drop `plugins/<name>/` (`kind: backend`); add to `plugins[]` | bundled auto-load |
+| Existing backend plugin | drop `plugins/<name>/` (`kind: backend`); add its path string to `plugins[]` | bundled auto-load |
+| Standalone connector | drop `plugins/<name>/` with its own `plugin.yaml`; add `{path, id, enabled: false}` to `plugins[]` | bundled but disabled in every new profile until opt-in |
 | Plugin key | add to manifest `env[]` (key/description/prompt/url/password/category) | auto-registered on Keys page |
 | Local MCP server | drop `mcp/<name>/`; add to `mcpLocal[]` + an `mcp_servers.<name>` block in the file the manifest's `mcpServers` key points to (`mcp/mcp-servers.yaml`) | seeded into config on launch |
 | Remote MCP | add an `mcp_servers.<name>` (url/headers) block to that same `mcpServers` file; add keys to `env[]` | seeded + keys registered |
@@ -35,7 +38,17 @@ gates, and finish on clean `otto`. Only generated branding overlays or explicitl
 assets belong directly on a brand branch. If a request says "use this branch" while a brand
 branch is checked out, stop and reconcile that wording with this invariant before vendoring.
 
-## Gating (no toggle)
+## Per-plugin lifecycle (no set toggle)
+
+- String entries in `plugins[]` are backward-compatible enabled backends. Ericsson Jira and
+  Teams retain that behavior. `plugins/workflow` explicitly records the existing Hermes workflow
+  backend; it is runtime infrastructure, not a standalone connector, and remains enabled.
+- Object entries in `plugins[]` are standalone connectors. They must identify one unique
+  `plugins/<slug>` path and plugin id and set boolean `enabled: false`; neither skills nor
+  workflows may be disabled through this metadata.
+- A standalone connector that was historically auto-seeded may declare one bounded
+  `lifecycleMigration` with a stable id and `from: auto_seeded_backend`. New connectors do not
+  need a migration. This manifest is the only lifecycle-migration authority.
 
 - OS: `platforms: [windows]` on any Outlook/COM skill (auto-hides elsewhere).
 - Credentials: a tool plugin's `check_available()` returns whether its creds exist (Jira), or
@@ -95,8 +108,8 @@ box is the live end-to-end target (Outlook COM, Teams sign-in).
 
 ## Loop24 Langflow porting program
 
-The source material for future ports is the internal `loop_24` repository (authoritative remote `sd-americas-css/sd-americas-ai/loop_24`) at pinned snapshot `3f124f5`. Checkout locations vary by environment; locate the checkout by repository name or remote rather than assuming a home-directory path. The durable inventory and explanation layer lives in `docs/`; start with `docs/README.md`, use one page under `docs/flows/` per source JSON flow, and use `docs/configuration.md` for all keys, authentication, permissions, dependencies, and validation.
+The source material for future ports is the internal `loop_24` repository (authoritative remote `sd-americas-css/sd-americas-ai/loop_24`) at pinned snapshot `fc3bf26d64e05cc3703ee39e323bbf3c1eaa4cd6`. Checkout locations vary by environment; locate the checkout by repository name or remote rather than assuming a home-directory path. The durable inventory and explanation layer lives in `docs/`; start with `docs/README.md`, use one page under `docs/flows/` per reviewed source JSON flow, and use `docs/configuration.md` for all keys, authentication, permissions, dependencies, and validation.
 
-At source snapshot `3f124f5`, there are 11 JSON flows. Two have intent-level Hermes ports: Jira Assigned Tickets Summary → `my-tickets-summary`, and Search and Read E-Mails → `inbox-digest`. Jira to GitLab and Jira Defect Loop are partial because Jira tools exist but the GitLab tool/write path and end-to-end workflows do not. The other seven are not ported. Supporting foundations already ported independently are Jira, Teams, Outlook MCP, Glean MCP configuration, and the workflow orchestrator/builder.
+At source snapshot `fc3bf26d64e05cc3703ee39e323bbf3c1eaa4cd6`, the live, non-archived inventory contains 30 flow JSON files (excluding `flows/manifest.json`). The 11 existing pages under `docs/flows/` document their older source JSON at `3f124f5cbda2d77e636f6d1d2b03bdcd43fa264e`; those exact blobs were moved byte-for-byte into `flows/archieve/`, so their page-level `source_commit` values remain unchanged. Of those documented flows, Jira Assigned Tickets Summary and Search and Read E-Mails have intent-level Hermes ports; Jira to GitLab and Jira Defect Loop are partial. Supporting foundations already ported independently are Jira, Teams, Outlook MCP, Glean MCP configuration, and Hermes' built-in workflow backend and skills.
 
 Port the intent, controls, safety, and user outcome—not Langflow's graph runtime. Embedded LLM nodes become work for the active Hermes agent; reusable external operations become tools/plugins/MCP; deterministic ordering and approvals become workflow YAML; guidance becomes skills. Before planning or implementing a port, update/read its flow page and configuration dependencies. When a port lands, update its page status and target artifacts in the same change.

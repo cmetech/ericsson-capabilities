@@ -17,6 +17,22 @@ implementation:
   tools: [sharepoint_resolve_url, sharepoint_get_item, sharepoint_list_items, sharepoint_download, sharepoint_list_owned_sites, sharepoint_audit_permissions, sharepoint_upload, sharepoint_create_folder, sharepoint_move_item, sharepoint_copy_item, sharepoint_recycle_item]
 platforms: [macos, linux, windows]
 configuration:
+  - {name: tenant_host, kind: static-setting, required: true, guidance: Configure the exact permitted SharePoint tenant host through Tools.}
+  - {name: auth_mode, kind: static-setting, required: true, guidance: "Select delegated MSAL, app-only, Azure CLI, or deterministic automatic identity selection."}
+  - {name: tenant_id, kind: static-setting, required: false, guidance: Configure the Entra tenant identifier when the selected identity mode requires it.}
+  - {name: client_id, kind: static-setting, required: false, guidance: Configure the approved Entra application client identifier when required.}
+  - {name: client_secret, kind: static-secret, required: false, guidance: Store an app-only client secret only through the protected write-only Tools field.}
+  - {name: scopes, kind: static-setting, required: true, guidance: Configure only organization-approved Microsoft Graph scopes for the selected operation.}
+  - {name: authority_url, kind: static-setting, required: true, guidance: Keep the approved HTTPS Microsoft identity authority.}
+  - {name: account_id, kind: static-setting, required: false, guidance: Optionally select one delegated cached account without exposing cached credentials.}
+  - {name: azure_cli_enabled, kind: static-setting, required: false, guidance: Opt in only when an approved existing Azure CLI identity should be reused.}
+  - {name: max_pages, kind: static-setting, required: false, guidance: Keep Graph pagination finite and appropriate for the requested scope.}
+  - {name: max_items, kind: static-setting, required: false, guidance: Keep enumerated item counts finite and appropriate for the requested scope.}
+  - {name: max_bytes, kind: static-setting, required: false, guidance: Keep aggregate transfer and evidence bytes bounded.}
+  - {name: timeout_seconds, kind: static-setting, required: false, guidance: Keep each remote operation within a finite deadline.}
+  - {name: download_root, kind: static-setting, required: false, guidance: Restrict downloaded artifacts to the approved local root.}
+  - {name: upload_root, kind: static-setting, required: false, guidance: Restrict upload sources to the approved local root.}
+  - {name: browser_profile, kind: static-setting, required: true, guidance: Select the named core-owned enrolled browser profile used only for permission audits.}
   - name: SharePoint connector settings
     kind: local-software
     required: true
@@ -33,14 +49,6 @@ configuration:
     kind: interactive-sign-in
     required: false
     guidance: Enroll the named core-owned browser profile only when permission auditing is requested.
-  - name: sharepoint_url
-    kind: workflow-input
-    required: true
-    guidance: Supply one permitted HTTPS URL on the configured tenant.
-  - name: destination
-    kind: workflow-input
-    required: true
-    guidance: Choose a destination beneath the configured download root.
 reads: [normalized SharePoint item metadata, bounded folder listings, selected files, owned sites, bounded permission evidence]
 writes: [authorized local download artifact, SharePoint mutation only after exact approval, workflow manifest]
 artifacts: [workflow intake manifest, bounded files beneath the configured download root, optional redacted audit artifact]

@@ -4,10 +4,7 @@ name: example-digest
 description: Example two-step workflow with an optional email delivery
 version: 1.0.0
 tags: [ericsson, example]
-requires:
-  toolsets: []
-  mcp_servers: [outlook]
-  env: []
+requires: [outlook]
 inputs:
   - {name: deliver_to, default: chat}
 nodes:
@@ -22,7 +19,7 @@ nodes:
     output: digest.md
   - id: send
     kind: tool
-    tools: [message_send]
+    allowed_tools: [message_send]
     depends_on: [digest]
     when: "$inputs.deliver_to == 'email'"
     side_effects: true

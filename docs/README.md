@@ -32,6 +32,7 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 | [Pseudonymization](flows/pseudonymization.md) | Not supported; no port planned | Historical tombstone only |
 | [Re-Identification](flows/re-identification.md) | Planned, not implemented | No runnable mapping capability is available |
 | [Windows Laptop Diagnostic](flows/windows-laptop-diagnostic.md) | Not ported | Windows-only diagnostic skill with reviewed script |
+| [SharePoint Document Intake](flows/sharepoint-document-intake.md) | Intent ported | SharePoint connector plus bounded acquisition workflow; document processing remains separate |
 
 Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and the workflow orchestrator/builder.
 
@@ -45,6 +46,7 @@ Supporting foundations already exist independently of a complete flow port: Jira
 - [Mock sessions](onboarding/mock-sessions.md) provides cold-reader conversation examples.
 - [Test strategy and results](onboarding/test-strategy-and-results.md) separates deterministic evidence, model evidence, and limitations.
 - [Windows resume release validation](onboarding/windows-resume-release-validation.md) is the product-owner checklist for the pending native Windows acceptance run.
+- [Windows SharePoint release validation](onboarding/windows-sharepoint-release-validation.md) covers installed Graph identity, file-boundary, enrolled-browser, and approved-write acceptance.
 - [Skill design context](skill-design-context.md) defines the implemented router's runtime and authoring contract.
 - [Flow template](flows/_template.md) is the required structure for documenting future source flows.
 - [Ericsson Opportunity Visuals skill design](superpowers/specs/2026-07-14-ericsson-opportunity-visuals-design.md) specifies the approved deterministic port of the Loop24 Image Generation flow, including natural-language triggers, coworker interview behavior, and synthetic showcase/test artifacts.

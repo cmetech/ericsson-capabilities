@@ -12,7 +12,8 @@ all authored workflows follow this document.
 | `description` | yes | one-line human description |
 | `version` | yes | semver string, bump on edit |
 | `tags` | no | list; shown in listings (always include `ericsson`) |
-| `requires.toolsets` | no | plugin toolsets whose runtime schemas the nodes use |
+| `requires` | no | preferred flat list of required service/plugin ids, such as `[ericsson-sharepoint]` |
+| `requires.toolsets` | no | backward-compatible mapping form for older plugin workflows |
 | `requires.mcp_servers` | no | MCP registrations whose checked-in runtime tool schemas the nodes use |
 | `requires.env` | no | env vars needed; unset → validate WARNING (not error) |
 | `inputs` | no | list of `{name, default?}`; set at start with `--input name=value` |
@@ -27,10 +28,10 @@ Common: `id` (slug, unique), `kind`, optional `depends_on` (list of ids), option
 `side_effects: true` (outward action — send/post/create; resume will never
 silently re-run it).
 
-`tools` is an additive, optional list for the generic v1 controller so workflows
-authored before this field remain valid and executable. New workflows should declare
-it. Ericsson manifest-owned workflows must declare a non-empty `tools` list and name
-those same tools in their prompt; catalog validation resolves the names against
+`allowed_tools` is the exact tool allowlist for a new tool node. The legacy `tools`
+name remains accepted for existing workflows; a node must not declare both. Ericsson
+manifest-owned workflows must declare a non-empty allowlist and name those same tools
+in their prompt; catalog validation resolves the names against
 runtime plugin schemas, checked-in local MCP schemas, and the manifest's explicit
 `workflowCoreTools` allowlist. Free-text or globally assumed tools are not accepted
 at that managed-source boundary.

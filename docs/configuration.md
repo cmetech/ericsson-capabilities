@@ -100,6 +100,14 @@ The connector does not own a CDP port, browser executable, profile directory,
 or browser launcher, and `clear_session` releases only a session the connector
 acquired through the core browser manager.
 
+The source-owned `sharepoint` router remains discoverable while the connector
+is disabled and directs an enabled fresh conversation to qualified plugin
+skills. `sharepoint-document-intake` uses a flat
+`requires: [ericsson-sharepoint]` admission declaration and exact node tool
+allowlist. It stops at bounded artifact acquisition; parsing, OCR,
+interpretation, conversion, and generation belong to a separate document
+capability.
+
 ## Outlook MCP
 
 Outlook needs no API key or Azure app registration. It automates the locally logged-in Outlook desktop session.

@@ -21,9 +21,10 @@ def test_manifest_content():
     assert "skills/ericsson/workflow-builder" in doc["skills"]
     assert "skills/ericsson/opportunity-visuals" in doc["skills"]
     assert "skills/ericsson/onboard-ericsson-capabilities" in doc["skills"]
+    assert "skills/ericsson/sharepoint" in doc["skills"]
     assert doc["skills"].count("skills/ericsson/opportunity-visuals") == 1
     assert doc["skills"].count("skills/ericsson/onboard-ericsson-capabilities") == 1
-    assert len(doc["skills"]) == 4
+    assert len(doc["skills"]) == 5
     assert set(doc["plugins"]) == {
         "plugins/ericsson-jira",
         "plugins/ericsson-sharepoint",
@@ -33,7 +34,8 @@ def test_manifest_content():
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]
     assert doc["workflowCoreTools"] == []
     assert set(doc["workflows"]) == {"workflows/my-tickets-summary.yml",
-                                      "workflows/inbox-digest.yml"}
+                                      "workflows/inbox-digest.yml",
+                                      "workflows/sharepoint-document-intake.yml"}
     assert doc["personas"] == []
     keys = {e["key"] for e in doc["env"]}
     assert keys == {

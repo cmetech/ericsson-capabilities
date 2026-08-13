@@ -6,8 +6,12 @@ REPO = Path(__file__).resolve().parents[1]
 REFS = sorted((REPO / "workflows").glob("*.yml"))
 
 
-def test_two_reference_workflows_exist():
-    assert {p.stem for p in REFS} == {"my-tickets-summary", "inbox-digest"}
+def test_reference_workflows_exist():
+    assert {p.stem for p in REFS} == {
+        "my-tickets-summary",
+        "inbox-digest",
+        "sharepoint-document-intake",
+    }
 
 
 def test_reference_workflows_validate_cleanly():

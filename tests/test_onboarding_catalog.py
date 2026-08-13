@@ -54,6 +54,7 @@ EXPECTED_IDS = {
     "pseudonymization",
     "re-identification",
     "windows-laptop-diagnostic",
+    "sharepoint-tools",
 }
 
 EMPTY_IMPLEMENTATION = {
@@ -109,6 +110,29 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
                 "teams_read",
                 "teams_send",
                 "teams_reply",
+            ],
+        },
+    ),
+    "sharepoint-tools": (
+        "available",
+        True,
+        EMPTY_IMPLEMENTATION
+        | {
+            "skills": ["skills/ericsson/sharepoint"],
+            "plugins": ["plugins/ericsson-sharepoint"],
+            "workflows": ["workflows/sharepoint-document-intake.yml"],
+            "tools": [
+                "sharepoint_resolve_url",
+                "sharepoint_get_item",
+                "sharepoint_list_items",
+                "sharepoint_download",
+                "sharepoint_list_owned_sites",
+                "sharepoint_audit_permissions",
+                "sharepoint_upload",
+                "sharepoint_create_folder",
+                "sharepoint_move_item",
+                "sharepoint_copy_item",
+                "sharepoint_recycle_item",
             ],
         },
     ),
@@ -1536,3 +1560,17 @@ def test_validate_catalog_cli_sorts_problems(repo_fixture: RepoFixture) -> None:
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert payload["problems"] == sorted(payload["problems"])
+
+
+def test_generated_catalog_indexes_sharepoint_router_while_plugin_is_disabled():
+    catalog = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "skills/ericsson/onboard-ericsson-capabilities/references/catalog.json"
+        ).read_text()
+    )
+    entry = next(
+        item for item in catalog["capabilities"] if item["id"] == "sharepoint-tools"
+    )
+    assert entry["maturity"] == "available"
+    assert entry["recommendationEligible"] is True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from . import audit, auth, client, operations, tools  # noqa: F401
 from .models import (
@@ -21,6 +22,21 @@ _WRITE_TOOLS = frozenset(
         "sharepoint_copy_item",
         "sharepoint_recycle_item",
     }
+)
+
+_PLUGIN_SKILLS = (
+    (
+        "sharepoint-navigation",
+        "Resolve SharePoint URLs and perform bounded file, folder, and site discovery.",
+    ),
+    (
+        "sharepoint-file-operations",
+        "Download files and guide explicitly approved SharePoint mutations.",
+    ),
+    (
+        "sharepoint-permission-audit",
+        "Collect bounded permission evidence through an enrolled browser.",
+    ),
 )
 
 
@@ -128,3 +144,9 @@ def register(ctx) -> None:
             is_async=True,
             emoji="📁",
         )
+
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is not None:
+        skill_root = Path(__file__).parent / "skills"
+        for name, description in _PLUGIN_SKILLS:
+            register_skill(name, skill_root / name / "SKILL.md", description)

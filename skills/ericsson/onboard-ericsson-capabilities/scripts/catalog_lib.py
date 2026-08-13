@@ -370,7 +370,19 @@ def _literal_dict_keys(value: ast.Dict) -> set[str]:
 def _schema_contract(tree: ast.Module) -> tuple[set[str], dict[str, str]]:
     tools: set[str] = set()
     schema_names: dict[str, str] = {}
-    for schemas in _assigned_dicts(tree, "SCHEMAS"):
+    schema_dicts = _assigned_dicts(tree, "SCHEMAS")
+    schema_dicts.extend(
+        node.args[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "update"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "SCHEMAS"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Dict)
+    )
+    for schemas in schema_dicts:
         for key, value in zip(schemas.keys, schemas.values):
             if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
                 continue
@@ -415,6 +427,36 @@ def _registered_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
             elif isinstance(keyword.value, ast.Name) and loops_over_schemas:
                 registered.update(schema_tools)
     return registered
+
+
+def _handled_tools(tree: ast.Module, schema_tools: set[str]) -> set[str]:
+    """Resolve literal handlers and one handler factory used by a schema loop."""
+    handled: set[str] = set()
+    loops_over_schemas = any(
+        isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Call)
+        and isinstance(node.iter.func, ast.Attribute)
+        and node.iter.func.attr == "items"
+        and isinstance(node.iter.func.value, ast.Attribute)
+        and node.iter.func.value.attr == "SCHEMAS"
+        for node in ast.walk(tree)
+    )
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "register_tool"
+        ):
+            continue
+        name = next((kw.value for kw in node.keywords if kw.arg == "name"), None)
+        handler = next((kw.value for kw in node.keywords if kw.arg == "handler"), None)
+        if handler is None:
+            continue
+        if isinstance(name, ast.Constant) and isinstance(name.value, str):
+            handled.add(name.value)
+        elif isinstance(name, ast.Name) and loops_over_schemas:
+            handled.update(schema_tools)
+    return handled
 
 
 def _environment_accesses(tree: ast.Module) -> set[str]:
@@ -595,6 +637,7 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         if init_tree is not None:
             for handlers in _assigned_dicts(init_tree, "handlers"):
                 handler_tools.update(_literal_dict_keys(handlers))
+            handler_tools.update(_handled_tools(init_tree, schema_tools))
             registered_tools = _registered_tools(init_tree, schema_tools)
 
         for tool in sorted(declared_tools - schema_tools):
@@ -710,7 +753,14 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
         else:
             problems.append(f"missing workflow name: {relative}")
         requires = metadata.get("requires", {})
-        if not isinstance(requires, dict):
+        if isinstance(requires, list):
+            if any(not isinstance(value, str) or not value for value in requires):
+                problems.append(f"invalid workflow requires: {relative}")
+                workflow_toolsets[relative] = set()
+            else:
+                workflow_toolsets[relative] = set(requires)
+            workflow_mcp_servers[relative] = set()
+        elif not isinstance(requires, dict):
             problems.append(f"invalid workflow requires: {relative}")
         else:
             workflow_required = _string_list_metadata(
@@ -749,8 +799,9 @@ def collect_repository_inventory(repo: Path) -> dict[str, set[str] | list[str]]:
                 node_id = node.get("id")
                 if not isinstance(node_id, str):
                     node_id = f"nodes[{index}]"
+                tool_key = "allowed_tools" if "allowed_tools" in node else "tools"
                 node_tools = _string_list_metadata(
-                    node, "tools", workflow_file, problems
+                    node, tool_key, workflow_file, problems
                 )
                 if not node_tools:
                     problems.append(

@@ -39,6 +39,23 @@ def _sidecar(name):
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _hermes_candidates(*worktree_names: str) -> list[Path]:
+    override = os.environ.get("HERMES_AGENT_DIR")
+    candidates = [Path(override)] if override else []
+    source_root = next(
+        path
+        for path in (REPO, *REPO.parents)
+        if path.name == "ericsson-capabilities"
+    )
+    hermes_root = source_root.parent / "hermes-agent"
+    candidates.extend(
+        hermes_root / ".worktrees" / worktree_name
+        for worktree_name in worktree_names
+    )
+    candidates.append(hermes_root)
+    return candidates
+
+
 def test_jira_workflows_are_flat_archon_and_statically_valid():
     for name in WORKFLOWS:
         document = _document(name)
@@ -90,17 +107,13 @@ def test_showcase_has_no_hidden_loop_or_unregistered_jira_tool():
 
 
 def test_real_hermes_compiler_accepts_both_jira_workflows():
-    override = os.environ.get("HERMES_AGENT_DIR")
-    workspace = REPO.parents[2]
-    candidates = [Path(override)] if override else []
-    candidates.extend(
-        [
-            workspace / "hermes-agent/.worktrees/ericsson-jira-connector",
-            workspace / "hermes-agent/.worktrees/ericsson-gitlab-connector",
-            workspace / "hermes-agent",
-        ]
+    hermes = next(
+        path
+        for path in _hermes_candidates(
+            "ericsson-jira-connector", "ericsson-gitlab-connector"
+        )
+        if (path / "plugins/workflow/schema.py").is_file()
     )
-    hermes = next(path for path in candidates if (path / "plugins/workflow/schema.py").is_file())
     script = r"""
 import json
 from pathlib import Path
@@ -141,17 +154,10 @@ print(json.dumps(results, sort_keys=True))
 
 
 def test_authenticated_distribution_package_verifies_every_jira_workflow():
-    override = os.environ.get("HERMES_AGENT_DIR")
-    workspace = REPO.parents[2]
-    candidates = [Path(override)] if override else []
-    candidates.extend(
-        [
-            workspace / "hermes-agent/.worktrees/ericsson-jira-connector",
-            workspace / "hermes-agent",
-        ]
-    )
     hermes = next(
-        path for path in candidates if (path / "hermes_cli/capability_staging.py").is_file()
+        path
+        for path in _hermes_candidates("ericsson-jira-connector")
+        if (path / "hermes_cli/capability_staging.py").is_file()
     )
     package = REPO / "capabilities/workflow-packages/ericsson"
     script = r"""

@@ -1,0 +1,8 @@
+name: ericsson-sharepoint
+version: 1.0.0
+description: "Bounded Ericsson SharePoint files, folders, sites, and permission audits."
+author: Ericsson (cmetech)
+kind: standalone
+config_schema: config.schema.json
+provides_tools: []
+

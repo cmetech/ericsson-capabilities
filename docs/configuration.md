@@ -19,6 +19,7 @@ This is the configuration source of truth for the documented flows and the imple
 | Teams | `teams_auth`; optional `ERICSSON_GRAPH_CLIENT_ID` | MSAL device-code sign-in | Teams list/read/send/reply and future notifications |
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
 | GitLab | Source flow uses a PAT; Hermes key names are not yet implemented | PAT with `api` scope; optional mTLS | CI audit; Jira→GitLab; defect loop |
+| SharePoint | Profile-scoped connector settings and protected secret storage | Delegated MSAL, app-only, or existing Azure CLI identity; enrolled browser only for audits | Bounded files/folders, owned sites, and permission audits |
 | Document parsing/export | Local Python packages | No key | TOL generation; 3PP tracker |
 | Opportunity Visuals | Python/local files; optional openpyxl and Playwright/Chromium | No API key | Opportunity progression visual artifacts |
 | Pseudonymization | No configuration; explicitly unsupported | None | Historical questions only; no port roadmap |
@@ -73,6 +74,31 @@ The current plugin uses `teams_auth` and an MSAL public-client device-code flow.
 - `teams_list` and `teams_channels` are safe readiness checks. Read/send/reply permissions depend on tenant consent and Graph policy.
 
 The original Langflow components sometimes used a short-lived Graph Explorer token file for `ChannelMessage.Read.All`. That is source-only behavior and should not be reproduced casually: raw bearer-token files expire quickly and increase exposure. The Hermes target should use approved delegated permissions and actionable consent guidance.
+
+## SharePoint connector
+
+`ericsson-sharepoint` is a standalone connector and is disabled by default.
+Enable it explicitly, then configure it through the plugin configuration
+surface. Non-secret settings include the exact `*.sharepoint.com` tenant host,
+authentication mode, tenant/client identifiers, Graph scopes, authority,
+operation limits, authorized local roots, and the name of a Hermes enrolled
+browser profile. An app-only client secret is write-only protected storage; it
+does not belong in `.env`, chat, workflow YAML, or diagnostics.
+
+Delegated MSAL is the normal interactive mode. `authenticate` is an explicit
+interactive setup action and writes its bounded private cache beneath the
+active Hermes profile. `test_connection` is silent and never starts sign-in.
+App-only mode requires a complete tenant/client/secret plus one `.default`
+scope. Azure CLI mode reuses Hermes' existing Azure identity adapter and does
+not copy or invoke a second token store.
+
+The permission audit has a separate browser readiness facet. Configure a named
+core-owned enrolled browser profile whose trusted origins include the tenant,
+then invoke `enroll_browser` interactively. Graph file and owned-site operations
+may remain ready while audit readiness reports `browser_enrollment_required`.
+The connector does not own a CDP port, browser executable, profile directory,
+or browser launcher, and `clear_session` releases only a session the connector
+acquired through the core browser manager.
 
 ## Outlook MCP
 

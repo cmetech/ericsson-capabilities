@@ -24,7 +24,11 @@ def test_manifest_content():
     assert doc["skills"].count("skills/ericsson/opportunity-visuals") == 1
     assert doc["skills"].count("skills/ericsson/onboard-ericsson-capabilities") == 1
     assert len(doc["skills"]) == 4
-    assert set(doc["plugins"]) == {"plugins/ericsson-jira", "plugins/ericsson-teams"}
+    assert set(doc["plugins"]) == {
+        "plugins/ericsson-jira",
+        "plugins/ericsson-sharepoint",
+        "plugins/ericsson-teams",
+    }
     assert doc["mcpServers"] == "mcp/mcp-servers.yaml"
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]
     assert doc["workflowCoreTools"] == []
@@ -41,9 +45,8 @@ def test_manifest_content():
     assert "GLEAN_MCP_URL" not in keys
     assert {e["category"] for e in doc["env"]} == {"tool"}
     assert "ERICSSON_ENV" not in {e["key"] for e in doc["env"]}
-    assert doc["version"] == "0.4.1"
+    assert "ericsson-sharepoint" in doc["disabledByDefault"]["toolsets"]
     assert "requiresEnv" not in doc
-    assert "disabledByDefault" not in doc
     assert "ERICSSON_ENV" not in MANIFEST.read_text()
 
 

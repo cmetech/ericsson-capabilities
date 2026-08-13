@@ -10,6 +10,7 @@
   ],
   "plugins": [
     "plugins/ericsson-jira",
+    "plugins/ericsson-sharepoint",
     "plugins/ericsson-teams"
   ],
   "mcpServers": "mcp/mcp-servers.yaml",
@@ -20,6 +21,9 @@
     "workflows/inbox-digest.yml"
   ],
   "personas": [],
+  "disabledByDefault": {
+    "toolsets": ["ericsson-sharepoint"]
+  },
   "env": [
     {"key": "JIRA_BASE_URL", "description": "Ericsson Jira base URL", "category": "tool"},
     {"key": "JIRA_PAT", "description": "Jira personal access token", "category": "tool", "password": true},

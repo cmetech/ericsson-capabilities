@@ -103,6 +103,7 @@ async def test_u04_u05_u06_resolves_site_named_drive_and_encoded_item_path():
             "web_url": "https://tenant.sharepoint.com/sites/Governance/Library%20A/Folder%20A/Plan%20%231.docx",
             "parent_id": "parent-id",
             "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "is_drive_root": False,
         },
     }
     assert graph.calls[1][0:2] == ("pages", "/sites/site-id/drives")
@@ -136,6 +137,7 @@ async def test_u05_default_and_internal_paths_use_site_default_drive():
 
         assert resolved["drive"] == {"id": "default-drive", "name": "Documents"}
         assert resolved["item"]["id"] == "root-id"
+        assert resolved["item"]["is_drive_root"] is True
 
 
 @pytest.mark.anyio
@@ -196,7 +198,9 @@ async def test_u01_u07_resolves_sharing_link_and_explicit_drive_item_identity():
     assert shared["site"]["id"] == "shared-site"
     assert shared["drive"]["id"] == "shared-drive"
     assert shared["item"]["id"] == "shared-item"
+    assert shared["item"]["is_drive_root"] is False
     assert explicit["item"]["id"] == "shared-item"
+    assert explicit["item"]["is_drive_root"] is False
 
 
 @pytest.mark.anyio

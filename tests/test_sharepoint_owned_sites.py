@@ -77,6 +77,26 @@ async def test_o01_owned_site_enumeration_is_page_site_byte_deadline_and_cancel_
         await operations.list_owned_sites_with_graph(graph, tenant_hosts={"tenant.sharepoint.com"}, max_pages=1, max_sites=1, max_metadata_bytes=100, deadline=0, clock=lambda: 1)
 
 
+@pytest.mark.anyio
+async def test_owned_site_partial_failures_never_swallow_control_exceptions():
+    operations = _load()
+
+    class CancelledGraph(Graph):
+        async def get_json(self, path, **kwargs):
+            if path.startswith("/groups/"):
+                raise operations.SharePointCancelledError("cancelled")
+            return await super().get_json(path, **kwargs)
+
+    with pytest.raises(operations.SharePointCancelledError):
+        await operations.list_owned_sites_with_graph(
+            CancelledGraph(),
+            tenant_hosts={"tenant.sharepoint.com"},
+            max_pages=3,
+            max_sites=5,
+            max_metadata_bytes=20_000,
+        )
+
+
 def test_owned_sites_tool_is_declared_without_browser_arguments():
     _load()
     tools = sys.modules["sharepoint_owned_sites_test.tools"]

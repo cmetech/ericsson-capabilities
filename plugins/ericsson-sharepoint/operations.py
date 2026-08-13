@@ -86,6 +86,21 @@ def _control(
         raise SharePointDeadlineError("SharePoint operation deadline exceeded")
 
 
+def _translated_graph_control(error: Exception) -> RuntimeError | None:
+    try:
+        from tools.microsoft_graph_client import (
+            MicrosoftGraphCancelledError,
+            MicrosoftGraphDeadlineError,
+        )
+    except ImportError:
+        return None
+    if isinstance(error, MicrosoftGraphCancelledError):
+        return SharePointCancelledError("SharePoint operation was cancelled")
+    if isinstance(error, MicrosoftGraphDeadlineError):
+        return SharePointDeadlineError("SharePoint operation deadline exceeded")
+    return None
+
+
 def _bounded_text(value: Any, label: str, maximum: int = 4096) -> str:
     text = str(value or "")
     if len(text) > maximum or any(ord(character) < 32 for character in text):
@@ -676,7 +691,12 @@ async def list_owned_sites_with_graph(
                     "group_id": group_id,
                     "group_name": _bounded_text(group.get("displayName"), "group name"),
                 }
-            except Exception:
+            except (SharePointCancelledError, SharePointDeadlineError):
+                raise
+            except Exception as error:
+                control_error = _translated_graph_control(error)
+                if control_error is not None:
+                    raise control_error from None
                 warnings.append(
                     {"group_id": group_id, "category": "remote_unavailable"}
                 )
@@ -895,7 +915,7 @@ async def move_item_with_client(
     source = await client.get_item(
         url=source_url, deadline=deadline, cancel_check=cancel_check
     )
-    if source["item"].get("kind") == "folder" and not source["item"].get("id"):
+    if source["item"].get("is_drive_root") is True:
         raise SharePointWriteError("source root cannot be moved")
     body = {}
     if name is not None:
@@ -937,6 +957,8 @@ async def copy_item_with_client(
     source = await client.get_item(
         url=source_url, deadline=deadline, cancel_check=cancel_check
     )
+    if source["item"].get("is_drive_root") is True:
+        raise SharePointWriteError("source root cannot be copied")
     destination = await client.get_item(
         url=destination_url, deadline=deadline, cancel_check=cancel_check
     )
@@ -970,7 +992,7 @@ async def recycle_item_with_client(
     source = await client.get_item(
         url=url, deadline=deadline, cancel_check=cancel_check
     )
-    if source["item"].get("id") in {"", None}:
+    if source["item"].get("is_drive_root") is True:
         raise SharePointWriteError("library root cannot be recycled")
     await client.graph.delete(
         f"/drives/{source['drive']['id']}/items/{source['item']['id']}",

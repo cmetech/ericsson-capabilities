@@ -13,7 +13,7 @@ from .url_parser import ParsedSharePointURL, parse_sharepoint_url
 _DEFAULT_LIBRARIES = frozenset({"", "documents", "shared documents"})
 _MAX_ID_LENGTH = 1024
 _ITEM_SELECT = (
-    "id,name,size,file,folder,webUrl,parentReference,createdDateTime,"
+    "id,name,size,file,folder,root,webUrl,parentReference,createdDateTime,"
     "lastModifiedDateTime,createdBy,lastModifiedBy"
 )
 
@@ -151,6 +151,7 @@ class SharePointClient:
             drive_name=drive_name,
             item=item,
             item_path=item_path,
+            is_drive_root=not item_path,
         )
 
     async def _resolve_drive(
@@ -240,6 +241,7 @@ class SharePointClient:
             drive_name="",
             item=item,
             item_path="",
+            is_drive_root=False,
         )
 
     async def get_item(
@@ -284,6 +286,7 @@ class SharePointClient:
             drive_name="",
             item=item,
             item_path="",
+            is_drive_root=isinstance(item.get("root"), Mapping),
         )
 
     @staticmethod
@@ -311,6 +314,7 @@ class SharePointClient:
         drive_name: Any,
         item: Mapping[str, Any],
         item_path: str,
+        is_drive_root: bool,
     ) -> dict[str, Any]:
         item_id = _safe_id(item.get("id"), "item id")
         name = self._safe_text(item.get("name"), "item name")
@@ -340,6 +344,7 @@ class SharePointClient:
                 "web_url": self._safe_web_url(item.get("webUrl")),
                 "parent_id": self._safe_text(parent.get("id"), "parent id", 1024),
                 "mime_type": self._safe_text(file_facet.get("mimeType"), "MIME type", 512),
+                "is_drive_root": is_drive_root is True,
             },
         }
 

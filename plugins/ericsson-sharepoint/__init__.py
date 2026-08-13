@@ -9,7 +9,9 @@ from pathlib import Path
 from . import audit, auth, client, operations, tools  # noqa: F401
 from .models import (
     SharePointAmbiguousWriteError,
+    SharePointCancelledError,
     SharePointConfigurationError,
+    SharePointDeadlineError,
     SharePointFileBoundaryError,
     SharePointResolutionError,
     SharePointWriteError,
@@ -52,6 +54,21 @@ def _has_write_admission(admission, tool_name: str) -> bool:
 
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _graph_control_category(error: Exception) -> str | None:
+    try:
+        from tools.microsoft_graph_client import (
+            MicrosoftGraphCancelledError,
+            MicrosoftGraphDeadlineError,
+        )
+    except ImportError:
+        return None
+    if isinstance(error, MicrosoftGraphCancelledError):
+        return "cancelled"
+    if isinstance(error, MicrosoftGraphDeadlineError):
+        return "limit_exceeded"
+    return None
 
 
 def register(ctx) -> None:
@@ -131,22 +148,31 @@ def register(ctx) -> None:
                 category = "permission_denied"
             except SharePointAmbiguousWriteError:
                 category = "ambiguous_write"
+            except SharePointCancelledError:
+                category = "cancelled"
+            except SharePointDeadlineError:
+                category = "limit_exceeded"
             except SharePointWriteError:
                 category = "invalid_input"
             except (SharePointResolutionError, ValueError, TypeError, KeyError):
                 category = "invalid_input"
-            except Exception:
-                category = "remote_unavailable"
+            except Exception as error:
+                category = _graph_control_category(error) or "remote_unavailable"
+            safe_messages = {
+                "ambiguous_write": (
+                    "SharePoint write outcome is uncertain; inspect the remote "
+                    "destination before any retry."
+                ),
+                "cancelled": "SharePoint operation was cancelled.",
+                "limit_exceeded": "SharePoint operation exceeded its time limit.",
+            }
             return _json(
                 {
                     "success": False,
                     "error": {
                         "category": category,
-                        "message": (
-                            "SharePoint write outcome is uncertain; inspect the remote "
-                            "destination before any retry."
-                            if category == "ambiguous_write"
-                            else "SharePoint operation could not be completed."
+                        "message": safe_messages.get(
+                            category, "SharePoint operation could not be completed."
                         ),
                     },
                 }

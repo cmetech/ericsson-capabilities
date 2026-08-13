@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 import yaml
 
@@ -37,18 +38,19 @@ def test_document_intake_has_flat_toolset_requirement_and_exact_tool_node():
 
 
 def test_document_intake_compiles_with_real_archon_authority():
-    source_root = next(
-        path for path in (ROOT, *ROOT.parents) if path.name == "ericsson-capabilities"
-    )
-    hermes_root = source_root.parent / "hermes-agent"
     override = os.environ.get("HERMES_AGENT_DIR")
-    candidates = ([Path(override)] if override else []) + [
-        hermes_root / ".worktrees/ericsson-sharepoint-connector",
-        hermes_root,
-    ]
+    candidates = [Path(override)] if override else []
+    if not candidates:
+        source_root = next(
+            path
+            for path in (ROOT, *ROOT.parents)
+            if path.name == "ericsson-capabilities"
+        )
+        candidates.append(source_root.parent / "hermes-agent")
     hermes = next(
         path for path in candidates if (path / "plugins/workflow/schema.py").is_file()
     )
+    python = Path(os.environ.get("HERMES_PYTHON") or sys.executable)
     script = r"""
 import json
 from pathlib import Path
@@ -79,7 +81,7 @@ print(json.dumps({
 """
     result = subprocess.run(
         [
-            str(hermes_root / ".venv/bin/python"),
+            str(python),
             "-c",
             script,
             str(WORKFLOW),

@@ -98,9 +98,12 @@ class Graph:
 
 
 class Client:
-    def __init__(self, graph=None, *, destination_drive="drive"):
+    def __init__(
+        self, graph=None, *, destination_drive="drive", source_is_drive_root=False
+    ):
         self.graph = graph or Graph()
         self.destination_drive = destination_drive
+        self.source_is_drive_root = source_is_drive_root
         self.controls = []
 
     async def get_item(
@@ -130,6 +133,9 @@ class Client:
                 "web_url": "",
                 "parent_id": "",
                 "mime_type": "",
+                "is_drive_root": (
+                    self.source_is_drive_root if item_id != "dest" else False
+                ),
             },
         }
 
@@ -276,6 +282,32 @@ async def test_w07_recycle_uses_driveitem_delete_not_permanent_delete():
     assert client.controls == [(99.0, cancel_check)]
     assert graph.controls == [(99.0, cancel_check)]
     assert "permanent" not in repr(result).lower()
+
+
+@pytest.mark.anyio
+async def test_drive_root_cannot_be_moved_copied_or_recycled():
+    _, operations, models = _load()
+    graph = Graph()
+    client = Client(graph, source_is_drive_root=True)
+
+    with pytest.raises(models.SharePointWriteError, match="root"):
+        await operations.move_item_with_client(
+            client,
+            source_url="https://tenant.sharepoint.com/Documents",
+            name="Renamed",
+        )
+    with pytest.raises(models.SharePointWriteError, match="root"):
+        await operations.copy_item_with_client(
+            client,
+            source_url="https://tenant.sharepoint.com/Documents",
+            destination_url="https://tenant.sharepoint.com/Destination",
+        )
+    with pytest.raises(models.SharePointWriteError, match="root"):
+        await operations.recycle_item_with_client(
+            client, url="https://tenant.sharepoint.com/Documents"
+        )
+
+    assert graph.calls == []
 
 
 def test_w08_all_writes_require_exact_backend_admission_and_reject_argument_claims():
@@ -434,3 +466,64 @@ async def test_generic_graph_ambiguity_is_translated_to_connector_error(monkeypa
         await operations.write_operation("sharepoint_upload", {}, {})
 
     assert "private graph detail" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("error_name", "expected_category"),
+    [
+        ("MicrosoftGraphCancelledError", "cancelled"),
+        ("MicrosoftGraphDeadlineError", "limit_exceeded"),
+    ],
+)
+def test_graph_operation_controls_have_truthful_safe_public_categories(
+    monkeypatch, error_name, expected_category
+):
+    package, _, _ = _load(f"sharepoint_{expected_category}_projection_test")
+
+    class GraphControlError(RuntimeError):
+        pass
+
+    graph_module = types.ModuleType("tools.microsoft_graph_client")
+    graph_module.MicrosoftGraphCancelledError = type(
+        "OtherCancelled", (RuntimeError,), {}
+    )
+    graph_module.MicrosoftGraphDeadlineError = type(
+        "OtherDeadline", (RuntimeError,), {}
+    )
+    setattr(graph_module, error_name, GraphControlError)
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.microsoft_graph_client", graph_module)
+
+    async def controlled(*_args, **_kwargs):
+        raise GraphControlError("private Graph control detail")
+
+    monkeypatch.setattr(package.tools, "invoke", controlled)
+
+    class Context:
+        def __init__(self):
+            self.tools = []
+
+        def register_setup_action(self, *_args, **_kwargs):
+            pass
+
+        def register_hook(self, *_args, **_kwargs):
+            pass
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+        def configuration(self):
+            return {}
+
+    context = Context()
+    package.register(context)
+    handler = next(
+        tool["handler"]
+        for tool in context.tools
+        if tool["name"] == "sharepoint_resolve_url"
+    )
+
+    result = json.loads(__import__("asyncio").run(handler({"url": "https://safe"})))
+
+    assert result["error"]["category"] == expected_category
+    assert "private Graph control detail" not in repr(result)

@@ -37,8 +37,10 @@ class FakeGraphClient:
         self.pages = list(pages)
         self.calls = []
 
-    async def get_json(self, path, *, params=None, headers=None):
-        self.calls.append(("get", path, params, headers))
+    async def get_json(
+        self, path, *, params=None, headers=None, deadline=None, cancel_check=None
+    ):
+        self.calls.append(("get", path, params, headers, deadline, cancel_check))
         response = self.responses.get(path)
         if isinstance(response, Exception):
             raise response
@@ -46,8 +48,10 @@ class FakeGraphClient:
             raise AssertionError(f"unexpected Graph GET {path}")
         return response
 
-    async def iterate_pages(self, path, *, params=None, headers=None):
-        self.calls.append(("pages", path, params, headers))
+    async def iterate_pages(
+        self, path, *, params=None, headers=None, deadline=None, cancel_check=None
+    ):
+        self.calls.append(("pages", path, params, headers, deadline, cancel_check))
         for page in self.pages:
             yield page
 
@@ -99,6 +103,7 @@ async def test_u04_u05_u06_resolves_site_named_drive_and_encoded_item_path():
             "web_url": "https://tenant.sharepoint.com/sites/Governance/Library%20A/Folder%20A/Plan%20%231.docx",
             "parent_id": "parent-id",
             "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "is_drive_root": False,
         },
     }
     assert graph.calls[1][0:2] == ("pages", "/sites/site-id/drives")
@@ -132,6 +137,7 @@ async def test_u05_default_and_internal_paths_use_site_default_drive():
 
         assert resolved["drive"] == {"id": "default-drive", "name": "Documents"}
         assert resolved["item"]["id"] == "root-id"
+        assert resolved["item"]["is_drive_root"] is True
 
 
 @pytest.mark.anyio
@@ -192,7 +198,42 @@ async def test_u01_u07_resolves_sharing_link_and_explicit_drive_item_identity():
     assert shared["site"]["id"] == "shared-site"
     assert shared["drive"]["id"] == "shared-drive"
     assert shared["item"]["id"] == "shared-item"
+    assert shared["item"]["is_drive_root"] is False
     assert explicit["item"]["id"] == "shared-item"
+    assert explicit["item"]["is_drive_root"] is False
+
+
+@pytest.mark.anyio
+async def test_resolution_propagates_deadline_and_cancellation_to_every_graph_call():
+    client_module, _ = _load_package()
+    graph = FakeGraphClient(
+        {
+            "/sites/tenant.sharepoint.com:/sites/Governance": {
+                "id": "site-id",
+                "displayName": "Governance",
+                "webUrl": "https://tenant.sharepoint.com/sites/Governance",
+            },
+            "/sites/site-id/drive": {"id": "drive-id", "name": "Documents"},
+            "/drives/drive-id/root": {
+                "id": "root-id",
+                "name": "root",
+                "folder": {"childCount": 1},
+            },
+        }
+    )
+    client = client_module.SharePointClient(
+        graph, tenant_hosts={"tenant.sharepoint.com"}
+    )
+    cancel_check = lambda: False
+
+    await client.resolve_url(
+        "https://tenant.sharepoint.com/sites/Governance/Documents",
+        deadline=99.0,
+        cancel_check=cancel_check,
+    )
+
+    assert len(graph.calls) == 3
+    assert all(call[-2:] == (99.0, cancel_check) for call in graph.calls)
 
 
 @pytest.mark.anyio

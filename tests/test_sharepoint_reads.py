@@ -48,8 +48,10 @@ class Graph:
         self.calls = []
         self.yielded = 0
 
-    async def iterate_pages(self, path, *, params=None, headers=None):
-        self.calls.append((path, params, headers))
+    async def iterate_pages(
+        self, path, *, params=None, headers=None, deadline=None, cancel_check=None
+    ):
+        self.calls.append((path, params, headers, deadline, cancel_check))
         for page in self.pages.get(path, []):
             self.yielded += 1
             yield page
@@ -109,6 +111,37 @@ async def test_l01_l03_paginated_listing_has_stable_relative_metadata():
         },
     ]
     assert result["counts"] == {"items": 2, "pages": 2, "metadata_bytes": result["counts"]["metadata_bytes"]}
+
+
+@pytest.mark.anyio
+async def test_listing_propagates_operation_controls_to_resolution_and_pagination():
+    operations, _ = _load_package()
+    client = Client({"/drives/drive/items/root/children": [{"value": []}]})
+    resolved_controls = []
+    original_get_item = client.get_item
+
+    async def get_item(**identity):
+        resolved_controls.append((identity.pop("deadline"), identity.pop("cancel_check")))
+        return await original_get_item(**identity)
+
+    client.get_item = get_item
+    cancel_check = lambda: False
+
+    await operations.list_items_with_client(
+        client,
+        url="https://tenant.sharepoint.com/Documents",
+        recursive=False,
+        max_pages=1,
+        max_items=1,
+        max_depth=1,
+        max_metadata_bytes=1000,
+        deadline=99.0,
+        cancel_check=cancel_check,
+        clock=lambda: 1.0,
+    )
+
+    assert resolved_controls == [(99.0, cancel_check)]
+    assert client.graph.calls[0][-2:] == (99.0, cancel_check)
 
 
 @pytest.mark.anyio

@@ -48,8 +48,10 @@ class Graph:
 class Client:
     def __init__(self, graph):
         self.graph = graph
+        self.controls = []
 
-    async def get_item(self, **_kwargs):
+    async def get_item(self, **kwargs):
+        self.controls.append((kwargs.get("deadline"), kwargs.get("cancel_check")))
         return {
             "tenant_host": "tenant.sharepoint.com",
             "drive": {"id": "drive", "name": "Documents"},
@@ -81,13 +83,18 @@ async def test_w01_small_upload_exact_path_bytes_and_conflict_policy(tmp_path):
     source = config.upload_root / "small.bin"
     source.write_bytes(b"small")
     graph = Graph()
+    client = Client(graph)
+    cancel_check = lambda: False
+    deadline = time.monotonic() + 99
     result = await operations.upload_with_client(
-        Client(graph),
+        client,
         config,
         folder_url="https://tenant.sharepoint.com/Destination",
         source=source,
         name="Remote #1.bin",
         conflict_behavior="rename",
+        deadline=deadline,
+        cancel_check=cancel_check,
     )
     assert result["id"] == "uploaded"
     assert graph.calls == [
@@ -95,9 +102,14 @@ async def test_w01_small_upload_exact_path_bytes_and_conflict_policy(tmp_path):
             "small",
             "/drives/drive/items/folder:/Remote%20%231.bin:/content?@microsoft.graph.conflictBehavior=rename",
             b"small",
-            {"max_bytes": 4194304},
+            {
+                "max_bytes": 4194304,
+                "deadline": deadline,
+                "cancel_check": cancel_check,
+            },
         )
     ]
+    assert client.controls == [(deadline, cancel_check)]
 
 
 @pytest.mark.anyio

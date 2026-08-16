@@ -159,6 +159,8 @@ class BoundedClient:
                 attempt += 1
                 continue
 
+            self._remaining(deadline)
+
             if response.status in RETRYABLE_STATUSES:
                 if not idempotent:
                     self._record_failure(path)

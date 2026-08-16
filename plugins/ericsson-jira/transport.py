@@ -46,6 +46,14 @@ _DEFAULT_APPROVED_EXECUTABLES = frozenset(
 )
 
 
+class _JiraTransportFailure(JiraError):
+    """Safe transport failure annotated only with request-dispatch provenance."""
+
+    def __init__(self, category: str, *, outcome_uncertain: bool) -> None:
+        self.outcome_uncertain = outcome_uncertain
+        super().__init__(category)
+
+
 def _response_header(response: TransportResponse, name: str) -> str:
     lowered = name.lower()
     for key, value in response.headers.items():
@@ -174,7 +182,7 @@ class CurlTransport:
                 raise JiraError("invalid_input") from None
             url = f"{url}?{query}"
         if len(url.encode("utf-8")) > _MAX_URL_BYTES:
-            raise JiraError("capacity")
+            raise _JiraTransportFailure("capacity", outcome_uncertain=False)
         return url
 
     @staticmethod
@@ -188,7 +196,7 @@ class CurlTransport:
         except (TypeError, ValueError):
             raise JiraError("invalid_input") from None
         if len(body) > _MAX_REQUEST_BYTES:
-            raise JiraError("capacity")
+            raise _JiraTransportFailure("capacity", outcome_uncertain=False)
         return body
 
     @staticmethod
@@ -212,11 +220,11 @@ class CurlTransport:
         while True:
             if self._cancel_check():
                 self._terminate(process)
-                raise JiraError("cancelled")
+                raise _JiraTransportFailure("cancelled", outcome_uncertain=True)
             remaining = deadline - self._clock()
             if remaining <= 0:
                 self._terminate(process)
-                raise JiraError("deadline")
+                raise _JiraTransportFailure("deadline", outcome_uncertain=True)
             try:
                 stdout, stderr = process.communicate(timeout=min(0.05, remaining))
                 return stdout or b"", stderr or b""
@@ -228,46 +236,62 @@ class CurlTransport:
         try:
             size = path.stat().st_size
         except OSError:
-            raise JiraError("invalid_remote_data") from None
+            raise _JiraTransportFailure(
+                "invalid_remote_data", outcome_uncertain=True
+            ) from None
         if size > maximum:
-            raise JiraError("capacity")
+            raise _JiraTransportFailure("capacity", outcome_uncertain=True)
         try:
             return path.read_bytes()
         except OSError:
-            raise JiraError("invalid_remote_data") from None
+            raise _JiraTransportFailure(
+                "invalid_remote_data", outcome_uncertain=True
+            ) from None
 
     @staticmethod
     def _parse_headers(raw: bytes, expected_status: int) -> dict[str, str]:
         if len(raw) > _MAX_HEADER_BYTES:
-            raise JiraError("capacity")
+            raise _JiraTransportFailure("capacity", outcome_uncertain=True)
         blocks = [block for block in raw.split(b"\r\n\r\n") if block]
         if not blocks:
-            raise JiraError("invalid_remote_data")
+            raise _JiraTransportFailure(
+                "invalid_remote_data", outcome_uncertain=True
+            )
         selected = blocks[-1]
         lines = selected.split(b"\r\n")
         try:
             status_line = lines[0].decode("ascii")
         except UnicodeDecodeError:
-            raise JiraError("invalid_remote_data") from None
+            raise _JiraTransportFailure(
+                "invalid_remote_data", outcome_uncertain=True
+            ) from None
         match = re.fullmatch(r"HTTP/[12](?:\.0|\.1|) ([1-5][0-9]{2})(?: [^\r\n]{0,256})?", status_line)
         if match is None or int(match.group(1)) != expected_status:
-            raise JiraError("invalid_remote_data")
+            raise _JiraTransportFailure(
+                "invalid_remote_data", outcome_uncertain=True
+            )
         headers: dict[str, str] = {}
         for raw_line in lines[1:]:
             if not raw_line or raw_line[:1] in {b" ", b"\t"} or b":" not in raw_line:
-                raise JiraError("invalid_remote_data")
+                raise _JiraTransportFailure(
+                    "invalid_remote_data", outcome_uncertain=True
+                )
             raw_name, raw_value = raw_line.split(b":", 1)
             try:
                 name = raw_name.decode("ascii").lower()
                 value = raw_value.decode("utf-8").strip()
             except UnicodeDecodeError:
-                raise JiraError("invalid_remote_data") from None
+                raise _JiraTransportFailure(
+                    "invalid_remote_data", outcome_uncertain=True
+                ) from None
             if (
                 _HEADER_NAME.fullmatch(name) is None
                 or len(value) > 4096
                 or any(ord(character) < 32 and character != "\t" for character in value)
             ):
-                raise JiraError("invalid_remote_data")
+                raise _JiraTransportFailure(
+                    "invalid_remote_data", outcome_uncertain=True
+                )
             if name in _SAFE_RESPONSE_HEADERS and name not in headers:
                 headers[name] = value
         return headers
@@ -286,7 +310,7 @@ class CurlTransport:
         if not isinstance(timeout_seconds, (int, float)) or not 0 < timeout_seconds <= 120:
             raise JiraError("invalid_configuration")
         if self._cancel_check():
-            raise JiraError("cancelled")
+            raise _JiraTransportFailure("cancelled", outcome_uncertain=False)
         deadline = self._clock() + float(timeout_seconds)
         authorization = self.auth.authorization
         if (
@@ -344,7 +368,9 @@ class CurlTransport:
                     cwd=temporary,
                 )
             except (OSError, ValueError):
-                raise JiraError("transient") from None
+                raise _JiraTransportFailure(
+                    "transient", outcome_uncertain=False
+                ) from None
             try:
                 stdout, stderr = self._communicate(
                     process, deadline
@@ -352,15 +378,17 @@ class CurlTransport:
             finally:
                 self._terminate(process)
             if len(stdout) > 16 or len(stderr) > _MAX_STDERR_BYTES:
-                raise JiraError("capacity")
+                raise _JiraTransportFailure("capacity", outcome_uncertain=True)
             if process.returncode == 63:
-                raise JiraError("capacity")
+                raise _JiraTransportFailure("capacity", outcome_uncertain=True)
             if process.returncode == 28:
-                raise JiraError("deadline")
+                raise _JiraTransportFailure("deadline", outcome_uncertain=True)
             if process.returncode != 0:
-                raise JiraError("transient")
+                raise _JiraTransportFailure("transient", outcome_uncertain=True)
             if re.fullmatch(rb"[1-5][0-9]{2}", stdout) is None:
-                raise JiraError("invalid_remote_data")
+                raise _JiraTransportFailure(
+                    "invalid_remote_data", outcome_uncertain=True
+                )
             status = int(stdout)
             headers = self._parse_headers(
                 self._read_bounded(header_path, _MAX_HEADER_BYTES), status

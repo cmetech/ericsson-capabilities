@@ -17,6 +17,8 @@ class FakeTransport:
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
+        if callable(item):
+            return item()
         return item
 
     def close(self):
@@ -140,6 +142,37 @@ class TestDeadlines:
         with pytest.raises(ConnectorError) as excinfo:
             client.request("GET", "/api/v4/projects")
         assert excinfo.value.category == "cancelled"
+
+    def test_cancellation_during_transport_is_observed_before_return(self):
+        cancelled = {"value": False}
+        client, transport, _clock = _client(
+            [], cancel_check=lambda: cancelled["value"]
+        )
+
+        def finish_request():
+            cancelled["value"] = True
+            return Response(200, {}, b"{}")
+
+        transport.script.append(finish_request)
+
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/projects")
+        assert excinfo.value.category == "cancelled"
+        assert len(transport.calls) == 1
+
+    def test_deadline_during_transport_is_observed_before_return(self):
+        client, transport, clock = _client([], total_timeout_seconds=30.0)
+
+        def finish_request():
+            clock.now = 31.0
+            return Response(200, {}, b"{}")
+
+        transport.script.append(finish_request)
+
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/projects")
+        assert excinfo.value.category == "deadline"
+        assert len(transport.calls) == 1
 
 
 class TestErrorMapping:

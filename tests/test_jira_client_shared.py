@@ -4,7 +4,7 @@ import importlib
 
 import pytest
 
-from jira_test_support import PACKAGE, client, models
+from jira_test_support import PACKAGE, client, models, transport as jira_transport
 
 common_errors = importlib.import_module(f"{PACKAGE}._common.errors")
 common_transport = importlib.import_module(f"{PACKAGE}._common.transport")
@@ -53,13 +53,19 @@ class FakeAuth:
     default_max_results = 25
 
 
-def _client(script):
+def _client(script, **kwargs):
     clock = FakeClock()
     return (
         JiraClient(FakeAuth(), transport=FakeTransport(script), clock=clock,
-                   sleep=clock.sleep),
+                   sleep=clock.sleep, **kwargs),
         clock,
     )
+
+
+def _transport_failure(category, *, outcome_uncertain):
+    failure_type = getattr(jira_transport, "_JiraTransportFailure", None)
+    assert failure_type is not None, "Jira transport provenance type is missing"
+    return failure_type(category, outcome_uncertain=outcome_uncertain)
 
 
 class TestPreservedBehaviour:
@@ -101,6 +107,83 @@ class TestPreservedBehaviour:
         client, _clock = _client([])
         with pytest.raises(JiraError):
             client.rest_json("GET", "https://evil.test/x")
+
+
+class TestTransportFailurePolicy:
+    def test_unmarked_transient_read_is_retried_then_succeeds(self):
+        client, _clock = _client(
+            [JiraError("transient"), Response(200, {}, b"{}")]
+        )
+
+        assert client.rest_json("GET", "myself") == {}
+        assert len(client._transport.calls) == 2
+
+    def test_unmarked_transient_write_is_ambiguous_without_retry(self):
+        client, _clock = _client([JiraError("transient")])
+
+        with pytest.raises(JiraError) as excinfo:
+            client.rest_json("POST", "issue")
+
+        assert excinfo.value.category == "write_ambiguous"
+        assert not isinstance(excinfo.value, ConnectorError)
+        assert len(client._transport.calls) == 1
+
+    def test_repeated_transient_reads_open_the_breaker(self):
+        client, _clock = _client(
+            [JiraError("transient")] * 5,
+            max_retries=0,
+        )
+
+        for _ in range(5):
+            with pytest.raises(JiraError) as excinfo:
+                client.rest_json("GET", "myself")
+            assert excinfo.value.category == "transient"
+
+        with pytest.raises(JiraError) as excinfo:
+            client.rest_json("GET", "myself")
+        assert excinfo.value.category == "circuit_open"
+        assert len(client._transport.calls) == 5
+
+    @pytest.mark.parametrize(
+        "category",
+        ["transient", "capacity", "cancelled", "deadline", "invalid_remote_data"],
+    )
+    def test_uncertain_write_failure_is_ambiguous(self, category):
+        client, _clock = _client(
+            [_transport_failure(category, outcome_uncertain=True)]
+        )
+
+        with pytest.raises(JiraError) as excinfo:
+            client.rest_json("POST", "issue")
+
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client._transport.calls) == 1
+
+    @pytest.mark.parametrize("category", ["transient", "capacity", "cancelled"])
+    def test_pre_dispatch_failure_preserves_its_category(self, category):
+        client, _clock = _client(
+            [_transport_failure(category, outcome_uncertain=False)]
+        )
+
+        with pytest.raises(JiraError) as excinfo:
+            client.rest_json("POST", "issue")
+
+        assert excinfo.value.category == category
+        assert len(client._transport.calls) == 1
+
+    @pytest.mark.parametrize(
+        "category", ["capacity", "cancelled", "deadline", "invalid_remote_data"]
+    )
+    def test_uncertain_non_transient_read_preserves_its_category(self, category):
+        client, _clock = _client(
+            [_transport_failure(category, outcome_uncertain=True)]
+        )
+
+        with pytest.raises(JiraError) as excinfo:
+            client.rest_json("GET", "myself")
+
+        assert excinfo.value.category == category
+        assert len(client._transport.calls) == 1
 
 
 class TestClassifiers:

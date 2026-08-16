@@ -13,13 +13,13 @@ if __package__:
     from ._common.errors import RETRYABLE_STATUSES, ConnectorError
     from ._common.transport import Response
     from .models import JiraAuth, JiraError, TransportResponse
-    from .transport import NativeTransport
+    from .transport import NativeTransport, _JiraTransportFailure
 else:
     from _common.client import BoundedClient
     from _common.errors import RETRYABLE_STATUSES, ConnectorError
     from _common.transport import Response
     from models import JiraAuth, JiraError, TransportResponse
-    from transport import NativeTransport
+    from transport import NativeTransport, _JiraTransportFailure
 
 
 _MAX_RESPONSE_BYTES = 1024 * 1024
@@ -39,6 +39,9 @@ _REST_UNSUPPORTED_MESSAGES = frozenset(
     }
 )
 _CLOUDFLARE_1010 = re.compile(rb"(?:error\s*1010|access denied[^<]{0,80}1010)", re.I)
+_POTENTIALLY_UNCERTAIN = frozenset(
+    {"transient", "capacity", "cancelled", "deadline", "invalid_remote_data"}
+)
 
 
 @contextmanager
@@ -58,13 +61,33 @@ class _SharedTransportAdapter:
         self._transport = transport
 
     def request(self, *args, **kwargs) -> Response:
+        method = args[0] if args else kwargs.get("method", "")
         try:
             response = self._transport.request(*args, **kwargs)
+        except _JiraTransportFailure as exc:
+            self._raise_for_policy(
+                method, exc, outcome_uncertain=exc.outcome_uncertain
+            )
         except JiraError as exc:
-            raise ConnectorError(exc.category, service="jira") from None
+            self._raise_for_policy(
+                method,
+                exc,
+                outcome_uncertain=exc.category in _POTENTIALLY_UNCERTAIN,
+            )
         if isinstance(response, Response):
             return response
         return Response(response.status, response.headers, response.body)
+
+    @staticmethod
+    def _raise_for_policy(method, exc: JiraError, *, outcome_uncertain: bool):
+        if (
+            not outcome_uncertain
+            or method.upper() == "GET" and exc.category != "transient"
+        ):
+            raise ConnectorError(exc.category, service="jira") from None
+        # BoundedClient owns retries, breaker accounting and write ambiguity.
+        # A non-ConnectorError is its transport-uncertainty signal.
+        raise exc from None
 
     def close(self) -> None:
         try:

@@ -232,6 +232,7 @@ def test_failure_strings_are_redacted_and_private_directory_is_cleaned(
         transport.request("GET", "/rest/api/3/search", timeout_seconds=1)
 
     assert caught.value.category == category
+    assert caught.value.outcome_uncertain is True
     assert "request-secret-token" not in str(caught.value)
     record = json.loads(record_path.read_text())
     assert not Path(record["argv"][3]).parent.exists()
@@ -247,6 +248,7 @@ def test_spawn_failure_cleans_up_without_echoing_executable(tmp_path):
     with pytest.raises(JiraError) as caught:
         transport.request("GET", "/rest/api/3/search", timeout_seconds=1)
     assert caught.value.category == "transient"
+    assert caught.value.outcome_uncertain is False
     assert str(executable) not in str(caught.value)
 
 
@@ -278,6 +280,7 @@ def test_timeout_and_cancellation_terminate_exact_child_and_clean_up(
     )
 
     assert caught.value.category == ("cancelled" if cancelled else "deadline")
+    assert caught.value.outcome_uncertain is True
     with pytest.raises(ProcessLookupError):
         os.kill(spawned["pid"], 0)
     assert not Path(spawned["config"]).parent.exists()
@@ -294,11 +297,13 @@ def test_request_response_header_and_query_bounds_are_enforced(fake_curl, monkey
         with pytest.raises(JiraError) as caught:
             transport.request("POST", "/rest/api/3/search", timeout_seconds=1, **kwargs)
         assert caught.value.category == "capacity"
+        assert caught.value.outcome_uncertain is False
 
     monkeypatch.setenv("FAKE_CURL_BODY_SIZE", "1048577")
     with pytest.raises(JiraError) as caught:
         transport.request("GET", "/rest/api/3/search", timeout_seconds=1)
     assert caught.value.category == "capacity"
+    assert caught.value.outcome_uncertain is True
 
     monkeypatch.delenv("FAKE_CURL_BODY_SIZE")
     monkeypatch.setenv("FAKE_CURL_BODY", "{}")
@@ -306,6 +311,7 @@ def test_request_response_header_and_query_bounds_are_enforced(fake_curl, monkey
     with pytest.raises(JiraError) as caught:
         transport.request("GET", "/rest/api/3/search", timeout_seconds=1)
     assert caught.value.category == "capacity"
+    assert caught.value.outcome_uncertain is True
 
 
 class FakeCurl:

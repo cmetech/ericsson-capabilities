@@ -20,14 +20,17 @@ SAFE_ERROR_MESSAGES = {
     "cancelled": "Jira request was cancelled",
     "deadline": "Jira request deadline was exceeded",
     "capacity": "Jira result exceeded a safe limit",
+    "circuit_open": "Jira calls are paused after repeated failures",
+    "confirmation_required": "Jira change needs explicit confirmation",
 }
 
 
 class JiraError(RuntimeError):
     """Stable classified failure that never includes remote or secret text."""
 
-    def __init__(self, category: str) -> None:
+    def __init__(self, category: str, *, remediation: str | None = None) -> None:
         self.category = category if category in SAFE_ERROR_MESSAGES else "transient"
+        self.remediation = remediation
         super().__init__(SAFE_ERROR_MESSAGES[self.category])
 
 

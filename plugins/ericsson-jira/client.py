@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import re
 import time
 from typing import Any, Callable, Mapping
 
-import httpx
-
 if __package__:
+    from ._common.client import BoundedClient
+    from ._common.errors import RETRYABLE_STATUSES, ConnectorError
+    from ._common.transport import Response
     from .models import JiraAuth, JiraError, TransportResponse
     from .transport import NativeTransport
 else:
+    from _common.client import BoundedClient
+    from _common.errors import RETRYABLE_STATUSES, ConnectorError
+    from _common.transport import Response
     from models import JiraAuth, JiraError, TransportResponse
     from transport import NativeTransport
 
 
 _MAX_RESPONSE_BYTES = 1024 * 1024
-_RETRYABLE = frozenset({429, 502, 503, 504})
 _STATUS_CATEGORY = {
     400: "invalid_input",
     401: "authentication",
@@ -35,6 +39,38 @@ _REST_UNSUPPORTED_MESSAGES = frozenset(
     }
 )
 _CLOUDFLARE_1010 = re.compile(rb"(?:error\s*1010|access denied[^<]{0,80}1010)", re.I)
+
+
+@contextmanager
+def _as_jira_error():
+    """Translate shared errors at the connector boundary without detail leaks."""
+
+    try:
+        yield
+    except ConnectorError as exc:
+        raise JiraError(exc.category, remediation=exc.remediation) from None
+
+
+class _SharedTransportAdapter:
+    """Preserve Jira's native/curl transport behind the shared interface."""
+
+    def __init__(self, transport) -> None:
+        self._transport = transport
+
+    def request(self, *args, **kwargs) -> Response:
+        try:
+            response = self._transport.request(*args, **kwargs)
+        except JiraError as exc:
+            raise ConnectorError(exc.category, service="jira") from None
+        if isinstance(response, Response):
+            return response
+        return Response(response.status, response.headers, response.body)
+
+    def close(self) -> None:
+        try:
+            self._transport.close()
+        except JiraError as exc:
+            raise ConnectorError(exc.category, service="jira") from None
 
 
 def _header(response: TransportResponse, name: str) -> str:
@@ -86,6 +122,7 @@ class JiraClient:
         authentication: JiraAuth,
         *,
         native_transport=None,
+        transport=None,
         max_retries: int = 2,
         cancel_check: Callable[[], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -93,46 +130,37 @@ class JiraClient:
     ) -> None:
         if type(max_retries) is not int or not 0 <= max_retries <= 4:
             raise JiraError("invalid_configuration")
-        self._cancel_check = cancel_check or (lambda: False)
         self.auth = authentication
         self.max_retries = max_retries
-        self._transport = native_transport or NativeTransport(
-            authentication, cancel_check=self._cancel_check
-        )
+        chosen = transport or native_transport
+        if chosen is None:
+            chosen = NativeTransport(authentication, cancel_check=cancel_check)
+        self._transport = chosen
         self._clock = clock
-        self._sleep = sleep
+        with _as_jira_error():
+            self._client = BoundedClient(
+                _SharedTransportAdapter(chosen),
+                service="jira",
+                max_retries=max_retries,
+                total_timeout_seconds=float(authentication.request_timeout_seconds),
+                request_timeout_seconds=float(authentication.request_timeout_seconds),
+                cancel_check=cancel_check,
+                clock=clock,
+                sleep=sleep,
+            )
 
     def __repr__(self) -> str:
         return f"JiraClient(origin={self.auth.origin!r})"
 
     def close(self) -> None:
-        self._transport.close()
+        with _as_jira_error():
+            self._client.close()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
         self.close()
-
-    def _check(self, deadline: float) -> float:
-        if self._cancel_check():
-            raise JiraError("cancelled")
-        remaining = deadline - self._clock()
-        if remaining <= 0:
-            raise JiraError("deadline")
-        return remaining
-
-    @staticmethod
-    def _retry_delay(response: TransportResponse, attempt: int) -> float:
-        retry_after = _header(response, "retry-after")
-        if retry_after:
-            try:
-                value = float(retry_after)
-            except ValueError:
-                value = 0.0
-            if 0 <= value <= 5:
-                return value
-        return min(0.5 * (2**attempt), 2.0)
 
     def _perform(
         self,
@@ -142,36 +170,16 @@ class JiraClient:
         params: Mapping[str, Any] | None,
         json_body: Any | None,
         deadline: float,
-    ) -> TransportResponse:
-        attempt = 0
-        while True:
-            remaining = self._check(deadline)
-            try:
-                result = self._transport.request(
-                    method,
-                    path,
-                    params=params,
-                    json_body=json_body,
-                    timeout_seconds=min(remaining, self.auth.request_timeout_seconds),
-                )
-            except JiraError:
-                raise
-            except (httpx.TimeoutException, httpx.TransportError):
-                if method != "GET":
-                    raise JiraError("write_ambiguous") from None
-                if attempt >= self.max_retries:
-                    raise JiraError("transient") from None
-                attempt += 1
-                continue
-            self._check(deadline)
-            if result.status in _RETRYABLE and method == "GET" and attempt < self.max_retries:
-                delay = self._retry_delay(result, attempt)
-                if delay >= self._check(deadline):
-                    raise JiraError("deadline")
-                self._sleep(delay)
-                attempt += 1
-                continue
-            return result
+    ) -> Response:
+        with _as_jira_error():
+            return self._client.request(
+                method,
+                path,
+                params=params,
+                json_body=json_body,
+                deadline=deadline,
+                raise_on_status=False,
+            )
 
     @staticmethod
     def _validate_resource(resource: str) -> None:
@@ -192,7 +200,7 @@ class JiraClient:
             if 300 <= response.status < 400:
                 raise JiraError("invalid_remote_data")
             return
-        if method != "GET" and response.status in _RETRYABLE:
+        if method != "GET" and response.status in RETRYABLE_STATUSES:
             raise JiraError("write_ambiguous")
         category = _STATUS_CATEGORY.get(response.status)
         if category is None:

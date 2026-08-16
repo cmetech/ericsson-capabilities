@@ -339,10 +339,10 @@ class JiraOperations:
         client chooses their body only after a read-only version resolution,
         so this operation always makes exactly one PUT.
         """
-        if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
+        if type(key) is not str or _ISSUE_KEY.fullmatch(key) is None:
             raise JiraError("invalid_input")
         if assignee is not None and (
-            not isinstance(assignee, str) or not assignee or len(assignee) > 255
+            type(assignee) is not str or not assignee or len(assignee) > 255
         ):
             raise JiraError("invalid_input")
         if type(dry_run) is not bool or type(confirm) is not bool:
@@ -411,7 +411,7 @@ class JiraOperations:
         obtained through :meth:`list_fields`; security, reporter and project
         remain deliberately unavailable to tool callers.
         """
-        if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
+        if type(key) is not str or _ISSUE_KEY.fullmatch(key) is None:
             raise JiraError("invalid_input")
         if type(fields) is not dict or not fields:
             raise JiraError("invalid_input")
@@ -476,15 +476,15 @@ class JiraOperations:
         write with a caller-provided target status gets one bounded read for
         reconciliation.
         """
-        if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
+        if type(key) is not str or _ISSUE_KEY.fullmatch(key) is None:
             raise JiraError("invalid_input")
         if (
-            not isinstance(transition_id, str)
+            type(transition_id) is not str
             or _NUMERIC_ID.fullmatch(transition_id) is None
         ):
             raise JiraError("invalid_input")
         if expected_status is not None and (
-            not isinstance(expected_status, str) or len(expected_status) > 255
+            type(expected_status) is not str or len(expected_status) > 255
         ):
             raise JiraError("invalid_input")
         # Keep the connector's public error boundary at JiraError.  The shared
@@ -1043,9 +1043,9 @@ class JiraOperations:
         self, key: str, body: str, *, dry_run: bool = False
     ) -> dict[str, Any]:
         if (
-            not isinstance(key, str)
+            type(key) is not str
             or _ISSUE_KEY.fullmatch(key) is None
-            or not isinstance(body, str)
+            or type(body) is not str
             or not body.strip()
             or len(body) > 32_000
             or type(dry_run) is not bool

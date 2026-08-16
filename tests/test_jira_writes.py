@@ -23,6 +23,18 @@ JiraClient = jira_client.JiraClient
 TransportResponse = models.TransportResponse
 
 
+class StringSubclass(str):
+    pass
+
+
+class IntegerSubclass(int):
+    pass
+
+
+class FloatSubclass(float):
+    pass
+
+
 class FakeClient:
     """Records requests and replays the explicitly scripted remote outcomes."""
 
@@ -687,6 +699,62 @@ class TestUpdateFields:
             tools.invoke("jira_update_fields", args, object())
 
         assert caught.value.category == "invalid_input"
+
+
+class TestWriteScalarSubclasses:
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda operation: operation.add_comment(
+                StringSubclass("ABC-1"), "body"
+            ),
+            lambda operation: operation.add_comment(
+                "ABC-1", StringSubclass("body")
+            ),
+            lambda operation: operation.transition_issue(
+                StringSubclass("ABC-1"), "21", confirm=True
+            ),
+            lambda operation: operation.transition_issue(
+                "ABC-1", StringSubclass("21"), confirm=True
+            ),
+            lambda operation: operation.transition_issue(
+                "ABC-1", "21", confirm=True,
+                expected_status=StringSubclass("Done"),
+            ),
+            lambda operation: operation.assign_issue(
+                StringSubclass("ABC-1"), "jsmith", confirm=True
+            ),
+            lambda operation: operation.assign_issue(
+                "ABC-1", StringSubclass("jsmith"), confirm=True
+            ),
+            lambda operation: operation.update_fields(
+                StringSubclass("ABC-1"), {"summary": "New"}, confirm=True
+            ),
+            lambda operation: operation.update_fields(
+                "ABC-1", {"summary": StringSubclass("New")}, confirm=True
+            ),
+        ],
+    )
+    def test_string_subclasses_are_refused_before_any_write(self, write):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            write(JiraOperations(client))
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    @pytest.mark.parametrize("value", [IntegerSubclass(5), FloatSubclass(1.5)])
+    def test_numeric_subclasses_in_update_fields_are_refused_before_a_put(self, value):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields(
+                "ABC-1", {"customfield_10234": value}, confirm=True
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
 
 
 class Configuration:

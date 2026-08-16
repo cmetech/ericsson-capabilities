@@ -198,6 +198,10 @@ class TestApprovalCoverage:
             {"key": "ABC-1", "fields": {"summary": cyclic}},
             {"key": "ABC-1", "fields": {"summary": oversized}},
             {"key": "ABC-1", "fields": {"summary": object()}},
+            {
+                "key": "ABC-1",
+                "fields": {"summary": type("StringSubclass", (str,), {})("New")},
+            },
             UserDict({"key": "ABC-1", "fields": {"summary": "New"}}),
             type("ArgsSubclass", (dict,), {})
             ({"key": "ABC-1", "fields": {"summary": "New"}}),

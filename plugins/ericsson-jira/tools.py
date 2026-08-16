@@ -131,6 +131,24 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_search_assignable_users": {
+        "name": "jira_search_assignable_users",
+        "description": (
+            "Find users who can be assigned issues in one Jira project. "
+            "Assignability is a per-project permission, so a valid Jira user "
+            "may still be unassignable here."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "minLength": 1, "maxLength": 64},
+                "query": {"type": "string", "maxLength": 255},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -169,6 +187,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         "jira_list_fields": {"custom_only", "max_results"},
         "jira_get_project": {"key"},
         "jira_list_transitions": {"key"},
+        "jira_search_assignable_users": {"project", "query", "max_results"},
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -182,6 +201,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_list_fields": operations.list_fields,
             "jira_get_project": operations.get_project,
             "jira_list_transitions": operations.list_transitions,
+            "jira_search_assignable_users": operations.search_assignable_users,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

@@ -42,6 +42,7 @@ _PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,60}$")
 _MAX_ADF_CHARS = 100_000
 _MAX_ADF_NODES = 10_000
 _MAX_ADF_DEPTH = 32
+_MAX_EMAIL_LEN = 320
 
 
 def _safe_link(value: Any) -> str | None:
@@ -376,6 +377,69 @@ class JiraOperations:
             truncated=truncated,
             hint=(
                 "More valid transitions exist. This result contains the first 200."
+                if truncated
+                else None
+            ),
+        )
+
+    def search_assignable_users(
+        self, project: str, query: str = "", *, max_results: int = 25
+    ) -> dict[str, Any]:
+        """Find users who can actually be assigned issues in one project.
+
+        Assignability is a per-project permission, not a global user list, so
+        a name from elsewhere in Jira may still be rejected on assignment.
+        """
+        if not isinstance(project, str) or _PROJECT_KEY.fullmatch(project) is None:
+            raise JiraError("invalid_input")
+        if not isinstance(query, str) or len(query) > 255:
+            raise JiraError("invalid_input")
+        if type(max_results) is not int or not 1 <= max_results <= 100:
+            raise JiraError("invalid_input")
+        payload = self.client.rest_json(
+            "GET",
+            "user/assignable/search",
+            params={
+                "project": project,
+                "username": query,
+                "maxResults": max_results,
+            },
+        )
+        if not isinstance(payload, list):
+            raise JiraError("invalid_remote_data")
+
+        users: list[dict[str, str]] = []
+        for item in payload:
+            if not isinstance(item, Mapping):
+                continue
+            if "active" in item and type(item["active"]) is not bool:
+                raise JiraError("invalid_remote_data")
+            if item.get("active", True) is False:
+                continue
+            name = _bounded_string(item.get("name"), 255)
+            if not name:
+                continue
+            user = {
+                "name": self._redact(name) or "",
+                "display_name": self._redact(
+                    _bounded_string(item.get("displayName"), 255)
+                )
+                or "",
+            }
+            email = _bounded_string(item.get("emailAddress"), _MAX_EMAIL_LEN)
+            if email:
+                user["email"] = self._redact(email) or ""
+            users.append(user)
+
+        remote_may_be_truncated = len(payload) >= max_results
+        truncated = remote_may_be_truncated or len(users) > max_results
+        return result_envelope(
+            users[:max_results],
+            total=None if remote_may_be_truncated else len(users),
+            truncated=truncated,
+            hint=(
+                "Jira may have more assignable users. Refine query to narrow "
+                "the result."
                 if truncated
                 else None
             ),

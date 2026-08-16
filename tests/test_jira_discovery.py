@@ -289,3 +289,122 @@ class TestListTransitions:
         assert result["truncated"] is True
         assert result["hint"]
         assert result["items"][-1]["id"] == "199"
+
+
+class TestSearchAssignableUsers:
+    def test_returns_names_and_display_names(self):
+        client = FakeClient([[
+            {
+                "name": "jsmith",
+                "displayName": "J Smith",
+                "emailAddress": "j@x.test",
+                "active": True,
+            },
+        ]])
+
+        result = JiraOperations(client).search_assignable_users("PROJ", "smith")
+
+        method, resource, kwargs = client.calls[0]
+        assert method == "GET"
+        assert resource == "user/assignable/search"
+        assert kwargs["params"] == {
+            "project": "PROJ",
+            "username": "smith",
+            "maxResults": 25,
+        }
+        assert result["items"][0]["name"] == "jsmith"
+        assert result["items"][0]["display_name"] == "J Smith"
+
+    def test_inactive_users_are_excluded(self):
+        client = FakeClient([[
+            {"name": "gone", "displayName": "Gone", "active": False},
+            {"name": "here", "displayName": "Here", "active": True},
+        ]])
+
+        result = JiraOperations(client).search_assignable_users("PROJ")
+
+        assert [user["name"] for user in result["items"]] == ["here"]
+
+    def test_email_is_omitted_when_absent(self):
+        client = FakeClient([[
+            {"name": "u", "displayName": "U", "active": True}
+        ]])
+
+        result = JiraOperations(client).search_assignable_users("PROJ")
+
+        assert "email" not in result["items"][0]
+
+    @pytest.mark.parametrize(
+        ("project", "query", "max_results"),
+        [
+            ("../x", "", 25),
+            ("PROJ", 123, 25),
+            ("PROJ", "x" * 256, 25),
+            ("PROJ", "", True),
+            ("PROJ", "", 0),
+            ("PROJ", "", 101),
+        ],
+    )
+    def test_invalid_input_is_rejected_without_a_request(
+        self, project, query, max_results
+    ):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as excinfo:
+            JiraOperations(client).search_assignable_users(
+                project, query, max_results=max_results
+            )
+
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_non_list_payload_raises(self):
+        client = FakeClient([{"users": []}])
+
+        with pytest.raises(JiraError) as excinfo:
+            JiraOperations(client).search_assignable_users("PROJ")
+
+        assert excinfo.value.category == "invalid_remote_data"
+
+    def test_malformed_active_flag_is_rejected(self):
+        client = FakeClient([[
+            {"name": "u", "displayName": "User", "active": "false"}
+        ]])
+
+        with pytest.raises(JiraError) as excinfo:
+            JiraOperations(client).search_assignable_users("PROJ")
+
+        assert excinfo.value.category == "invalid_remote_data"
+
+    def test_all_returned_remote_strings_are_redacted(self):
+        client = FakeClient([[
+            {
+                "name": "name-secret-token-value",
+                "displayName": "display-secret-token-value",
+                "emailAddress": "email-secret-token-value@example.test",
+                "active": True,
+            }
+        ]])
+
+        result = JiraOperations(client).search_assignable_users("PROJ")
+
+        assert "secret-token-value" not in repr(result)
+
+    def test_truncation_uses_all_normalized_users_not_the_raw_prefix(self):
+        client = FakeClient([[
+            {"name": "inactive", "displayName": "Inactive", "active": False},
+            {"displayName": "Missing name", "active": True},
+            {"name": "first", "displayName": "First", "active": True},
+            {"name": "second", "displayName": "Second", "active": True},
+            {"name": "third", "displayName": "Third", "active": True},
+        ]])
+
+        result = JiraOperations(client).search_assignable_users(
+            "PROJ", max_results=2
+        )
+
+        assert [user["name"] for user in result["items"]] == ["first", "second"]
+        assert result["returned"] == 2
+        assert "total" not in result
+        assert result["truncated"] is True
+        assert result["hint"]

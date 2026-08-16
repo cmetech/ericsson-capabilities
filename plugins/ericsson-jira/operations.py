@@ -8,8 +8,10 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
 if __package__:
+    from ._common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
     from .models import JiraError
 else:
+    from _common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
     from models import JiraError
 
 
@@ -421,19 +423,26 @@ class JiraOperations:
                 break
         else:
             truncated = total is None or start_at < total
-        return {
-            "issues": selected[:max_results],
-            "truncated": truncated,
-            "warnings": ["results_truncated"] if truncated else [],
-        }
+        return result_envelope(
+            selected[:max_results],
+            total=total,
+            truncated=truncated,
+            hint=(
+                "More issues match this JQL. Raise max_results or narrow the "
+                "query."
+                if truncated
+                else None
+            ),
+            untrusted=True,
+        )
 
-    def my_tickets(self, max_results: int | None = None) -> list[dict[str, Any]]:
+    def my_tickets(self, max_results: int | None = None) -> dict[str, Any]:
         limit = self.client.auth.default_max_results if max_results is None else max_results
         return self.search_issues(
             jql=MY_TICKETS_JQL,
             max_results=limit,
             fields=["summary", "status", "priority", "updated", "description"],
-        )["issues"]
+        )
 
     def get_issue(self, key: str) -> dict[str, Any]:
         if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
@@ -469,6 +478,7 @@ class JiraOperations:
                 }
             )
         normalized["comments"] = comments
+        normalized["content_warning"] = UNTRUSTED_CONTENT_WARNING
         return normalized
 
     def _find_comment(

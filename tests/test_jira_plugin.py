@@ -169,8 +169,8 @@ def test_my_tickets_extracts_gitlab_urls(configuration):
         }}]}))
     with jira_tools.client_from_configuration(configuration) as client:
         tickets = jira_tools.my_tickets(max_results=5, client=client)
-    assert tickets[0]["key"] == "PROJ-1"
-    assert tickets[0]["gitlab_urls"] == ["https://gitlab.internal/group/repo", "https://gitlab.internal/x/y"]
+    assert tickets["items"][0]["key"] == "PROJ-1"
+    assert tickets["items"][0]["gitlab_urls"] == ["https://gitlab.internal/group/repo", "https://gitlab.internal/x/y"]
 
 
 @respx.mock

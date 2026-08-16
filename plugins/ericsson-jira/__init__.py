@@ -11,6 +11,21 @@ from .models import JiraError, SAFE_ERROR_MESSAGES
 
 
 _WRITE_TOOLS = frozenset({"jira_add_comment"})
+
+
+def _arg(args: dict, name: str) -> str:
+    """Render one argument for an approval prompt, safely and bounded."""
+    value = args.get(name) if isinstance(args, dict) else None
+    return json.dumps(value, ensure_ascii=True)[:512]
+
+
+WRITE_APPROVALS = {
+    "jira_add_comment": lambda a: (
+        f"Issue: {_arg(a, 'key')}\nBody: {_arg(a, 'body')}"
+    ),
+}
+
+
 _PLUGIN_SKILLS = (
     ("ticket-research", "Research one bounded Jira ticket."),
     ("defect-triage", "Triage one Jira defect and prepare an approved comment."),
@@ -83,13 +98,17 @@ def register(ctx) -> None:
                 )
                 return _json({"success": True, "result": result})
             except JiraError as exc:
+                error = {
+                    "category": exc.category,
+                    "message": SAFE_ERROR_MESSAGES[exc.category],
+                }
+                remediation = getattr(exc, "remediation", None)
+                if remediation:
+                    error["remediation"] = remediation
                 return _json(
                     {
                         "success": False,
-                        "error": {
-                            "category": exc.category,
-                            "message": SAFE_ERROR_MESSAGES[exc.category],
-                        },
+                        "error": error,
                     }
                 )
             except (KeyError, TypeError, ValueError):
@@ -116,7 +135,8 @@ def register(ctx) -> None:
         return invoke
 
     def require_write_approval(tool_name: str, args: dict, **_kwargs):
-        if tool_name not in _WRITE_TOOLS:
+        summarise = WRITE_APPROVALS.get(tool_name)
+        if summarise is None:
             return None
         canonical_args = json.dumps(
             args if isinstance(args, dict) else {},
@@ -124,14 +144,11 @@ def register(ctx) -> None:
             separators=(",", ":"),
             sort_keys=True,
         )
-        issue_key = args.get("key") if isinstance(args, dict) else None
-        body = args.get("body") if isinstance(args, dict) else None
         return {
             "action": "approve",
             "message": (
-                "Approve Ericsson Jira comment\n"
-                f"Issue: {json.dumps(issue_key, ensure_ascii=True)}\n"
-                f"Body: {json.dumps(body, ensure_ascii=True)}"
+                f"Approve Ericsson Jira change: {tool_name}\n"
+                f"{summarise(args if isinstance(args, dict) else {})}"
             ),
             "rule_key": (
                 f"{tool_name}:"

@@ -68,7 +68,7 @@ def issue(
     return {"key": key, "fields": fields}
 
 
-def test_my_tickets_preserves_jql_order_default_limit_and_list_shape():
+def test_my_tickets_preserves_jql_order_default_limit_and_envelope_shape():
     client = FakeClient(
         {
             "issues": [
@@ -88,9 +88,10 @@ def test_my_tickets_preserves_jql_order_default_limit_and_list_shape():
 
     result = JiraOperations(client).my_tickets()
 
-    assert isinstance(result, list)
-    assert result[0]["key"] == "ABC-1"
-    assert result[0]["gitlab_urls"] == ["https://gitlab.example.test/g/repo"]
+    assert result["items"][0]["key"] == "ABC-1"
+    assert result["items"][0]["gitlab_urls"] == ["https://gitlab.example.test/g/repo"]
+    assert result["returned"] == 1
+    assert result["truncated"] is False
     params = client.calls[0][2]["params"]
     assert params["jql"] == (
         "assignee = currentUser() AND resolution = Unresolved "
@@ -126,9 +127,9 @@ def test_search_paginates_to_bound_and_returns_explicit_truncation_warning():
         fields=["summary", "description"],
     )
 
-    assert [row["key"] for row in result["issues"]] == ["ABC-1", "ABC-2", "ABC-3"]
+    assert [row["key"] for row in result["items"]] == ["ABC-1", "ABC-2", "ABC-3"]
     assert result["truncated"] is True
-    assert result["warnings"] == ["results_truncated"]
+    assert result["hint"] == "More issues match this JQL. Raise max_results or narrow the query."
     assert [call[2]["params"]["startAt"] for call in client.calls] == [0, 2]
     assert set(client.calls[0][2]["params"]["fields"].split(",")) == {
         "summary",
@@ -169,7 +170,7 @@ def test_filters_are_case_insensitive_and_age_thresholds_are_deterministic():
         max_age_days=20,
     )
 
-    assert [row["key"] for row in result["issues"]] == ["KEEP"]
+    assert [row["key"] for row in result["items"]] == ["KEEP"]
     assert result["truncated"] is False
 
 
@@ -212,6 +213,7 @@ def test_get_issue_normalizes_adf_context_and_safe_comment_projection():
 
     assert result["description"] == "failure context <redacted>"
     assert result["environment"] == "production"
+    assert result["content_warning"] == operations.UNTRUSTED_CONTENT_WARNING
     assert result["problem_summary"] == "failure context <redacted>"
     assert result["issue_url"] == "https://jira.example.test/browse/ABC-1"
     assert result["comments"] == [

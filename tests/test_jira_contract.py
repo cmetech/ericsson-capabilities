@@ -154,6 +154,16 @@ class TestApprovalCoverage:
             "fields": {"description": "😀" * 16_000},
             "confirm": True,
         }
+        control_comment = {
+            "key": "ABC-1",
+            "body": "\0" * 32_000,
+            "dry_run": True,
+        }
+        changed_control_comment = {
+            "key": "ABC-1",
+            "body": "\0" * 31_999 + "\1",
+            "dry_run": True,
+        }
 
         comment_first = hook("jira_add_comment", comment)
         comment_second = hook("jira_add_comment", dict(comment))
@@ -166,6 +176,12 @@ class TestApprovalCoverage:
             plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
         ).hexdigest()
         assert plugin._approval_rule_digest(unicode_update) != invalid_digest
+        control_first = hook("jira_add_comment", control_comment)
+        control_second = hook("jira_add_comment", dict(control_comment))
+        changed_control = hook("jira_add_comment", changed_control_comment)
+        assert control_first["rule_key"] == control_second["rule_key"]
+        assert control_first["rule_key"] != changed_control["rule_key"]
+        assert control_first["rule_key"] != "jira_add_comment:" + invalid_digest
         assert comment["body"] not in comment_first["message"]
         assert update["fields"]["description"] not in update_first["message"]
 
@@ -176,7 +192,7 @@ class TestApprovalCoverage:
             nested = [nested]
         cyclic = []
         cyclic.append(cyclic)
-        oversized = "caller-secret-should-not-appear-" + "x" * 200_000
+        oversized = "caller-secret-should-not-appear-" + "x" * 300_000
         invalid = [
             {"key": "ABC-1", "fields": {"summary": nested}},
             {"key": "ABC-1", "fields": {"summary": cyclic}},
@@ -221,7 +237,7 @@ class TestApprovalCoverage:
             return original_dumps(value, *args, **kwargs)
 
         monkeypatch.setattr(plugin.json, "dumps", track_primitive_serialization)
-        oversized = {"first": "x" * 70_000, "second": "y" * 70_000}
+        oversized = {"first": "x" * 140_000, "second": "y" * 140_000}
 
         digest = plugin._approval_rule_digest(oversized)
 

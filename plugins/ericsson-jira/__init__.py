@@ -20,7 +20,10 @@ _WRITE_TOOLS = frozenset(
     }
 )
 _INVALID_APPROVAL_ARGS = "<invalid-approval-args>"
-_MAX_APPROVAL_CANONICAL_BYTES = 131_072
+# A valid 32,000-character comment can contain control characters, each of
+# which encodes as six JSON bytes.  256 KiB covers that 192,000-byte worst
+# case plus the bounded argument envelope while remaining a firm hook limit.
+_MAX_APPROVAL_CANONICAL_BYTES = 262_144
 _MAX_APPROVAL_CANONICAL_DEPTH = 64
 _MAX_APPROVAL_CANONICAL_NODES = 12_000
 _MAX_APPROVAL_RENDERED_ARGUMENT = 256

@@ -256,7 +256,9 @@ class JiraOperations:
             identifier = _bounded_string(entry.get("id"), 255)
             if not identifier:
                 continue
-            is_custom = bool(entry.get("custom"))
+            is_custom = entry.get("custom")
+            if type(is_custom) is not bool:
+                raise JiraError("invalid_remote_data")
             if custom_only and not is_custom:
                 continue
             fields.append(

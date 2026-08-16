@@ -69,8 +69,20 @@ class TestListFields:
             JiraOperations(client).list_fields()
         assert excinfo.value.category == "invalid_remote_data"
 
+    @pytest.mark.parametrize("custom_only", [False, True])
+    def test_non_boolean_custom_flag_raises(self, custom_only):
+        client = FakeClient([[
+            {"id": "f1", "name": "Field", "custom": "false"}
+        ]])
+        with pytest.raises(JiraError) as excinfo:
+            JiraOperations(client).list_fields(custom_only=custom_only)
+        assert excinfo.value.category == "invalid_remote_data"
+
     def test_entries_without_an_id_are_skipped(self):
-        client = FakeClient([[{"name": "Nameless"}, {"id": "ok", "name": "OK"}]])
+        client = FakeClient([[
+            {"name": "Nameless"},
+            {"id": "ok", "name": "OK", "custom": False},
+        ]])
         result = JiraOperations(client).list_fields()
         assert [f["id"] for f in result["items"]] == ["ok"]
 

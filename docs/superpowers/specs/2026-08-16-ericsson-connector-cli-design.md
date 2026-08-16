@@ -1,6 +1,6 @@
 # Ericsson connector command-line interface
 
-**Status:** Proposed for Wave 4. No implementation work may start until the
+**Status:** Approved for Wave 4. No implementation work may start until the
 existing connector waves have satisfied the gates in this document.
 
 **Audience:** Engineers implementing or reviewing Ericsson connector command
@@ -70,12 +70,14 @@ Wave 2: shared amendment, Jira canary, Confluence/ARM registration
           |
 Wave 3: GitLab coverage + Confluence operations + ARM operations
           |
-Wave 4: direct connector CLI and SuperCLI migration mapping
+Wave 4A: neutral Hermes owner-bound plugin command port
+          |
+Wave 4B: Ericsson direct connector CLI + SuperCLI migration mapping
           |
 Separate delivery: source verification -> Hermes base -> every brand -> clean OTTO
 ```
 
-Wave 4 starts only after all of the following are true:
+Wave 4A starts only after all of the following are true:
 
 1. The shared transport branch is merged to the Ericsson capability source.
 2. Wave 2 is merged and Jira has validated the shared connector foundation.
@@ -86,8 +88,14 @@ Wave 4 starts only after all of the following are true:
 5. The public connector tool names and input schemas for Jira, GitLab,
    Confluence, and ARM are stable for the release.
 
-Wave 4 changes no Wave 1-3 branch or task. Its implementation branch starts
-from the post-Wave-3 source `main`. No Wave 4 session merges its own work.
+Wave 4B starts only after the Wave 4A host port is reviewed, merged to neutral
+Hermes `base`, and its full Hermes test gate is green. This makes the Ericsson
+facade a consumer of a settled public host contract instead of a co-author of
+private admission behavior.
+
+Wave 4 changes no Wave 1-3 branch or task. Wave 4A branches from neutral Hermes
+`base`; Wave 4B branches from the post-Wave-3 Ericsson source `main`. Neither
+session merges its own work.
 
 Vendoring is not part of the Wave 4 source implementation session. After the
 source branch is reviewed and merged, a separately authorized delivery step
@@ -187,6 +195,10 @@ Each leaf command has a declarative descriptor containing:
 - migration-map identity; and
 - support status.
 
+Canonical operation identities are the existing public connector tool names
+(`jira_get_issue`, `gitlab_read_merge_request`, and so on). This avoids a
+second internal namespace and lets descriptor/schema drift fail mechanically.
+
 Descriptors are curated because a good domain CLI cannot be generated blindly
 from JSON Schema. Source validators nevertheless compare descriptors with the
 canonical tool schemas. A removed operation, missing required input, unhandled
@@ -239,11 +251,15 @@ adapter proves explicit local CLI intent. Neither adapter can supply a plain
 JSON field that impersonates the other's authority. The direct CLI must not
 manufacture or reuse a model-tool admission token.
 
-If implementation evidence shows that the existing plugin CLI registration
-and connector executor seams cannot preserve these authority boundaries, Wave
-4 stops. A small generic Hermes host extension is then designed and landed on
-neutral `base` before connector CLI work resumes. Connector-specific branches
-must not reach into private Hermes admission internals as a shortcut.
+Planning evidence confirmed that the existing plugin CLI registration surface
+can build the argparse trees but cannot preserve these cross-plugin authority
+boundaries by itself. Wave 4A therefore adds a small generic, owner-bound local
+application-command port on neutral Hermes `base`. The port binds caller,
+provider, operation, canonical arguments, active connector-configuration
+fingerprint, invocation identity, and single-use command mode. It is separate
+from model-tool admission and does not make that private token constructible.
+Wave 4B consumes only this public port. Connector-specific code must not reach
+into private Hermes admission internals as a shortcut.
 
 ### 5.4 TUI extension hooks are complementary
 
@@ -296,7 +312,7 @@ sequences, distinguishes warnings from results, and includes remediation.
   "schema_version": "ericsson.connector-cli/v1",
   "ok": true,
   "connector": "jira",
-  "operation": "issue.get",
+  "operation": "jira_get_issue",
   "mode": "read",
   "data": {},
   "warnings": [],

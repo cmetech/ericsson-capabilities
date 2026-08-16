@@ -1,6 +1,6 @@
 # Execution prompts — Ericsson connector programme
 
-Six prompts, one per session. Paste the file's contents into a fresh session at the right
+Eight prompts, one per session. Paste the file's contents into a fresh session at the right
 time. Each is self-contained: repo, branch, plan file, exact task scope, guardrails, and a
 definition of done.
 
@@ -12,6 +12,8 @@ that repo's own docs convention.
 |---|---|
 | 1 | `hermes-agent` → `docs/2026-08-15-hermes-credential-storage-execution-prompt.md` |
 | 2–6 | this directory |
+| 7 | `hermes-agent` → `docs/2026-08-16-plugin-application-command-port-execution-prompt.md` |
+| 8 | `07-wave4b-connector-cli.md` in this directory |
 
 ## Order and gating
 
@@ -34,6 +36,16 @@ WAVE 3  (three sessions in parallel, each in its own worktree)
   06-wave3-arm-rest.md                    ARM         tasks 3-10
 
         merge all three to main
+                 |
+        merge credential storage to hermes-agent/base
+                 |
+WAVE 4A [hermes-agent]
+  plugin-application-command-port-execution-prompt     tasks 1-6
+
+        review + merge Wave 4A to hermes-agent/base
+                 |
+WAVE 4B [ericsson-capabilities]
+  07-wave4b-connector-cli.md                         tasks 1-9
 ```
 
 Session 1 is independent of everything — it can run at any point, including through all
@@ -72,6 +84,8 @@ connector plans.
 | 3b — GitLab coverage | ericsson-capabilities | `docs/superpowers/plans/2026-08-15-ericsson-gitlab-coverage.md` |
 | 3c — Confluence connector | ericsson-capabilities | `docs/superpowers/plans/2026-08-15-ericsson-confluence-connector.md` |
 | 3d — ARM connector | ericsson-capabilities | `docs/superpowers/plans/2026-08-15-ericsson-arm-connector.md` |
+| 4a — plugin application command port | hermes-agent | `docs/plans/2026-08-16-plugin-application-command-port.md` |
+| 4b — connector CLI and migration map | ericsson-capabilities | `docs/superpowers/plans/2026-08-16-ericsson-connector-cli.md` |
 
 Note the two repos use different conventions — `docs/plans/` in hermes-agent (because
 `docs/superpowers/*` is gitignored there), `docs/superpowers/plans/` in
@@ -87,20 +101,30 @@ ericsson-capabilities.
 | 4 | `feat/ericsson-gitlab-coverage` | `main` (worktree) |
 | 5 | `feat/ericsson-confluence-connector` | `main` (worktree) |
 | 6 | `feat/ericsson-arm-connector` | `main` (worktree) |
+| 7 | `feat/hermes-plugin-application-command-port` | `base` (hermes-agent) |
+| 8 | `feat/ericsson-connector-cli` | post-Wave-3 `main` |
 
 No session merges its own work. Each reports and stops; you decide when to merge.
 
-## Planned Wave 4 — connector CLI migration surface
+## Approved Wave 4 — connector CLI migration surface
 
-After Wave 2 and all three Wave 3 branches are merged, a planned Wave 4 adds
-model-free, domain-shaped Jira, GitLab, Confluence, and ARM commands plus a
-verified SuperCLI migration mapping. It does not modify or gate Waves 1–3.
-The approved interface and sequencing constraints live in
+After Wave 2 and all three Wave 3 branches are merged, Wave 4 adds model-free,
+domain-shaped Jira, GitLab, Confluence, and ARM commands plus a verified
+SuperCLI migration mapping. It does not modify or gate Waves 1–3. Wave 4 is
+split across the two source repositories:
+
+```text
+Wave 4A  hermes-agent/base: generic owner-bound plugin command port
+    |
+Wave 4B  ericsson-capabilities/main: connector CLI + migration mapping
+```
+
+Wave 4A must be reviewed, merged to neutral Hermes `base`, and green before
+Wave 4B starts. The approved interface and sequencing constraints live in
 [`2026-08-16-ericsson-connector-cli-design.md`](../specs/2026-08-16-ericsson-connector-cli-design.md).
 
-The Wave 4 implementation plan and trigger prompt are intentionally not present
-yet. They are written only after the design specification is reviewed and
-approved.
+Wave 4A's plan and trigger live in `hermes-agent`; Wave 4B's plan and trigger
+live here. Neither Wave 4 session performs source delivery or brand merges.
 
 ## Vendoring
 

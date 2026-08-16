@@ -90,3 +90,14 @@ class TestHttpxTransport:
                 "GET", path, params=None, json_body=None, timeout_seconds=5,
             )
         assert excinfo.value.category == "invalid_input"
+
+    @pytest.mark.parametrize("path", ["/api/v4/..#ignored", "/api/v4/..%23ignored"])
+    def test_fragment_suffix_cannot_escape_prefix(self, path):
+        def handler(request):  # pragma: no cover - must never be reached
+            raise AssertionError("request should not have been issued")
+
+        with pytest.raises(ConnectorError) as excinfo:
+            _transport(handler).request(
+                "GET", path, params=None, json_body=None, timeout_seconds=5,
+            )
+        assert excinfo.value.category == "invalid_input"

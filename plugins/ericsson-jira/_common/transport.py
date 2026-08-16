@@ -76,14 +76,20 @@ class HttpxTransport:
         self._client.close()
 
     def _validate_path(self, path: str) -> None:
-        decoded_segments = unquote(path).split("/") if isinstance(path, str) else ()
+        parsed = urlsplit(path) if isinstance(path, str) else None
+        decoded_segments = unquote(parsed.path).split("/") if parsed else ()
         if (
             not isinstance(path, str)
             or not path.startswith(self._path_prefix)
             or len(path) > 8192
-            or urlsplit(path).scheme
+            or parsed.scheme
+            or parsed.fragment
             or "\x00" in path
-            or any(segment in {".", ".."} for segment in decoded_segments)
+            or any(
+                segment in {".", ".."}
+                or segment.startswith((".#", "..#"))
+                for segment in decoded_segments
+            )
         ):
             raise ConnectorError("invalid_input")
 

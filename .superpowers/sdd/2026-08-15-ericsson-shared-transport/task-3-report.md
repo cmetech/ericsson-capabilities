@@ -113,3 +113,49 @@ synced -> plugins/ericsson-gitlab/_common
 
 The canonical and both generated transport files have identical SHA-256:
 `0e3c94d5283e3e11d6cf4c4f7e886b6ecea1ecc659aece21de9df9338fa31cbe`.
+
+## Fix Round 2
+
+Closed the remaining fragment interaction bypass. Validation now parses the
+URL first, rejects non-empty fragments, and validates decoded path segments
+independently from the query string. Dot-segment suffixes containing a literal
+or percent-encoded hash are rejected, while legitimate query strings remain
+accepted.
+
+Added a parameterized regression in `tests/test_shared_transport.py` covering:
+
+- `/api/v4/..#ignored`
+- `/api/v4/..%23ignored`
+
+TDD evidence before the fix:
+
+```text
+. .venv/bin/activate && PYTHONPATH=shared pytest tests/test_shared_transport.py -q
+```
+
+```text
+.........FF                                                             [100%]
+2 failed, 9 passed
+```
+
+The literal case reached the mock as `https://example.test/api` after HTTPX
+stripped the fragment and normalized the dot segment; the encoded case reached
+the mock as `/api/v4/..%23ignored`.
+
+Verification after the fix and regeneration:
+
+```text
+. .venv/bin/activate && PYTHONPATH=shared pytest tests/test_shared_transport.py -q
+python scripts/sync_shared.py
+pytest tests/test_shared_sync.py -q
+```
+
+```text
+...........                                                              [100%]
+synced -> plugins/ericsson-jira/_common
+synced -> plugins/ericsson-gitlab/_common
+.......                                                                  [100%]
+```
+
+The canonical and both generated transport files have identical SHA-256:
+`52e384c7a0a0d5dceca382b2761ba823f5864155092f280058efa9a2ca768580`.

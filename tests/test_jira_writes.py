@@ -48,6 +48,9 @@ class FakeClient:
     def rest_json_versioned_mutation(self, method, resource, **kwargs):
         return self.rest_json(method, resource, **kwargs)
 
+    def rest_json_resolved_version(self, method, resource, **kwargs):
+        return self.rest_json(method, resource, **kwargs)
+
 
 class TestTransitionIntent:
     def test_no_intent_refuses_before_a_request(self):
@@ -371,6 +374,78 @@ class TestAssignIssue:
 
         assert caught.value.category == "invalid_input"
         assert client.calls == []
+
+    @pytest.mark.parametrize(
+        ("deployment", "resolved_version", "assignee", "remote_assignee"),
+        [
+            ("cloud", "3", "cloud-account", {"accountId": "cloud-account"}),
+            ("data_center", "2", "legacy-user", {"name": "legacy-user"}),
+        ],
+    )
+    def test_auto_assignment_reconciliation_reads_issue_once_at_resolved_version(
+        self, deployment, resolved_version, assignee, remote_assignee
+    ):
+        class AutoTransport:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, path, **kwargs):
+                self.calls.append((method, path, kwargs))
+                if path == "/rest/api/3/serverInfo":
+                    if deployment == "cloud":
+                        return TransportResponse(200, {}, b"{}")
+                    return TransportResponse(
+                        404,
+                        {"content-type": "application/json"},
+                        b'{"errorMessages":["REST API v3 endpoint is not available"]}',
+                    )
+                if path == "/rest/api/2/serverInfo":
+                    return TransportResponse(200, {}, b"{}")
+                if path == f"/rest/api/{resolved_version}/issue/ABC-1/assignee":
+                    return TransportResponse(500, {}, b"")
+                if path == f"/rest/api/{resolved_version}/issue/ABC-1":
+                    return TransportResponse(
+                        200,
+                        {},
+                        json.dumps(
+                            {"key": "ABC-1", "fields": {"assignee": remote_assignee}}
+                        ).encode(),
+                    )
+                if path == "/rest/api/3/issue/ABC-1":
+                    return TransportResponse(
+                        404,
+                        {"content-type": "application/json"},
+                        b'{"errorMessages":["REST API v3 endpoint is not available"]}',
+                    )
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            def close(self):
+                pass
+
+        auth = JiraAuth(
+            origin="https://jira.example.test",
+            authorization="Bearer secret-token-value",
+            auth_mode="bearer",
+            rest_api_version="auto",
+            transport="native",
+            curl_executable="/usr/bin/curl",
+            request_timeout_seconds=30,
+            default_max_results=25,
+        )
+        transport = AutoTransport()
+
+        result = JiraOperations(JiraClient(auth, native_transport=transport)).assign_issue(
+            "ABC-1", assignee, confirm=True
+        )
+
+        assert result["reconciled"] is True
+        issue_gets = [
+            (method, path)
+            for method, path, _kwargs in transport.calls
+            if method == "GET" and path.endswith("/issue/ABC-1")
+        ]
+        assert issue_gets == [("GET", f"/rest/api/{resolved_version}/issue/ABC-1")]
+        assert [method for method, _path, _kwargs in transport.calls].count("PUT") == 1
 
 
 class TestTransitionReconciliationRemainder:

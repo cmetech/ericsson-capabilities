@@ -251,7 +251,7 @@ class JiraOperations:
 
     def _assignee_matches(self, key: str, desired: str | None) -> bool:
         """Read an assignee once to reconcile an ambiguous assignment write."""
-        payload = self.client.rest_json("GET", f"issue/{key}")
+        payload = self.client.rest_json_resolved_version("GET", f"issue/{key}")
         if not isinstance(payload, Mapping):
             return False
         fields = payload.get("fields")

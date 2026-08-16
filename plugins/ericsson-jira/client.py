@@ -428,3 +428,40 @@ class JiraClient:
             self._raise_status(response, method)
             return None
         return self._decode(response, method)
+
+    def rest_json_resolved_version(
+        self,
+        method: str,
+        resource: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        deadline: float | None = None,
+    ) -> Any:
+        """Read once at an explicit or already-resolved REST API version.
+
+        This deliberately does not probe or fall back.  It is for bounded
+        reconciliation after ``rest_json_versioned_mutation`` has selected the
+        version, preventing an ambiguous write from expanding to two issue
+        reads in auto Data Center mode.
+        """
+        method = method.upper() if isinstance(method, str) else ""
+        if method != "GET":
+            raise JiraError("invalid_input")
+        self._validate_resource(resource)
+        if deadline is None:
+            deadline = self.operation_deadline()
+        configured = self.auth.rest_api_version
+        if configured in {"2", "3"}:
+            version = configured
+        else:
+            version = self._resolved_rest_api_version
+            if version is None:
+                raise JiraError("invalid_configuration")
+        response = self._perform(
+            method,
+            f"/rest/api/{version}/{resource}",
+            params=params,
+            json_body=None,
+            deadline=deadline,
+        )
+        return self._decode(response, method)

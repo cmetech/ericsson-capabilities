@@ -30,6 +30,11 @@ class FakeClient:
         self.auth = AUTH
         self.payloads = deque(payloads)
         self.calls = []
+        self.deadline_calls = 0
+
+    def operation_deadline(self):
+        self.deadline_calls += 1
+        return 123.0
 
     def rest_json(self, method, resource, **kwargs):
         self.calls.append((method, resource, kwargs))
@@ -129,6 +134,8 @@ def test_search_paginates_to_bound_and_returns_explicit_truncation_warning():
         "summary",
         "description",
     }
+    assert {call[2]["deadline"] for call in client.calls} == {123.0}
+    assert client.deadline_calls == 1
 
 
 def test_filters_are_case_insensitive_and_age_thresholds_are_deterministic():

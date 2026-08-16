@@ -32,18 +32,20 @@ else:
     from models import GitLabAuth, GitLabError
 
 
-@contextmanager
-def _as_gitlab_error():
-    """Translate shared errors at the connector boundary.
+def _call_as_gitlab_error(operation):
+    """Call shared code and detach its exception graph at the boundary.
 
     ConnectorError.detail may quote caller input, and GitLabError exists to
     guarantee no remote or secret text ever reaches the host. Translating
     here keeps that guarantee while carrying the remediation string through.
     """
+    translated = None
     try:
-        yield
+        return operation()
     except ConnectorError as exc:
-        raise GitLabError(exc.category, remediation=exc.remediation) from None
+        translated = (exc.category, exc.remediation)
+    category, remediation = translated
+    raise GitLabError(category, remediation=remediation) from None
 
 
 class _ClientCompatibilityAdapter:
@@ -141,15 +143,17 @@ class GitLabClient:
                 tls_context=getattr(authentication, "tls_context", None),
             )
         self._transport = transport
-        bounded_client = BoundedClient(
-            transport,
-            service="gitlab",
-            max_retries=max_retries,
-            total_timeout_seconds=total_timeout_seconds,
-            request_timeout_seconds=read_timeout_seconds,
-            cancel_check=cancel_check,
-            clock=clock,
-            sleep=sleep,
+        bounded_client = _call_as_gitlab_error(
+            lambda: BoundedClient(
+                transport,
+                service="gitlab",
+                max_retries=max_retries,
+                total_timeout_seconds=total_timeout_seconds,
+                request_timeout_seconds=read_timeout_seconds,
+                cancel_check=cancel_check,
+                clock=clock,
+                sleep=sleep,
+            )
         )
         self._client = _ClientCompatibilityAdapter(
             bounded_client, getattr(transport, "_client", None)
@@ -159,8 +163,7 @@ class GitLabClient:
         return f"GitLabClient(origin={self.auth.origin!r})"
 
     def close(self) -> None:
-        with _as_gitlab_error():
-            self._client.close()
+        _call_as_gitlab_error(self._client.close)
 
     def operation_deadline(self) -> float:
         return self._client.operation_deadline()
@@ -186,8 +189,7 @@ class GitLabClient:
         validator = getattr(self._transport, "_validate_path", None)
         if validator is None:
             return
-        with _as_gitlab_error():
-            validator(path)
+        _call_as_gitlab_error(lambda: validator(path))
 
     @staticmethod
     def _error_for_status(status: int) -> GitLabError:
@@ -209,23 +211,53 @@ class GitLabClient:
         return value
 
     def _request(self, method, path, *, params, json_body, deadline):
+        _status, value, headers = self.request_json_response(
+            method,
+            path,
+            params=params,
+            json_body=json_body,
+            deadline=deadline,
+        )
+        return value, headers
+
+    def request_json_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any | None = None,
+        deadline: float | None = None,
+        raise_on_status: bool = True,
+    ) -> tuple[int, Any, Mapping[str, str]]:
+        """Return status, bounded decoded JSON and headers via the public client."""
+
         if deadline is None:
             deadline = self.operation_deadline()
+        response = _call_as_gitlab_error(
+            lambda: self._client.request(
+                method,
+                path,
+                params=params,
+                json_body=json_body,
+                deadline=deadline,
+                raise_on_status=raise_on_status,
+            )
+        )
+        invalid_json = False
         try:
-            with _as_gitlab_error():
-                response = self._client.request(
-                    method, path, params=params, json_body=json_body,
-                    deadline=deadline,
-                )
-        except GitLabError as exc:
-            if exc.category == "transient":
-                self._check_cancelled(deadline)
-            raise
-        self._check_cancelled(deadline)
-        try:
-            return json.loads(response.body), response.headers
+            value = json.loads(response.body)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            raise GitLabError("invalid_remote_data") from None
+            invalid_json = True
+        if invalid_json:
+            mutating = method.upper() not in {"GET", "HEAD"}
+            if not raise_on_status and response.status >= 400:
+                value = None
+            elif mutating:
+                raise GitLabError("write_ambiguous") from None
+            else:
+                raise GitLabError("invalid_remote_data") from None
+        return response.status, value, response.headers
 
     def get_json(
         self,

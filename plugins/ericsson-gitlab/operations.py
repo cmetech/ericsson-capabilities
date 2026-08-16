@@ -1736,41 +1736,28 @@ class GitLabOperations:
     ) -> tuple[int, Any]:
         """Perform exactly one bounded mutating request without retrying."""
 
-        self.client._validate_path(path)
-        self.client._check_cancelled(deadline)
+        status, decoded, _headers = self.client.request_json_response(
+            method,
+            path,
+            json_body=dict(payload),
+            deadline=deadline,
+            raise_on_status=False,
+        )
+        if status >= 400 and status not in {400, 409}:
+            raise self.client._error_for_status(status)
+        return status, decoded
+
+    @staticmethod
+    def _usable_write_result(operation):
+        """Convert unusable post-dispatch success evidence to ambiguity."""
+
+        unusable = False
         try:
-            with self.client._client.stream(
-                method,
-                path,
-                json=dict(payload),
-                timeout=self.client._request_timeout(deadline),
-            ) as response:
-                if 300 <= response.status_code < 400:
-                    raise GitLabError("invalid_remote_data")
-                body = bytearray()
-                for chunk in response.iter_bytes():
-                    self.client._check_cancelled(deadline)
-                    if len(body) + len(chunk) > self.client.max_response_bytes:
-                        raise GitLabError("capacity")
-                    body.extend(chunk)
-                if response.status_code >= 400 and response.status_code not in {
-                    400,
-                    409,
-                }:
-                    raise self.client._error_for_status(response.status_code)
-                try:
-                    decoded = json.loads(bytes(body))
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                    if response.status_code in {400, 409}:
-                        decoded = None
-                    else:
-                        raise GitLabError("invalid_remote_data") from None
-                return response.status_code, decoded
+            return operation()
         except GitLabError:
-            raise
-        except (httpx.TimeoutException, httpx.TransportError):
-            self.client._check_cancelled(deadline)
-            raise GitLabError("transient") from None
+            unusable = True
+        if unusable:
+            raise GitLabError("write_ambiguous") from None
 
     def _write_project(self, project: str | int, *, deadline: float) -> dict[str, Any]:
         return self._ci_project(project, deadline=deadline)
@@ -1949,35 +1936,43 @@ class GitLabOperations:
             )
         if status >= 400:
             raise self.client._error_for_status(status)
-        if status != 201:
-            raise GitLabError("invalid_remote_data")
-        created_item = _as_object(created_payload)
-        if {"name", "commit", "web_url"}.issubset(created_item):
-            return self._branch_result(
-                created_payload,
+
+        def finish_branch_write():
+            if status != 201:
+                raise GitLabError("invalid_remote_data")
+            created_item = _as_object(created_payload)
+            if {"name", "commit", "web_url"}.issubset(created_item):
+                return self._branch_result(
+                    created_payload,
+                    project=project,
+                    project_result=project_result,
+                    branch=branch,
+                    source_ref=selected_source,
+                    created=True,
+                )
+            partial_identity = self._validate_partial_branch_identity(
+                created_item, project_result=project_result, branch=branch
+            )
+            reconciled = self.client.get_json(branch_path, deadline=deadline)
+            result = self._branch_result(
+                reconciled,
                 project=project,
                 project_result=project_result,
                 branch=branch,
                 source_ref=selected_source,
                 created=True,
             )
-        partial_identity = self._validate_partial_branch_identity(
-            created_item, project_result=project_result, branch=branch
-        )
-        reconciled = self.client.get_json(branch_path, deadline=deadline)
-        result = self._branch_result(
-            reconciled,
-            project=project,
-            project_result=project_result,
-            branch=branch,
-            source_ref=selected_source,
-            created=True,
-        )
-        reconciled_identity = self._validate_partial_branch_identity(
-            _as_object(reconciled), project_result=project_result, branch=branch
-        )
-        self._require_reconciled_identity(partial_identity, reconciled_identity)
-        return result
+            reconciled_identity = self._validate_partial_branch_identity(
+                _as_object(reconciled),
+                project_result=project_result,
+                branch=branch,
+            )
+            self._require_reconciled_identity(
+                partial_identity, reconciled_identity
+            )
+            return result
+
+        return self._usable_write_result(finish_branch_write)
 
     @staticmethod
     def _commit_actions(
@@ -2280,48 +2275,54 @@ class GitLabOperations:
             if status in {400, 409} and "last_commit_id" in messages:
                 raise GitLabError("conflict")
             raise self.client._error_for_status(status)
-        if status != 201:
-            raise GitLabError("invalid_remote_data")
-        item = _as_object(payload)
-        if {"id", "short_id", "title", "web_url"}.issubset(item):
-            return self._commit_result(
-                payload,
+
+        def finish_commit_write():
+            if status != 201:
+                raise GitLabError("invalid_remote_data")
+            item = _as_object(payload)
+            if {"id", "short_id", "title", "web_url"}.issubset(item):
+                return self._commit_result(
+                    payload,
+                    project=project,
+                    project_result=project_result,
+                    branch=branch,
+                    commit_message=commit_message,
+                    actions=projected,
+                )
+            if project_result is None:
+                raise GitLabError("invalid_remote_data")
+            partial_identity = self._validate_partial_commit_identity(
+                item,
+                project_result=project_result,
+                branch=branch,
+                commit_message=commit_message,
+            )
+            commit_id = partial_identity["id"]
+            reconciled = self.client.get_json(
+                f"/api/v4/projects/{endpoint}/repository/commits/"
+                f"{quote(commit_id, safe='')}",
+                deadline=deadline,
+            )
+            result = self._commit_result(
+                reconciled,
                 project=project,
                 project_result=project_result,
                 branch=branch,
                 commit_message=commit_message,
                 actions=projected,
             )
-        if project_result is None:
-            raise GitLabError("invalid_remote_data")
-        partial_identity = self._validate_partial_commit_identity(
-            item,
-            project_result=project_result,
-            branch=branch,
-            commit_message=commit_message,
-        )
-        commit_id = partial_identity["id"]
-        reconciled = self.client.get_json(
-            f"/api/v4/projects/{endpoint}/repository/commits/"
-            f"{quote(commit_id, safe='')}",
-            deadline=deadline,
-        )
-        result = self._commit_result(
-            reconciled,
-            project=project,
-            project_result=project_result,
-            branch=branch,
-            commit_message=commit_message,
-            actions=projected,
-        )
-        reconciled_identity = self._validate_partial_commit_identity(
-            _as_object(reconciled),
-            project_result=project_result,
-            branch=branch,
-            commit_message=commit_message,
-        )
-        self._require_reconciled_identity(partial_identity, reconciled_identity)
-        return result
+            reconciled_identity = self._validate_partial_commit_identity(
+                _as_object(reconciled),
+                project_result=project_result,
+                branch=branch,
+                commit_message=commit_message,
+            )
+            self._require_reconciled_identity(
+                partial_identity, reconciled_identity
+            )
+            return result
+
+        return self._usable_write_result(finish_commit_write)
 
     def _merge_request_result(
         self,
@@ -2522,20 +2523,45 @@ class GitLabOperations:
                     deadline=deadline,
                 )
             raise self.client._error_for_status(status)
-        if status != 201:
-            raise GitLabError("invalid_remote_data")
-        item = _as_object(payload)
-        if {
-            "iid",
-            "project_id",
-            "title",
-            "state",
-            "source_branch",
-            "target_branch",
-            "web_url",
-        }.issubset(item):
-            return self._merge_request_result(
-                payload,
+
+        def finish_merge_request_write():
+            if status != 201:
+                raise GitLabError("invalid_remote_data")
+            item = _as_object(payload)
+            if {
+                "iid",
+                "project_id",
+                "title",
+                "state",
+                "source_branch",
+                "target_branch",
+                "web_url",
+            }.issubset(item):
+                return self._merge_request_result(
+                    payload,
+                    project=project,
+                    project_id=project_result["id"],
+                    project_path=project_result["path_with_namespace"],
+                    source_branch=source_branch,
+                    target_branch=selected_target,
+                    created=True,
+                    expected_title=selected_title,
+                )
+            partial_identity = self._validate_partial_merge_request_identity(
+                item,
+                project_id=project_result["id"],
+                project_path=project_result["path_with_namespace"],
+                source_branch=source_branch,
+                target_branch=selected_target,
+                title=selected_title,
+            )
+            iid = partial_identity["iid"]
+            reconciled = self.client.get_json(
+                f"/api/v4/projects/{endpoint}/merge_requests/{iid}",
+                deadline=deadline,
+            )
+            result = self._merge_request_result(
+                reconciled,
                 project=project,
                 project_id=project_result["id"],
                 project_path=project_result["path_with_namespace"],
@@ -2544,39 +2570,20 @@ class GitLabOperations:
                 created=True,
                 expected_title=selected_title,
             )
-        partial_identity = self._validate_partial_merge_request_identity(
-            item,
-            project_id=project_result["id"],
-            project_path=project_result["path_with_namespace"],
-            source_branch=source_branch,
-            target_branch=selected_target,
-            title=selected_title,
-        )
-        iid = partial_identity["iid"]
-        reconciled = self.client.get_json(
-            f"/api/v4/projects/{endpoint}/merge_requests/{iid}",
-            deadline=deadline,
-        )
-        result = self._merge_request_result(
-            reconciled,
-            project=project,
-            project_id=project_result["id"],
-            project_path=project_result["path_with_namespace"],
-            source_branch=source_branch,
-            target_branch=selected_target,
-            created=True,
-            expected_title=selected_title,
-        )
-        reconciled_identity = self._validate_partial_merge_request_identity(
-            _as_object(reconciled),
-            project_id=project_result["id"],
-            project_path=project_result["path_with_namespace"],
-            source_branch=source_branch,
-            target_branch=selected_target,
-            title=selected_title,
-        )
-        self._require_reconciled_identity(partial_identity, reconciled_identity)
-        return result
+            reconciled_identity = self._validate_partial_merge_request_identity(
+                _as_object(reconciled),
+                project_id=project_result["id"],
+                project_path=project_result["path_with_namespace"],
+                source_branch=source_branch,
+                target_branch=selected_target,
+                title=selected_title,
+            )
+            self._require_reconciled_identity(
+                partial_identity, reconciled_identity
+            )
+            return result
+
+        return self._usable_write_result(finish_merge_request_write)
 
     @staticmethod
     def _add_warning(warnings: list[str], code: str) -> None:

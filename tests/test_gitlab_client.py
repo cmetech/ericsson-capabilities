@@ -397,6 +397,8 @@ def test_response_body_json_and_total_deadline_are_bounded(tmp_path):
             gitlab.get_json("/api/v4/projects/42")
     assert malformed.value.category == "invalid_remote_data"
     assert "not-json" not in str(malformed.value)
+    assert malformed.value.__context__ is None
+    assert malformed.value.__cause__ is None
 
 
 def test_each_request_timeout_is_clamped_to_remaining_aggregate_deadline(tmp_path):

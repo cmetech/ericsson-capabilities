@@ -8,6 +8,7 @@ never be hand-edited; this test is what makes that enforceable.
 
 from pathlib import Path
 
+import ericsson_common
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -17,15 +18,41 @@ PLUGINS = REPO / "plugins"
 # Connectors that consume the shared transport. ericsson-teams is excluded:
 # it is Graph-only and has no REST client to share.
 CONSUMERS = ["ericsson-jira", "ericsson-gitlab"]
+_CACHE_DIRECTORIES = frozenset(
+    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+)
+_CACHE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 
-def _canonical_files():
-    return sorted(p.relative_to(CANONICAL) for p in CANONICAL.rglob("*.py"))
+def _canonical_files(root=CANONICAL):
+    return sorted(
+        path.relative_to(root)
+        for path in root.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and not _CACHE_DIRECTORIES.intersection(path.relative_to(root).parts)
+        and path.suffix not in _CACHE_SUFFIXES
+    )
+
+
+def test_inventory_includes_non_python_regular_artifacts(tmp_path):
+    """A generated JSON/schema artifact must be covered by drift checks too."""
+    (tmp_path / "contract.json").write_text("{}", encoding="utf-8")
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "ignored.pyc").write_bytes(b"cache")
+
+    assert _canonical_files(tmp_path) == [Path("contract.json")]
 
 
 def test_canonical_source_exists():
     assert CANONICAL.is_dir(), f"missing canonical shared source at {CANONICAL}"
     assert (CANONICAL / "__init__.py").is_file()
+
+
+def test_pytest_import_resolves_to_canonical_source():
+    """The repository config, not an ambient install, supplies the package."""
+    assert Path(ericsson_common.__file__).resolve().parent == CANONICAL.resolve()
 
 
 @pytest.mark.parametrize("plugin", CONSUMERS)
@@ -65,7 +92,11 @@ def test_copy_has_no_extra_files(plugin):
     canonical = set(_canonical_files())
     extra = [
         str(p.relative_to(vendored))
-        for p in vendored.rglob("*.py")
-        if p.relative_to(vendored) not in canonical
+        for p in vendored.rglob("*")
+        if p.is_file()
+        and not p.is_symlink()
+        and not _CACHE_DIRECTORIES.intersection(p.relative_to(vendored).parts)
+        and p.suffix not in _CACHE_SUFFIXES
+        and p.relative_to(vendored) not in canonical
     ]
     assert not extra, f"{plugin}/_common has stale files: {extra}"

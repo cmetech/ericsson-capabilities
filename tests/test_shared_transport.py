@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from ericsson_common.errors import ConnectorError
-from ericsson_common.transport import HttpxTransport, Response
+from ericsson_common.transport import HttpxTransport, RequestControl, Response
 
 
 class TestResponse:
@@ -48,6 +48,33 @@ class TestHttpxTransport:
                 timeout_seconds=5,
             )
         assert excinfo.value.category == "capacity"
+
+    def test_stream_capacity_failure_records_post_dispatch_uncertainty(self):
+        def handler(request):
+            return httpx.Response(200, content=b"x" * 5000)
+
+        with pytest.raises(ConnectorError) as excinfo:
+            _transport(handler, max_response_bytes=1000).request(
+                "POST", "/api/v4/projects", params=None, json_body={},
+                timeout_seconds=5,
+            )
+        assert excinfo.value.category == "capacity"
+        assert excinfo.value.outcome_uncertain is True
+
+    def test_completed_client_error_status_survives_oversized_error_body(self):
+        def handler(request):
+            return httpx.Response(401, content=b"x" * 1001)
+
+        response = _transport(handler, max_response_bytes=1000).request(
+            "POST",
+            "/api/v4/projects",
+            params=None,
+            json_body={},
+            timeout_seconds=5,
+        )
+
+        assert response.status == 401
+        assert response.body == b""
 
     def test_redirects_are_not_followed(self):
         def handler(request):
@@ -101,3 +128,99 @@ class TestHttpxTransport:
                 "GET", path, params=None, json_body=None, timeout_seconds=5,
             )
         assert excinfo.value.category == "invalid_input"
+
+    def test_absolute_deadline_is_checked_between_trickled_chunks(self):
+        class Clock:
+            now = 0.0
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+
+        class Trickle(httpx.SyncByteStream):
+            def __iter__(self):
+                for _ in range(3):
+                    clock.now += 0.8
+                    yield b"x"
+
+        def handler(request):
+            return httpx.Response(200, stream=Trickle())
+
+        control = RequestControl(
+            deadline=1.5,
+            cancel_check=lambda: False,
+            clock=clock,
+            service="gitlab",
+        )
+        with pytest.raises(ConnectorError) as excinfo:
+            _transport(handler).request_with_controls(
+                "GET", "/api/v4/projects", params=None, json_body=None,
+                timeout_seconds=5, control=control,
+            )
+        assert excinfo.value.category == "deadline"
+        assert excinfo.value.outcome_uncertain is True
+
+    def test_cancellation_is_checked_between_trickled_chunks(self):
+        cancelled = {"value": False}
+
+        class Trickle(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"first"
+                cancelled["value"] = True
+                yield b"second"
+
+        def handler(request):
+            return httpx.Response(200, stream=Trickle())
+
+        control = RequestControl(
+            deadline=10.0,
+            cancel_check=lambda: cancelled["value"],
+            clock=lambda: 0.0,
+            service="gitlab",
+        )
+        with pytest.raises(ConnectorError) as excinfo:
+            _transport(handler).request_with_controls(
+                "POST", "/api/v4/projects", params=None, json_body={},
+                timeout_seconds=5, control=control,
+            )
+        assert excinfo.value.category == "cancelled"
+        assert excinfo.value.outcome_uncertain is True
+
+    def test_cancellation_after_request_build_stops_before_dispatch(self, monkeypatch):
+        cancelled = {"value": False}
+        dispatched = []
+
+        def handler(request):  # pragma: no cover - control must stop first
+            dispatched.append(request)
+            return httpx.Response(201, json={})
+
+        transport = _transport(handler)
+        original_build = transport._client.build_request
+
+        def build_then_cancel(*args, **kwargs):
+            request = original_build(*args, **kwargs)
+            cancelled["value"] = True
+            return request
+
+        monkeypatch.setattr(transport._client, "build_request", build_then_cancel)
+        control = RequestControl(
+            deadline=10.0,
+            cancel_check=lambda: cancelled["value"],
+            clock=lambda: 0.0,
+            service="gitlab",
+        )
+
+        with pytest.raises(ConnectorError) as excinfo:
+            transport.request_with_controls(
+                "POST",
+                "/api/v4/projects",
+                params=None,
+                json_body={},
+                timeout_seconds=5,
+                control=control,
+            )
+
+        assert excinfo.value.category == "cancelled"
+        assert excinfo.value.outcome_uncertain is False
+        assert dispatched == []

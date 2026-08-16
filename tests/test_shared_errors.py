@@ -54,3 +54,6 @@ class TestConnectorError:
 
     def test_remediation_is_none_when_service_unknown(self):
         assert ConnectorError("authentication").remediation is None
+
+    def test_outcome_provenance_defaults_to_pre_dispatch(self):
+        assert ConnectorError("capacity").outcome_uncertain is False

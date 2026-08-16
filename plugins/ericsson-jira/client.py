@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 import re
 import time
@@ -10,27 +9,23 @@ from typing import Any, Callable, Mapping
 
 if __package__:
     from ._common.client import BoundedClient
-    from ._common.errors import RETRYABLE_STATUSES, ConnectorError
-    from ._common.transport import Response
+    from ._common.errors import (
+        ConnectorError,
+        category_for_status,
+        remediation_for,
+    )
+    from ._common.transport import Response, validate_transport_path
     from .models import JiraAuth, JiraError, TransportResponse
     from .transport import NativeTransport, _JiraTransportFailure
 else:
     from _common.client import BoundedClient
-    from _common.errors import RETRYABLE_STATUSES, ConnectorError
-    from _common.transport import Response
+    from _common.errors import ConnectorError, category_for_status, remediation_for
+    from _common.transport import Response, validate_transport_path
     from models import JiraAuth, JiraError, TransportResponse
     from transport import NativeTransport, _JiraTransportFailure
 
 
 _MAX_RESPONSE_BYTES = 1024 * 1024
-_STATUS_CATEGORY = {
-    400: "invalid_input",
-    401: "authentication",
-    403: "permission",
-    404: "not_found",
-    409: "conflict",
-    429: "rate_limited",
-}
 _RESOURCE = re.compile(r"^[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$")
 _REST_UNSUPPORTED_MESSAGES = frozenset(
     {
@@ -44,14 +39,16 @@ _POTENTIALLY_UNCERTAIN = frozenset(
 )
 
 
-@contextmanager
-def _as_jira_error():
-    """Translate shared errors at the connector boundary without detail leaks."""
+def _call_as_jira_error(operation):
+    """Call shared code and detach its exception graph at the public boundary."""
 
+    translated = None
     try:
-        yield
+        return operation()
     except ConnectorError as exc:
-        raise JiraError(exc.category, remediation=exc.remediation) from None
+        translated = (exc.category, exc.remediation)
+    category, remediation = translated
+    raise JiraError(category, remediation=remediation) from None
 
 
 class _SharedTransportAdapter:
@@ -61,39 +58,50 @@ class _SharedTransportAdapter:
         self._transport = transport
 
     def request(self, *args, **kwargs) -> Response:
-        method = args[0] if args else kwargs.get("method", "")
+        return self._request(lambda: self._transport.request(*args, **kwargs))
+
+    def request_with_controls(self, *args, control, **kwargs) -> Response:
+        controlled = getattr(self._transport, "request_with_controls", None)
+        if controlled is None:
+            operation = lambda: self._transport.request(*args, **kwargs)
+        else:
+            operation = lambda: controlled(*args, control=control, **kwargs)
+        return self._request(operation)
+
+    @staticmethod
+    def _request(operation) -> Response:
+        failure = None
         try:
-            response = self._transport.request(*args, **kwargs)
+            response = operation()
         except _JiraTransportFailure as exc:
-            self._raise_for_policy(
-                method, exc, outcome_uncertain=exc.outcome_uncertain
-            )
+            failure = (exc.category, exc.outcome_uncertain)
         except JiraError as exc:
-            self._raise_for_policy(
-                method,
-                exc,
-                outcome_uncertain=exc.category in _POTENTIALLY_UNCERTAIN,
+            failure = (
+                exc.category,
+                bool(
+                    getattr(exc, "outcome_uncertain", False)
+                    or exc.category in _POTENTIALLY_UNCERTAIN
+                ),
             )
+        if failure is not None:
+            category, outcome_uncertain = failure
+            raise ConnectorError(
+                category,
+                service="jira",
+                outcome_uncertain=outcome_uncertain,
+            ) from None
         if isinstance(response, Response):
             return response
         return Response(response.status, response.headers, response.body)
 
-    @staticmethod
-    def _raise_for_policy(method, exc: JiraError, *, outcome_uncertain: bool):
-        if (
-            not outcome_uncertain
-            or method.upper() == "GET" and exc.category != "transient"
-        ):
-            raise ConnectorError(exc.category, service="jira") from None
-        # BoundedClient owns retries, breaker accounting and write ambiguity.
-        # A non-ConnectorError is its transport-uncertainty signal.
-        raise exc from None
-
     def close(self) -> None:
+        category = None
         try:
             self._transport.close()
         except JiraError as exc:
-            raise ConnectorError(exc.category, service="jira") from None
+            category = exc.category
+        if category is not None:
+            raise ConnectorError(category, service="jira") from None
 
 
 def _header(response: TransportResponse, name: str) -> str:
@@ -157,11 +165,13 @@ class JiraClient:
         self.max_retries = max_retries
         chosen = transport or native_transport
         if chosen is None:
-            chosen = NativeTransport(authentication, cancel_check=cancel_check)
+            chosen = NativeTransport(
+                authentication, cancel_check=cancel_check, clock=clock
+            )
         self._transport = chosen
         self._clock = clock
-        with _as_jira_error():
-            self._client = BoundedClient(
+        self._client = _call_as_jira_error(
+            lambda: BoundedClient(
                 _SharedTransportAdapter(chosen),
                 service="jira",
                 max_retries=max_retries,
@@ -171,13 +181,16 @@ class JiraClient:
                 clock=clock,
                 sleep=sleep,
             )
+        )
 
     def __repr__(self) -> str:
         return f"JiraClient(origin={self.auth.origin!r})"
 
     def close(self) -> None:
-        with _as_jira_error():
-            self._client.close()
+        _call_as_jira_error(self._client.close)
+
+    def operation_deadline(self) -> float:
+        return _call_as_jira_error(self._client.operation_deadline)
 
     def __enter__(self):
         return self
@@ -194,8 +207,8 @@ class JiraClient:
         json_body: Any | None,
         deadline: float,
     ) -> Response:
-        with _as_jira_error():
-            return self._client.request(
+        return _call_as_jira_error(
+            lambda: self._client.request(
                 method,
                 path,
                 params=params,
@@ -203,10 +216,11 @@ class JiraClient:
                 deadline=deadline,
                 raise_on_status=False,
             )
+        )
 
     @staticmethod
     def _validate_resource(resource: str) -> None:
-        if (
+        invalid = (
             not isinstance(resource, str)
             or not resource
             or len(resource) > 4096
@@ -214,31 +228,49 @@ class JiraClient:
             or "://" in resource
             or ".." in resource.split("/")
             or _RESOURCE.fullmatch(resource) is None
-        ):
+        )
+        if not invalid:
+            try:
+                validate_transport_path(
+                    f"/rest/api/3/{resource}",
+                    path_prefix="/rest/api/",
+                    allow_query=False,
+                    reject_encoded_separators=True,
+                )
+            except ConnectorError:
+                invalid = True
+        if invalid:
             raise JiraError("invalid_input")
 
     @staticmethod
     def _raise_status(response: TransportResponse, method: str) -> None:
         if response.status < 400:
             if 300 <= response.status < 400:
-                raise JiraError("invalid_remote_data")
+                category = (
+                    "invalid_remote_data" if method == "GET" else "write_ambiguous"
+                )
+                raise JiraError(category)
             return
-        if method != "GET" and response.status in RETRYABLE_STATUSES:
+        if method != "GET" and response.status >= 500:
             raise JiraError("write_ambiguous")
-        category = _STATUS_CATEGORY.get(response.status)
-        if category is None:
-            category = "transient" if 500 <= response.status <= 599 else "invalid_remote_data"
-        raise JiraError(category)
+        category = category_for_status(response.status)
+        raise JiraError(
+            category, remediation=remediation_for(category, "jira")
+        )
 
     @staticmethod
     def _decode(response: TransportResponse, method: str) -> Any:
         JiraClient._raise_status(response, method)
         if len(response.body) > _MAX_RESPONSE_BYTES:
-            raise JiraError("capacity")
+            raise JiraError("capacity" if method == "GET" else "write_ambiguous")
+        invalid_json = False
         try:
             return json.loads(response.body)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            raise JiraError("invalid_remote_data") from None
+            invalid_json = True
+        if invalid_json:
+            category = "invalid_remote_data" if method == "GET" else "write_ambiguous"
+            raise JiraError(category) from None
 
     def rest_json(
         self,
@@ -255,7 +287,7 @@ class JiraClient:
             raise JiraError("invalid_input")
         self._validate_resource(resource)
         if deadline is None:
-            deadline = self._clock() + self.auth.request_timeout_seconds
+            deadline = self.operation_deadline()
         versions = (
             ("3", "2")
             if self.auth.rest_api_version == "auto"

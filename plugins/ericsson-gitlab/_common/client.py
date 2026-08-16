@@ -21,10 +21,10 @@ if __package__:
         ConnectorError,
         category_for_status,
     )
-    from .transport import Response
+    from .transport import RequestControl, Response
 else:
     from errors import RETRYABLE_STATUSES, ConnectorError, category_for_status
-    from transport import Response
+    from transport import RequestControl, Response
 
 __all__ = ["BoundedClient"]
 
@@ -79,14 +79,14 @@ class BoundedClient:
         return remaining
 
     @staticmethod
-    def retry_delay(response: Response, attempt: int) -> float:
+    def retry_delay(response: Response | None, attempt: int) -> float:
         """Seconds to wait before retrying.
 
         Honours Retry-After when it is present and sane; a server asking for
         an hour is refused in favour of the normal backoff, because blocking
         an agent turn that long is worse than giving up.
         """
-        raw = response.header("retry-after")
+        raw = response.header("retry-after") if response is not None else ""
         if raw:
             try:
                 value = float(raw)
@@ -133,38 +133,95 @@ class BoundedClient:
         attempt = 0
         while True:
             remaining = self._remaining(deadline)
+            control = RequestControl(
+                deadline=deadline,
+                cancel_check=self._cancel_check,
+                clock=self._clock,
+                service=self._service,
+            )
+            connector_failure = None
+            transport_failure = False
             try:
-                response = self._transport.request(
-                    method,
-                    path,
-                    params=params,
-                    json_body=json_body,
-                    timeout_seconds=min(remaining, self._request_timeout_seconds),
+                controlled_request = getattr(
+                    self._transport, "request_with_controls", None
                 )
-            except ConnectorError:
-                raise
+                request_options = {
+                    "params": params,
+                    "json_body": json_body,
+                    "timeout_seconds": min(
+                        remaining, self._request_timeout_seconds
+                    ),
+                }
+                if controlled_request is None:
+                    response = self._transport.request(
+                        method, path, **request_options
+                    )
+                else:
+                    response = controlled_request(
+                        method, path, control=control, **request_options
+                    )
+            except ConnectorError as exc:
+                connector_failure = exc
             except Exception:
+                transport_failure = True
+
+            if connector_failure is not None or transport_failure:
+                uncertain = transport_failure or bool(
+                    connector_failure
+                    and connector_failure.outcome_uncertain
+                )
                 if not idempotent:
-                    # The write may have landed. Reporting ambiguity is the
-                    # only honest answer; retrying could duplicate it.
-                    self._record_failure(path)
-                    raise ConnectorError(
-                        "write_ambiguous", service=self._service
-                    ) from None
+                    if uncertain:
+                        self._record_failure(path)
+                        raise ConnectorError(
+                            "write_ambiguous", service=self._service
+                        ) from None
+                    assert connector_failure is not None
+                    raise connector_failure
+                retryable_transport = transport_failure or bool(
+                    connector_failure
+                    and connector_failure.category == "transient"
+                )
+                if not retryable_transport:
+                    assert connector_failure is not None
+                    raise connector_failure
+                remaining_after_failure = self._remaining(deadline)
                 if attempt >= self._max_retries:
                     self._record_failure(path)
                     raise ConnectorError(
                         "transient", service=self._service
                     ) from None
+                delay = self.retry_delay(None, attempt)
+                if delay >= remaining_after_failure:
+                    raise ConnectorError("deadline", service=self._service)
+                self._sleep(delay)
                 attempt += 1
                 continue
 
-            self._remaining(deadline)
+            deterministic_client_response = 400 <= response.status < 500
+            if not deterministic_client_response:
+                post_dispatch_failure = None
+                try:
+                    control.remaining(outcome_uncertain=True)
+                except ConnectorError as exc:
+                    post_dispatch_failure = exc
+                if post_dispatch_failure is not None:
+                    if not idempotent:
+                        self._record_failure(path)
+                        raise ConnectorError(
+                            "write_ambiguous", service=self._service
+                        ) from None
+                    raise post_dispatch_failure
 
-            if response.status in RETRYABLE_STATUSES:
-                if not idempotent:
-                    self._record_failure(path)
-                    raise ConnectorError("write_ambiguous", service=self._service)
+            if not idempotent and (
+                response.status >= 500 or 300 <= response.status < 400
+            ):
+                self._record_failure(path)
+                raise ConnectorError(
+                    "write_ambiguous", service=self._service
+                )
+
+            if response.status in RETRYABLE_STATUSES and idempotent:
                 if attempt < self._max_retries:
                     delay = self.retry_delay(response, attempt)
                     if delay >= self._remaining(deadline):

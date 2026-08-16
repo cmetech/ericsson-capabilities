@@ -370,6 +370,7 @@ class JiraOperations:
             or maximum_age is not None
         )
         page_size = 100 if has_filters else max_results
+        deadline = self.client.operation_deadline()
 
         selected: list[dict[str, Any]] = []
         start_at = 0
@@ -387,6 +388,7 @@ class JiraOperations:
                     "maxResults": page_size,
                     "fields": ",".join(sorted(requested_fields)),
                 },
+                deadline=deadline,
             )
             if not isinstance(payload, dict) or not isinstance(payload.get("issues"), list):
                 raise JiraError("invalid_remote_data")
@@ -436,10 +438,12 @@ class JiraOperations:
     def get_issue(self, key: str) -> dict[str, Any]:
         if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
             raise JiraError("invalid_input")
+        deadline = self.client.operation_deadline()
         payload = self.client.rest_json(
             "GET",
             f"issue/{key}",
             params={"fields": ",".join(sorted(DETAIL_FIELDS))},
+            deadline=deadline,
         )
         normalized = self._normalize_issue(payload)
         fields = payload["fields"]
@@ -467,11 +471,14 @@ class JiraOperations:
         normalized["comments"] = comments
         return normalized
 
-    def _find_comment(self, key: str, body: str) -> str | None:
+    def _find_comment(
+        self, key: str, body: str, *, deadline: float
+    ) -> str | None:
         payload = self.client.rest_json(
             "GET",
             f"issue/{key}/comment",
             params={"maxResults": 100, "orderBy": "-created"},
+            deadline=deadline,
         )
         if not isinstance(payload, dict) or not isinstance(payload.get("comments"), list):
             raise JiraError("invalid_remote_data")
@@ -529,7 +536,8 @@ class JiraOperations:
                 "issue_key": key,
                 "body": body,
             }
-        existing = self._find_comment(key, body)
+        deadline = self.client.operation_deadline()
+        existing = self._find_comment(key, body, deadline=deadline)
         if existing is not None:
             return self._comment_result(
                 existing,
@@ -552,19 +560,38 @@ class JiraOperations:
         }
         v2_body = {"body": body}
         selected_body = v2_body if self.client.auth.rest_api_version == "2" else v3_body
+        original_failure = None
         try:
             payload = self.client.rest_json(
                 "POST",
                 f"issue/{key}/comment",
                 json_body=selected_body,
                 json_body_by_version={"3": v3_body, "2": v2_body},
+                deadline=deadline,
             )
         except JiraError as exc:
             if exc.category not in {"conflict", "write_ambiguous"}:
                 raise
-            reconciled = self._find_comment(key, body)
-            if reconciled is None:
-                raise
+            original_failure = exc.category
+        if original_failure is None:
+            if isinstance(payload, dict):
+                comment_id = _bounded_string(payload.get("id"), 128)
+                if comment_id:
+                    return self._comment_result(
+                        comment_id,
+                        created=True,
+                        duplicate=False,
+                        reconciled=False,
+                        dry_run=False,
+                    )
+            original_failure = "write_ambiguous"
+
+        reconciled = None
+        try:
+            reconciled = self._find_comment(key, body, deadline=deadline)
+        except JiraError:
+            pass
+        if reconciled is not None:
             return self._comment_result(
                 reconciled,
                 created=False,
@@ -572,15 +599,4 @@ class JiraOperations:
                 reconciled=True,
                 dry_run=False,
             )
-        if not isinstance(payload, dict):
-            raise JiraError("invalid_remote_data")
-        comment_id = _bounded_string(payload.get("id"), 128)
-        if not comment_id:
-            raise JiraError("invalid_remote_data")
-        return self._comment_result(
-            comment_id,
-            created=True,
-            duplicate=False,
-            reconciled=False,
-            dry_run=False,
-        )
+        raise JiraError(original_failure) from None

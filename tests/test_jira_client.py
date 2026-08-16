@@ -133,8 +133,31 @@ def test_non_transient_status_is_never_retried(status):
     assert len(transport.calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [
+        (400, "invalid_input"),
+        (401, "authentication"),
+        (403, "permission"),
+        (404, "not_found"),
+        (409, "conflict"),
+        (429, "rate_limited"),
+    ],
+)
+def test_deterministic_mutation_4xx_is_preserved_without_retry(status, category):
+    transport = FakeTransport(response(status, body=b"not-json"))
+    client = JiraClient(auth(rest_api_version="3"), native_transport=transport)
+
+    with pytest.raises(JiraError) as caught:
+        client.rest_json("POST", "issue/ABC-1/comment", json_body={"body": "x"})
+
+    assert caught.value.category == category
+    assert len(transport.calls) == 1
+
+
 def test_write_ambiguity_is_never_retried_on_status_or_transport_failure():
     for outcome in (
+        response(500),
         response(503),
         httpx.ConnectError("secret destination diagnostic"),
         httpx.ReadTimeout("secret timeout diagnostic"),
@@ -148,15 +171,36 @@ def test_write_ambiguity_is_never_retried_on_status_or_transport_failure():
         assert len(transport.calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("body", "legacy_category"),
+    [
+        (b"remote secret not json", "invalid_remote_data"),
+        (b"x" * 1_048_577, "capacity"),
+    ],
+)
+def test_post_dispatch_success_decode_failures_are_ambiguous(body, legacy_category):
+    transport = FakeTransport(response(201, body=body))
+    client = JiraClient(auth(rest_api_version="3"), native_transport=transport)
+
+    with pytest.raises(JiraError) as caught:
+        client.rest_json("POST", "issue/ABC-1/comment", json_body={"body": "x"})
+
+    assert caught.value.category == "write_ambiguous", legacy_category
+    assert "remote secret" not in str(caught.value)
+    assert len(transport.calls) == 1
+
+
 def test_read_transport_failure_retries_but_remains_safely_classified():
+    sleeps = []
     transport = FakeTransport(
         httpx.ConnectError("dns secret diagnostic"),
         response(payload={"ok": True}),
     )
-    client = JiraClient(auth(), native_transport=transport)
+    client = JiraClient(auth(), native_transport=transport, sleep=sleeps.append)
 
     assert client.rest_json("GET", "search") == {"ok": True}
     assert len(transport.calls) == 2
+    assert sleeps == [0.5]
 
 
 def test_cancellation_and_deadline_stop_before_transport():
@@ -190,6 +234,16 @@ def test_request_rejects_absolute_cross_origin_and_unsafe_resource_paths():
         "//other.example.test/search",
         "../search",
         "search?token=secret-token",
+        "./search",
+        "%2e%2e/search",
+        "%252e%252e%252fadmin",
+        "issue%2fABC-1",
+        "issue/%5cadmin",
+        "issue/%00secret",
+        "issue/%23fragment",
+        "issue/%3fquery",
+        "search%",
+        "search#fragment",
     ):
         with pytest.raises(JiraError) as caught:
             client.rest_json("GET", resource)
@@ -205,6 +259,8 @@ def test_malformed_or_oversized_success_response_is_rejected_without_body_echo()
             client.rest_json("GET", "search")
         assert caught.value.category in {"invalid_remote_data", "capacity"}
         assert "remote secret" not in str(caught.value)
+        assert caught.value.__context__ is None
+        assert caught.value.__cause__ is None
 
 
 def test_native_transport_pins_origin_headers_deadline_and_redirect_policy():
@@ -221,6 +277,191 @@ def test_native_transport_pins_origin_headers_deadline_and_redirect_policy():
     assert requests[0].url == "https://jira.example.test/rest/api/3/search"
     assert requests[0].headers["authorization"] == "Bearer secret-token"
     assert requests[0].extensions["timeout"]["read"] == 7
+
+
+def test_native_transport_streams_and_stops_at_response_capacity():
+    emitted = {"count": 0}
+
+    class LargeStream(httpx.SyncByteStream):
+        def __iter__(self):
+            for _ in range(2048):
+                emitted["count"] += 1
+                yield b"x" * 1024
+
+    def send(_request):
+        return httpx.Response(200, stream=LargeStream())
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    with pytest.raises(JiraError) as caught:
+        native.request("POST", "/rest/api/3/issue", timeout_seconds=7)
+
+    assert caught.value.category == "capacity"
+    assert caught.value.outcome_uncertain is True
+    assert emitted["count"] == 1025
+
+
+def test_native_transport_accepts_response_at_exact_capacity():
+    class ExactStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"x" * (512 * 1024)
+            yield b"y" * (512 * 1024)
+
+    def send(_request):
+        return httpx.Response(200, stream=ExactStream())
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    result = native.request("GET", "/rest/api/3/search", timeout_seconds=7)
+
+    assert len(result.body) == 1024 * 1024
+    assert result.body[:1] == b"x"
+    assert result.body[-1:] == b"y"
+
+
+def test_native_transport_preserves_4xx_when_error_body_exceeds_capacity():
+    class OversizedError(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"x" * (1024 * 1024 + 1)
+
+    def send(_request):
+        return httpx.Response(401, stream=OversizedError())
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    result = native.request(
+        "POST", "/rest/api/3/issue/ABC-1/comment", timeout_seconds=7
+    )
+
+    assert result.status == 401
+    assert result.body == b""
+
+
+def test_native_rechecks_cancellation_after_local_preparation_before_dispatch(
+    monkeypatch,
+):
+    cancelled = {"value": False}
+    dispatched = []
+
+    def prepare(_body):
+        cancelled["value"] = True
+        return b"{}"
+
+    def send(request):  # pragma: no cover - cancellation must stop first
+        dispatched.append(request)
+        return httpx.Response(201, json={})
+
+    monkeypatch.setattr(
+        transport.CurlTransport, "_request_body", staticmethod(prepare)
+    )
+    native = NativeTransport(
+        auth(),
+        http_transport=httpx.MockTransport(send),
+        cancel_check=lambda: cancelled["value"],
+    )
+
+    with pytest.raises(JiraError) as caught:
+        native.request(
+            "POST", "/rest/api/3/issue/ABC-1/comment", json_body={}, timeout_seconds=7
+        )
+
+    assert caught.value.category == "cancelled"
+    assert caught.value.outcome_uncertain is False
+    assert dispatched == []
+
+
+def test_native_transport_observes_absolute_deadline_during_trickle():
+    common_transport = __import__(
+        f"{transport.__package__}._common.transport", fromlist=["RequestControl"]
+    )
+
+    class Clock:
+        now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+
+    class Trickle(httpx.SyncByteStream):
+        def __iter__(self):
+            for _ in range(3):
+                clock.now += 0.8
+                yield b"x"
+
+    def send(_request):
+        return httpx.Response(200, stream=Trickle())
+
+    control = common_transport.RequestControl(
+        deadline=1.5,
+        cancel_check=lambda: False,
+        clock=clock,
+        service="jira",
+    )
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    with pytest.raises(JiraError) as caught:
+        native.request_with_controls(
+            "GET", "/rest/api/3/search", timeout_seconds=7, control=control
+        )
+
+    assert caught.value.category == "deadline"
+    assert caught.value.outcome_uncertain is True
+
+
+def test_native_transport_observes_cancellation_during_trickle():
+    common_transport = __import__(
+        f"{transport.__package__}._common.transport", fromlist=["RequestControl"]
+    )
+    cancelled = {"value": False}
+
+    class Trickle(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"first"
+            cancelled["value"] = True
+            yield b"second"
+
+    def send(_request):
+        return httpx.Response(200, stream=Trickle())
+
+    control = common_transport.RequestControl(
+        deadline=10.0,
+        cancel_check=lambda: cancelled["value"],
+        clock=lambda: 0.0,
+        service="jira",
+    )
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    with pytest.raises(JiraError) as caught:
+        native.request_with_controls(
+            "POST", "/rest/api/3/issue", timeout_seconds=7, control=control
+        )
+
+    assert caught.value.category == "cancelled"
+    assert caught.value.outcome_uncertain is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/rest/api/3/../admin",
+        "/rest/api/3/%2e%2e/admin",
+        "/rest/api/3/%252e%252e%252fadmin",
+        "/rest/api/3/issue%2f..%2fadmin",
+        "/rest/api/3/issue%5cadmin",
+        "/rest/api/3/issue%00secret",
+        "/rest/api/3/search%",
+        "/rest/api/3/search#fragment",
+    ],
+)
+def test_native_transport_rejects_ambiguous_decoded_paths_before_dispatch(path):
+    dispatched = []
+
+    def send(request):  # pragma: no cover - validation must stop first
+        dispatched.append(request)
+        return httpx.Response(200, json={})
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    with pytest.raises(JiraError) as caught:
+        native.request("GET", path, timeout_seconds=7)
+
+    assert caught.value.category == "invalid_input"
+    assert dispatched == []
 
 
 @pytest.mark.parametrize(

@@ -38,6 +38,11 @@ class FakeClient:
         self.auth = auth(version)
         self.outcomes = deque(outcomes)
         self.calls = []
+        self.deadline_calls = 0
+
+    def operation_deadline(self):
+        self.deadline_calls += 1
+        return 123.0
 
     def rest_json(self, method, resource, **kwargs):
         self.calls.append((method, resource, kwargs))
@@ -222,6 +227,18 @@ def test_unreconciled_ambiguous_write_is_reported_and_never_retried():
 
     assert caught.value.category == "write_ambiguous"
     assert [call[0] for call in client.calls] == ["GET", "POST", "GET"]
+
+
+def test_incomplete_success_payload_reconciles_or_reports_write_ambiguous():
+    client = FakeClient(comments(), {}, comments())
+
+    with pytest.raises(JiraError) as caught:
+        JiraOperations(client).add_comment("ABC-1", "approved body")
+
+    assert caught.value.category == "write_ambiguous"
+    assert [call[0] for call in client.calls] == ["GET", "POST", "GET"]
+    assert {call[2]["deadline"] for call in client.calls} == {123.0}
+    assert client.deadline_calls == 1
 
 
 @pytest.mark.parametrize("category", ["authentication", "permission"])

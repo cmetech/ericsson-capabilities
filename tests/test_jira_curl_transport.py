@@ -9,13 +9,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from jira_test_support import models, transport
+from jira_test_support import client, models, transport
 
 JiraAuth = models.JiraAuth
 JiraError = models.JiraError
 TransportResponse = models.TransportResponse
 CurlTransport = transport.CurlTransport
 NativeTransport = transport.NativeTransport
+JiraClient = client.JiraClient
 
 
 def auth(executable: Path, *, transport="curl") -> JiraAuth:
@@ -171,6 +172,16 @@ def test_curl_rejects_non_allowlisted_methods_before_spawn(fake_curl, method):
         "https://other.example.test/rest/api/3/search",
         "//other.example.test/search",
         "/rest/api/3/../admin",
+        "/rest/api/3/./admin",
+        "/rest/api/3/%2e%2e/admin",
+        "/rest/api/3/%252e%252e%252fadmin",
+        "/rest/api/3/search%2f..%2fadmin",
+        "/rest/api/3/search%5cadmin",
+        "/rest/api/3/search%00secret",
+        "/rest/api/3/search%23fragment",
+        "/rest/api/3/search%3fquery",
+        "/rest/api/3/search%",
+        "/rest/api/3/search#fragment",
         "/rest/api/3/search?token=request-secret-token",
         "/plugins/servlet/search",
     ],
@@ -307,11 +318,151 @@ def test_request_response_header_and_query_bounds_are_enforced(fake_curl, monkey
 
     monkeypatch.delenv("FAKE_CURL_BODY_SIZE")
     monkeypatch.setenv("FAKE_CURL_BODY", "{}")
-    monkeypatch.setenv("FAKE_CURL_HEADERS", "HTTP/1.1 200 OK\r\nX-Large: " + "x" * 65_537 + "\r\n\r\n")
+    monkeypatch.setenv(
+        "FAKE_CURL_HEADERS",
+        "HTTP/1.1 200 OK\r\nX-Large: " + "x" * 65_537 + "\r\n\r\n",
+    )
     with pytest.raises(JiraError) as caught:
         transport.request("GET", "/rest/api/3/search", timeout_seconds=1)
     assert caught.value.category == "capacity"
     assert caught.value.outcome_uncertain is True
+
+
+def test_curl_preserves_4xx_when_error_body_exceeds_capacity(fake_curl, monkeypatch):
+    executable, _record = fake_curl
+    monkeypatch.setenv("FAKE_CURL_STATUS", "401")
+    monkeypatch.setenv(
+        "FAKE_CURL_HEADERS",
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n",
+    )
+    monkeypatch.setenv("FAKE_CURL_BODY_SIZE", "1048577")
+    transport = CurlTransport(auth(executable), approved_executables={executable})
+
+    result = transport.request(
+        "POST", "/rest/api/3/issue/ABC-1/comment", timeout_seconds=1
+    )
+
+    assert result.status == 401
+    assert result.body == b""
+
+
+def test_curl_rechecks_cancellation_after_private_file_prep_before_spawn(
+    fake_curl, monkeypatch
+):
+    executable, _record = fake_curl
+    cancelled = {"value": False}
+    spawned = []
+    transport = CurlTransport(
+        auth(executable),
+        approved_executables={executable},
+        cancel_check=lambda: cancelled["value"],
+        popen=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+    original_write = transport._write_private
+
+    def write_then_cancel(path, payload):
+        original_write(path, payload)
+        if path.name == "request.conf":
+            cancelled["value"] = True
+
+    monkeypatch.setattr(transport, "_write_private", write_then_cancel)
+
+    with pytest.raises(JiraError) as caught:
+        transport.request(
+            "POST", "/rest/api/3/issue/ABC-1/comment", json_body={}, timeout_seconds=1
+        )
+
+    assert caught.value.category == "cancelled"
+    assert caught.value.outcome_uncertain is False
+    assert spawned == []
+
+
+def test_curl_local_prep_failure_is_proven_pre_dispatch_for_mutation(
+    fake_curl, monkeypatch
+):
+    executable, _record = fake_curl
+    spawned = []
+    curl = CurlTransport(
+        auth(executable),
+        approved_executables={executable},
+        popen=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+
+    def fail_write(_path, _payload):
+        raise OSError("private local disk diagnostic")
+
+    monkeypatch.setattr(curl, "_write_private", fail_write)
+    jira = JiraClient(auth(executable), native_transport=curl)
+
+    with pytest.raises(JiraError) as caught:
+        jira.rest_json(
+            "POST", "issue/ABC-1/comment", json_body={"body": "approved"}
+        )
+
+    assert caught.value.category == "transient"
+    assert caught.value.category != "write_ambiguous"
+    assert "private" not in str(caught.value)
+    assert spawned == []
+
+
+@pytest.mark.parametrize("status", [401, 201])
+def test_curl_completed_4xx_headers_precede_inflight_cancellation(
+    fake_curl, status
+):
+    executable, _record = fake_curl
+    spawned = {"value": False}
+
+    class HangingProcess:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def communicate(self, timeout=None):  # pragma: no cover
+            raise subprocess.TimeoutExpired("curl", timeout)
+
+    def spawn(argv, **_kwargs):
+        config_path = Path(argv[3])
+        options = {}
+        for line in config_path.read_text().splitlines():
+            key, _, raw = line.partition(" = ")
+            if raw:
+                options[key] = json.loads(raw)
+        Path(options["dump-header"]).write_bytes(
+            f"HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\n\r\n".encode()
+        )
+        spawned["value"] = True
+        return HangingProcess()
+
+    curl = CurlTransport(
+        auth(executable),
+        approved_executables={executable},
+        cancel_check=lambda: spawned["value"],
+        popen=spawn,
+    )
+
+    if status == 401:
+        result = curl.request(
+            "POST", "/rest/api/3/issue/ABC-1/comment", timeout_seconds=1
+        )
+        assert result.status == 401
+        assert result.body == b""
+    else:
+        with pytest.raises(JiraError) as caught:
+            curl.request(
+                "POST", "/rest/api/3/issue/ABC-1/comment", timeout_seconds=1
+            )
+        assert caught.value.category == "cancelled"
+        assert caught.value.outcome_uncertain is True
 
 
 class FakeCurl:
@@ -396,8 +547,11 @@ def test_auto_never_falls_back_for_unclassified_failures(fake_curl, native_outco
         curl_transport=curl,
     )
     if isinstance(native_outcome, BaseException):
-        with pytest.raises((httpx.TransportError, httpx.TimeoutException)):
+        with pytest.raises(JiraError) as caught:
             transport.request("GET", "/rest/api/3/search", timeout_seconds=1)
+        assert caught.value.category == "transient"
+        assert caught.value.outcome_uncertain is True
+        assert str(native_outcome) not in str(caught.value)
     else:
         transport.request("GET", "/rest/api/3/search", timeout_seconds=1)
     assert curl.calls == []

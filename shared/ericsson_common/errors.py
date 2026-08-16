@@ -90,11 +90,13 @@ class ConnectorError(Exception):
         *,
         service: str | None = None,
         detail: str | None = None,
+        outcome_uncertain: bool = False,
     ) -> None:
         super().__init__(category)
         self.category = category
         self.service = service
         self.detail = detail
+        self.outcome_uncertain = bool(outcome_uncertain)
         self.remediation = (
             remediation_for(category, service) if service else None
         )

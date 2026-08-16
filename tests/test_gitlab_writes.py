@@ -462,7 +462,7 @@ def test_branch_partial_post_identity_must_match_reconciliation_get_identity():
                 summary="safe",
                 source_ref="main",
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 @pytest.mark.parametrize("malformed_project_id", [True, 1.0])
@@ -505,7 +505,7 @@ def test_branch_full_and_partial_project_identity_require_an_exact_integer(
                 summary="safe",
                 source_ref="main",
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_branch_contradictory_response_is_not_reconciled_as_partial():
@@ -527,7 +527,7 @@ def test_branch_contradictory_response_is_not_reconciled_as_partial():
                 summary="safe",
                 source_ref="main",
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 @pytest.mark.parametrize(
@@ -564,7 +564,7 @@ def test_branch_partial_response_rejects_every_present_contradictory_identity(
                 source_ref="main",
             )
     assert get_branch.call_count == 1
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_branch_duplicate_race_reconciles_without_repeating_mutation():
@@ -942,7 +942,7 @@ def test_ambiguous_commit_transport_is_never_retried():
     assert "outcome unknown" not in str(caught.value)
 
 
-@pytest.mark.parametrize("status", [429, 502, 503, 504])
+@pytest.mark.parametrize("status", [502, 503, 504])
 def test_retryable_commit_response_is_ambiguous_and_never_retried(status):
     operations = _operations(max_retries=4)
     with respx.mock:
@@ -960,6 +960,26 @@ def test_retryable_commit_response_is_ambiguous_and_never_retried(status):
             )
     assert route.call_count == 1
     assert getattr(caught.value, "category", None) == "write_ambiguous"
+    assert "private" not in str(caught.value)
+
+
+def test_rate_limited_commit_is_deterministic_and_never_retried():
+    operations = _operations(max_retries=4)
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        route = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(429, text="private rate limit response")
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/safe",
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "rate_limited"
     assert "private" not in str(caught.value)
 
 
@@ -986,6 +1006,105 @@ def test_ambiguous_commit_body_transport_is_never_retried():
     assert route.call_count == 1
     assert getattr(caught.value, "category", None) == "write_ambiguous"
     assert "private" not in str(caught.value)
+
+
+def test_any_server_error_after_commit_dispatch_is_ambiguous_and_not_retried():
+    operations = _operations(max_retries=4)
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        route = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(500, text="private server failure")
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/safe",
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "body", [b"not-json", b"x" * 4097], ids=["malformed", "oversized"]
+)
+def test_unusable_success_body_is_ambiguous_and_not_retried(body):
+    operations = _operations(max_retries=4, max_response_bytes=4096)
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        route = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, content=body)
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/safe",
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+
+
+def test_incomplete_success_payload_is_ambiguous_and_not_retried():
+    operations = _operations(max_retries=4)
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        route = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, json={})
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/safe",
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+
+
+@pytest.mark.parametrize("control_failure", ["cancelled", "deadline"])
+def test_post_dispatch_control_failure_is_ambiguous_and_not_retried(control_failure):
+    state = {"cancelled": False, "now": 0.0}
+
+    class Clock:
+        def __call__(self):
+            return state["now"]
+
+    class ControlledBody(httpx.SyncByteStream):
+        def __iter__(self):
+            if control_failure == "cancelled":
+                state["cancelled"] = True
+            else:
+                state["now"] = 31.0
+            yield b'{"id":"commit-sha"}'
+
+    operations = _operations(
+        max_retries=4,
+        cancel_check=lambda: state["cancelled"],
+        clock=Clock(),
+    )
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        route = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, stream=ControlledBody())
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/safe",
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_commit_partial_response_reconciles_only_proven_commit_identity():
@@ -1038,7 +1157,7 @@ def test_commit_partial_post_identity_must_match_reconciliation_get_identity():
                 commit_message="Apply safe change",
                 actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 @pytest.mark.parametrize("malformed_project_id", [True, 1.0])
@@ -1074,7 +1193,7 @@ def test_commit_full_and_partial_project_identity_require_an_exact_integer(
                 commit_message="Apply safe change",
                 actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 @pytest.mark.parametrize(
@@ -1110,7 +1229,7 @@ def test_commit_partial_response_rejects_every_present_contradictory_identity(
                 actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
             )
     assert reconcile.call_count == 0
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_commit_contradictory_response_is_not_reconciled_as_partial():
@@ -1129,7 +1248,7 @@ def test_commit_contradictory_response_is_not_reconciled_as_partial():
                 commit_message="Apply safe change",
                 actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_write_success_requires_the_documented_created_status():
@@ -1148,7 +1267,7 @@ def test_write_success_requires_the_documented_created_status():
                 commit_message="Apply safe change",
                 actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_multiline_commit_message_reconciles_against_gitlab_title_semantics():
@@ -1276,7 +1395,7 @@ def test_merge_request_response_must_prove_current_project_identity():
             operations.create_merge_request(
                 "42", source_branch="feature/abc-123", title="ABC-123"
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_new_merge_request_response_must_preserve_requested_title_identity():
@@ -1291,7 +1410,7 @@ def test_new_merge_request_response_must_preserve_requested_title_identity():
             operations.create_merge_request(
                 "42", source_branch="feature/abc-123", title="ABC-123"
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_merge_request_title_preserves_255_and_deterministically_caps_256():
@@ -1346,7 +1465,7 @@ def test_merge_request_partial_response_rejects_every_present_contradictory_iden
                 "42", source_branch="feature/abc-123", title="ABC-123"
             )
     assert reconcile.call_count == 0
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_merge_request_partial_response_reconciles_by_iid_and_ambiguous_transport_is_not_retried():
@@ -1400,7 +1519,7 @@ def test_merge_request_partial_post_identity_must_match_reconciliation_get_ident
             operations.create_merge_request(
                 "42", source_branch="feature/abc-123", title="ABC-123"
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 @pytest.mark.parametrize("malformed_project_id", [True, 1.0])
@@ -1427,7 +1546,7 @@ def test_merge_request_full_and_partial_project_identity_require_an_exact_intege
             operations.create_merge_request(
                 "42", source_branch="feature/abc-123", title="ABC-123"
             )
-    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
 
 
 def test_merge_request_dry_run_never_mutates_and_has_no_caller_approval_field():

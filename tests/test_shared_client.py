@@ -12,14 +12,20 @@ class FakeTransport:
         self.script = list(script)
         self.calls = []
 
-    def request(self, method, path, *, params, json_body, timeout_seconds):
+    def request(
+        self, method, path, *, params, json_body, timeout_seconds, control=None
+    ):
         self.calls.append((method, path))
+        self.control = control
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
         if callable(item):
             return item()
         return item
+
+    def request_with_controls(self, *args, control, **kwargs):
+        return self.request(*args, control=control, **kwargs)
 
     def close(self):
         pass
@@ -122,6 +128,55 @@ class TestMethodAwareRetry:
         assert excinfo.value.category == "write_ambiguous"
         assert len(transport.calls) == 1
 
+    def test_any_server_error_after_mutation_dispatch_is_ambiguous(self):
+        client, transport, _clock = _client([Response(500, {}, b"")])
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("POST", "/api/v4/projects/1/merge_requests")
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(transport.calls) == 1
+
+    def test_deterministic_client_error_after_mutation_is_preserved(self):
+        client, transport, _clock = _client([Response(400, {}, b"")])
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("POST", "/api/v4/projects/1/merge_requests")
+        assert excinfo.value.category == "invalid_input"
+        assert len(transport.calls) == 1
+
+    def test_uncertain_connector_failure_after_mutation_is_ambiguous(self):
+        failure = ConnectorError("capacity", outcome_uncertain=True)
+        client, transport, _clock = _client([failure])
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("POST", "/api/v4/projects/1/merge_requests")
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(transport.calls) == 1
+
+    def test_proven_pre_dispatch_connector_failure_is_preserved(self):
+        failure = ConnectorError("capacity", outcome_uncertain=False)
+        client, transport, _clock = _client([failure])
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("POST", "/api/v4/projects/1/merge_requests")
+        assert excinfo.value.category == "capacity"
+        assert len(transport.calls) == 1
+
+    def test_get_transport_retry_uses_capped_exponential_backoff(self):
+        client, transport, clock = _client(
+            [TimeoutError("one"), TimeoutError("two"), Response(200, {}, b"{}")]
+        )
+        client.request("GET", "/api/v4/projects")
+        assert clock.slept == [0.5, 1.0]
+        assert len(transport.calls) == 3
+
+    def test_get_transport_retry_does_not_sleep_past_deadline(self):
+        client, transport, clock = _client(
+            [TimeoutError("one"), Response(200, {}, b"{}")],
+            total_timeout_seconds=0.25,
+        )
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/projects")
+        assert excinfo.value.category == "deadline"
+        assert clock.slept == []
+        assert len(transport.calls) == 1
+
 
 class TestDeadlines:
     def test_deadline_exhaustion_raises(self):
@@ -173,6 +228,57 @@ class TestDeadlines:
             client.request("GET", "/api/v4/projects")
         assert excinfo.value.category == "deadline"
         assert len(transport.calls) == 1
+
+    @pytest.mark.parametrize("category", ["cancelled", "deadline"])
+    def test_post_dispatch_mutation_control_failure_is_ambiguous(self, category):
+        cancelled = {"value": False}
+        client, transport, clock = _client(
+            [], cancel_check=lambda: cancelled["value"]
+        )
+
+        def finish_request():
+            if category == "cancelled":
+                cancelled["value"] = True
+            else:
+                clock.now = 31.0
+            return Response(201, {}, b"{}")
+
+        transport.script.append(finish_request)
+
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("POST", "/api/v4/projects")
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(transport.calls) == 1
+
+    @pytest.mark.parametrize(
+        ("method", "status", "category"),
+        [
+            ("GET", 401, "authentication"),
+            ("POST", 401, "authentication"),
+            ("POST", 429, "rate_limited"),
+        ],
+    )
+    def test_completed_deterministic_4xx_precedes_expired_control(
+        self, method, status, category
+    ):
+        client, transport, clock = _client([])
+
+        def finish_request():
+            clock.now = 31.0
+            return Response(status, {}, b"{}")
+
+        transport.script.append(finish_request)
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request(method, "/api/v4/projects")
+
+        assert excinfo.value.category == category
+        assert len(transport.calls) == 1
+
+    def test_transport_receives_absolute_operation_control(self):
+        client, transport, _clock = _client([Response(200, {}, b"{}")])
+        client.request("GET", "/api/v4/projects")
+        assert transport.control is not None
+        assert transport.control.deadline == 30.0
 
 
 class TestErrorMapping:

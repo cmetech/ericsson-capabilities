@@ -30,7 +30,16 @@ def sync() -> int:
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(
-            CANONICAL, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
+            CANONICAL,
+            target,
+            ignore=shutil.ignore_patterns(
+                "__pycache__",
+                ".pytest_cache",
+                ".mypy_cache",
+                ".ruff_cache",
+                "*.pyc",
+                "*.pyo",
+            ),
         )
         print(f"synced -> {target.relative_to(REPO)}")
     return 0

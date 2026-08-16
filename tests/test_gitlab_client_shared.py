@@ -19,7 +19,9 @@ class FakeTransport:
         self.script = list(script)
         self.calls = []
 
-    def request(self, method, path, *, params, json_body, timeout_seconds):
+    def request(
+        self, method, path, *, params, json_body, timeout_seconds, control=None
+    ):
         self.calls.append((method, path))
         item = self.script.pop(0)
         if isinstance(item, Exception):
@@ -97,6 +99,8 @@ def test_shared_error_type_never_escapes_to_the_host():
     assert not isinstance(excinfo.value, ConnectorError)
     assert excinfo.value.category == "authentication"
     assert excinfo.value.remediation
+    assert excinfo.value.__context__ is None
+    assert excinfo.value.__cause__ is None
 
 
 def test_shared_error_type_never_escapes_from_close():
@@ -108,6 +112,8 @@ def test_shared_error_type_never_escapes_from_close():
     assert excinfo.value.category == "authentication"
     assert excinfo.value.remediation
     assert "private-close-detail" not in str(excinfo.value)
+    assert excinfo.value.__context__ is None
+    assert excinfo.value.__cause__ is None
 
 
 def test_bounded_attributes_survive_for_operations_py():

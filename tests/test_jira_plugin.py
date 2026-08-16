@@ -181,6 +181,8 @@ def test_auth_error_is_stably_classified_without_remote_text(configuration):
             jira_tools.my_tickets(client=client)
     assert caught.value.category == "authentication"
     assert str(caught.value) == "Jira authentication failed"
+    assert caught.value.remediation
+    assert "jira" in caught.value.remediation.lower()
 
 
 @respx.mock

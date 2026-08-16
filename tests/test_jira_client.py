@@ -111,6 +111,121 @@ def test_explicit_rest_version_never_probes_another_version():
     assert [call[1] for call in transport.calls] == ["/rest/api/2/issue/ABC-1"]
 
 
+@pytest.mark.parametrize(
+    ("rest_api_version", "expected_path", "expected_body"),
+    [
+        ("2", "/rest/api/2/issue/ABC-1/assignee", {"name": "jsmith"}),
+        ("3", "/rest/api/3/issue/ABC-1/assignee", {"accountId": "jsmith"}),
+    ],
+)
+def test_versioned_mutation_uses_explicit_config_without_a_probe(
+    rest_api_version, expected_path, expected_body
+):
+    transport = FakeTransport(response(204, body=b""))
+    jira = JiraClient(auth(rest_api_version=rest_api_version), native_transport=transport)
+
+    assert jira.rest_json_versioned_mutation(
+        "PUT",
+        "issue/ABC-1/assignee",
+        json_body_by_version={
+            "3": {"accountId": "jsmith"},
+            "2": {"name": "jsmith"},
+        },
+    ) is None
+
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("PUT", expected_path)
+    ]
+    assert transport.calls[0][2]["json_body"] == expected_body
+
+
+def test_versioned_mutation_auto_cloud_probes_with_get_then_puts_once():
+    transport = FakeTransport(response(payload={}), response(204, body=b""))
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+
+    jira.rest_json_versioned_mutation(
+        "PUT",
+        "issue/ABC-1/assignee",
+        json_body_by_version={
+            "3": {"accountId": "cloud-account"},
+            "2": {"name": "cloud-account"},
+        },
+    )
+
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/3/serverInfo"),
+        ("PUT", "/rest/api/3/issue/ABC-1/assignee"),
+    ]
+    assert transport.calls[1][2]["json_body"] == {"accountId": "cloud-account"}
+    assert sum(method == "PUT" for method, _path, _kwargs in transport.calls) == 1
+
+
+def test_versioned_mutation_auto_data_center_probes_without_a_put_fallback():
+    unsupported = response(
+        404,
+        {"errorMessages": ["REST API v3 endpoint is not available"]},
+        headers={"content-type": "application/json"},
+    )
+    transport = FakeTransport(unsupported, response(payload={}), response(204, body=b""))
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+
+    jira.rest_json_versioned_mutation(
+        "PUT",
+        "issue/ABC-1/assignee",
+        json_body_by_version={
+            "3": {"accountId": "dc-user"},
+            "2": {"name": "dc-user"},
+        },
+    )
+
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/3/serverInfo"),
+        ("GET", "/rest/api/2/serverInfo"),
+        ("PUT", "/rest/api/2/issue/ABC-1/assignee"),
+    ]
+    assert transport.calls[2][2]["json_body"] == {"name": "dc-user"}
+    assert sum(method == "PUT" for method, _path, _kwargs in transport.calls) == 1
+
+
+def test_versioned_mutation_does_not_write_when_its_read_only_probe_fails():
+    transport = FakeTransport(response(403, payload={}))
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+
+    with pytest.raises(JiraError) as caught:
+        jira.rest_json_versioned_mutation(
+            "PUT",
+            "issue/ABC-1/assignee",
+            json_body_by_version={
+                "3": {"accountId": "cloud-account"},
+                "2": {"name": "cloud-account"},
+            },
+        )
+
+    assert caught.value.category == "permission"
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/3/serverInfo")
+    ]
+
+
+def test_versioned_mutation_caches_the_auto_probe_result():
+    transport = FakeTransport(
+        response(payload={}),
+        response(204, body=b""),
+        response(204, body=b""),
+    )
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+    bodies = {"3": {"accountId": "jsmith"}, "2": {"name": "jsmith"}}
+
+    jira.rest_json_versioned_mutation("PUT", "issue/ABC-1/assignee", json_body_by_version=bodies)
+    jira.rest_json_versioned_mutation("PUT", "issue/ABC-2/assignee", json_body_by_version=bodies)
+
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/3/serverInfo"),
+        ("PUT", "/rest/api/3/issue/ABC-1/assignee"),
+        ("PUT", "/rest/api/3/issue/ABC-2/assignee"),
+    ]
+
+
 def test_get_retries_bounded_transient_status_and_honors_retry_after():
     sleeps = []
     transport = FakeTransport(

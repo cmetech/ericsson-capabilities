@@ -45,6 +45,9 @@ class FakeClient:
     def rest_json_v2_mutation(self, method, resource, **kwargs):
         return self.rest_json(method, resource, **kwargs)
 
+    def rest_json_versioned_mutation(self, method, resource, **kwargs):
+        return self.rest_json(method, resource, **kwargs)
+
 
 class TestTransitionIntent:
     def test_no_intent_refuses_before_a_request(self):
@@ -224,6 +227,153 @@ class TestTransitionReconciliation:
         assert caught.value.category == "write_ambiguous"
         assert [call[0] for call in client.calls] == ["POST"]
 
+
+class TestAssignIssue:
+    def test_neither_intent_flag_is_refused_before_a_request(self):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).assign_issue("ABC-1", "jsmith")
+
+        assert caught.value.category == "confirmation_required"
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        ("dry_run", "confirm"),
+        [(1, False), (False, 1), (True, True)],
+    )
+    def test_invalid_intent_flags_are_refused_before_a_request(self, dry_run, confirm):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).assign_issue(
+                "ABC-1", "jsmith", dry_run=dry_run, confirm=confirm
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_dry_run_previews_without_a_write_or_probe(self):
+        client = FakeClient([])
+
+        result = JiraOperations(client).assign_issue(
+            "ABC-1", "jsmith", dry_run=True
+        )
+
+        assert result == {
+            "ok": True,
+            "dry_run": True,
+            "issue_key": "ABC-1",
+            "assignee": "jsmith",
+            "reconciled": False,
+        }
+        assert client.calls == []
+
+    def test_confirm_performs_one_version_aware_put(self):
+        client = FakeClient([None])
+
+        result = JiraOperations(client).assign_issue(
+            "ABC-1", "jsmith", confirm=True
+        )
+
+        assert client.calls == [
+            (
+                "PUT",
+                "issue/ABC-1/assignee",
+                {
+                    "json_body_by_version": {
+                        "3": {"accountId": "jsmith"},
+                        "2": {"name": "jsmith"},
+                    }
+                },
+            )
+        ]
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "issue_key": "ABC-1",
+            "assignee": "jsmith",
+            "reconciled": False,
+        }
+
+    def test_unassign_sends_null_in_both_version_bodies(self):
+        client = FakeClient([None])
+
+        JiraOperations(client).assign_issue("ABC-1", None, confirm=True)
+
+        assert client.calls[0][2]["json_body_by_version"] == {
+            "3": {"accountId": None},
+            "2": {"name": None},
+        }
+
+    @pytest.mark.parametrize(
+        ("assignee", "remote_assignee"),
+        [
+            ("legacy-user", {"name": "legacy-user"}),
+            ("cloud-account-id", {"accountId": "cloud-account-id"}),
+            (None, None),
+        ],
+    )
+    def test_ambiguous_write_reconciles_assignee_across_jira_versions(
+        self, assignee, remote_assignee
+    ):
+        client = FakeClient(
+            [
+                JiraError("write_ambiguous"),
+                {"key": "ABC-1", "fields": {"assignee": remote_assignee}},
+            ]
+        )
+
+        result = JiraOperations(client).assign_issue(
+            "ABC-1", assignee, confirm=True
+        )
+
+        assert result["reconciled"] is True
+        assert [call[:2] for call in client.calls] == [
+            ("PUT", "issue/ABC-1/assignee"),
+            ("GET", "issue/ABC-1"),
+        ]
+
+    def test_failed_reconciliation_preserves_original_write_ambiguity(self):
+        client = FakeClient([JiraError("write_ambiguous"), JiraError("authentication")])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).assign_issue("ABC-1", "jsmith", confirm=True)
+
+        assert caught.value.category == "write_ambiguous"
+        assert [call[:2] for call in client.calls] == [
+            ("PUT", "issue/ABC-1/assignee"),
+            ("GET", "issue/ABC-1"),
+        ]
+
+    def test_ambiguous_write_that_did_not_land_raises_without_retry(self):
+        client = FakeClient(
+            [
+                JiraError("write_ambiguous"),
+                {"key": "ABC-1", "fields": {"assignee": {"name": "other"}}},
+            ]
+        )
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).assign_issue("ABC-1", "jsmith", confirm=True)
+
+        assert caught.value.category == "write_ambiguous"
+        assert [call[0] for call in client.calls] == ["PUT", "GET"]
+
+    @pytest.mark.parametrize(
+        "assignee", ["", "x" * 256, 1, True]
+    )
+    def test_invalid_assignee_is_refused_before_a_request(self, assignee):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).assign_issue("ABC-1", assignee, confirm=True)
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+
+class TestTransitionReconciliationRemainder:
     def test_ambiguous_write_that_did_not_land_raises_without_retry(self):
         client = FakeClient(
             [

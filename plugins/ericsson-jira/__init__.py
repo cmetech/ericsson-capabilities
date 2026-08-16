@@ -10,7 +10,9 @@ from . import tools as jira_tools
 from .models import JiraError, SAFE_ERROR_MESSAGES, safe_remediation
 
 
-_WRITE_TOOLS = frozenset({"jira_add_comment", "jira_transition_issue"})
+_WRITE_TOOLS = frozenset(
+    {"jira_add_comment", "jira_transition_issue", "jira_assign_issue"}
+)
 
 
 def _arg(args: dict, name: str) -> str:
@@ -25,6 +27,9 @@ WRITE_APPROVALS = {
     ),
     "jira_transition_issue": lambda a: (
         f"Issue: {_arg(a, 'key')}\nTransition: {_arg(a, 'transition_id')}"
+    ),
+    "jira_assign_issue": lambda a: (
+        f"Issue: {_arg(a, 'key')}\nAssignee: {_arg(a, 'assignee')}"
     ),
 }
 

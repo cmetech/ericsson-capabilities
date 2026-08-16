@@ -170,6 +170,7 @@ class JiraClient:
             )
         self._transport = chosen
         self._clock = clock
+        self._resolved_rest_api_version: str | None = None
         self._client = _call_as_jira_error(
             lambda: BoundedClient(
                 _SharedTransportAdapter(chosen),
@@ -347,6 +348,80 @@ class JiraClient:
             f"/rest/api/2/{resource}",
             params=params,
             json_body=json_body,
+            deadline=deadline,
+        )
+        if response.status == 204:
+            self._raise_status(response, method)
+            return None
+        return self._decode(response, method)
+
+    def _resolved_mutation_version(self, *, deadline: float) -> str:
+        """Resolve auto configuration using only bounded GET requests.
+
+        A version fallback after a mutation could apply the change twice.  The
+        version is therefore established before a mutation, cached for this
+        client, and never inferred from a mutation response.
+        """
+        configured = self.auth.rest_api_version
+        if configured in {"2", "3"}:
+            return configured
+        if self._resolved_rest_api_version is not None:
+            return self._resolved_rest_api_version
+
+        v3 = self._perform(
+            "GET",
+            "/rest/api/3/serverInfo",
+            params=None,
+            json_body=None,
+            deadline=deadline,
+        )
+        if is_rest_version_unsupported(v3):
+            v2 = self._perform(
+                "GET",
+                "/rest/api/2/serverInfo",
+                params=None,
+                json_body=None,
+                deadline=deadline,
+            )
+            self._decode(v2, "GET")
+            self._resolved_rest_api_version = "2"
+        else:
+            self._decode(v3, "GET")
+            self._resolved_rest_api_version = "3"
+        return self._resolved_rest_api_version
+
+    def rest_json_versioned_mutation(
+        self,
+        method: str,
+        resource: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body_by_version: Mapping[str, Any],
+        deadline: float | None = None,
+    ) -> Any:
+        """Perform exactly one mutation using a safely selected REST version.
+
+        Explicit configuration selects that version directly.  Auto mode
+        performs and caches a non-mutating ``serverInfo`` probe before issuing
+        exactly one write with its matching version-specific body.
+        """
+        method = method.upper() if isinstance(method, str) else ""
+        if method not in {"POST", "PUT", "DELETE"}:
+            raise JiraError("invalid_input")
+        self._validate_resource(resource)
+        if (
+            not isinstance(json_body_by_version, Mapping)
+            or set(json_body_by_version) != {"3", "2"}
+        ):
+            raise JiraError("invalid_input")
+        if deadline is None:
+            deadline = self.operation_deadline()
+        version = self._resolved_mutation_version(deadline=deadline)
+        response = self._perform(
+            method,
+            f"/rest/api/{version}/{resource}",
+            params=params,
+            json_body=json_body_by_version[version],
             deadline=deadline,
         )
         if response.status == 204:

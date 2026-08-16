@@ -249,6 +249,96 @@ class JiraOperations:
         status = fields.get("status")
         return _name(status) if isinstance(status, Mapping) else None
 
+    def _assignee_matches(self, key: str, desired: str | None) -> bool:
+        """Read an assignee once to reconcile an ambiguous assignment write."""
+        payload = self.client.rest_json("GET", f"issue/{key}")
+        if not isinstance(payload, Mapping):
+            return False
+        fields = payload.get("fields")
+        if not isinstance(fields, Mapping):
+            return False
+        assignee = fields.get("assignee")
+        if desired is None:
+            return assignee is None
+        if not isinstance(assignee, Mapping):
+            return False
+        return desired in {
+            _bounded_string(assignee.get("name"), 255),
+            _bounded_string(assignee.get("accountId"), 255),
+        }
+
+    def assign_issue(
+        self,
+        key: str,
+        assignee: str | None,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Assign an issue, or unassign it with ``assignee=None``.
+
+        Cloud accepts an account ID and Data Center accepts a username.  The
+        client chooses their body only after a read-only version resolution,
+        so this operation always makes exactly one PUT.
+        """
+        if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
+            raise JiraError("invalid_input")
+        if assignee is not None and (
+            not isinstance(assignee, str) or not assignee or len(assignee) > 255
+        ):
+            raise JiraError("invalid_input")
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise JiraError("invalid_input")
+        if dry_run and confirm:
+            raise JiraError("invalid_input")
+        if not dry_run and not confirm:
+            raise JiraError("confirmation_required")
+
+        execute = require_explicit_intent(
+            dry_run=dry_run, confirm=confirm, action=f"Jira issue {key}"
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "issue_key": key,
+                "assignee": assignee,
+                "reconciled": False,
+            }
+
+        try:
+            self.client.rest_json_versioned_mutation(
+                "PUT",
+                f"issue/{key}/assignee",
+                json_body_by_version={
+                    "3": {"accountId": assignee},
+                    "2": {"name": assignee},
+                },
+            )
+        except JiraError as exc:
+            if exc.category != "write_ambiguous":
+                raise
+            try:
+                reconciled = self._assignee_matches(key, assignee)
+            except JiraError:
+                raise exc from None
+            if not reconciled:
+                raise
+            return {
+                "ok": True,
+                "dry_run": False,
+                "issue_key": key,
+                "assignee": assignee,
+                "reconciled": True,
+            }
+        return {
+            "ok": True,
+            "dry_run": False,
+            "issue_key": key,
+            "assignee": assignee,
+            "reconciled": False,
+        }
+
     def transition_issue(
         self,
         key: str,

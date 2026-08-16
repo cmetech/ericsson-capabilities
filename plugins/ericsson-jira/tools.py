@@ -172,6 +172,26 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_assign_issue": {
+        "name": "jira_assign_issue",
+        "description": (
+            "Assign a Jira issue to a user, or unassign it with assignee null. "
+            "Use jira_search_assignable_users to find a valid identifier — "
+            "assignability is a per-project permission. Requires dry_run or "
+            "confirm."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "minLength": 3, "maxLength": 128},
+                "assignee": {"type": ["string", "null"], "maxLength": 255},
+                "dry_run": {"type": "boolean", "default": False},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["key", "assignee"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -218,6 +238,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "dry_run",
             "confirm",
         },
+        "jira_assign_issue": {"key", "assignee", "dry_run", "confirm"},
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -233,6 +254,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_list_transitions": operations.list_transitions,
             "jira_search_assignable_users": operations.search_assignable_users,
             "jira_transition_issue": operations.transition_issue,
+            "jira_assign_issue": operations.assign_issue,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

@@ -252,6 +252,7 @@ def test_tool_schemas_register_exact_bounded_public_surface_without_raw_fields()
         "jira_list_transitions",
         "jira_search_assignable_users",
         "jira_transition_issue",
+        "jira_assign_issue",
     }
     search = SCHEMAS["jira_search_issues"]["parameters"]
     assert search["additionalProperties"] is False

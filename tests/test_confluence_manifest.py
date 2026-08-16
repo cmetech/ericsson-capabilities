@@ -3,12 +3,26 @@
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "ericsson-confluence"
+
+
+def _load_models_module():
+    module_name = "ericsson_confluence_manifest_models"
+    spec = importlib.util.spec_from_file_location(module_name, PLUGIN / "models.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+    return module
 
 
 class TestManifest:
@@ -54,32 +68,25 @@ class TestManifest:
 
 class TestErrors:
     def test_unknown_category_coerces_to_transient(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import ConfluenceError
-
-        assert ConfluenceError("not-a-real-category").category == "transient"
+        models = _load_models_module()
+        assert models.ConfluenceError("not-a-real-category").category == "transient"
 
     def test_non_string_category_coerces_to_transient(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import ConfluenceError
-
-        assert ConfluenceError(["authentication"]).category == "transient"
+        models = _load_models_module()
+        assert models.ConfluenceError(["authentication"]).category == "transient"
 
     def test_remediation_only_keeps_connector_owned_guidance(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import ConfluenceError
-
-        assert ConfluenceError(
+        models = _load_models_module()
+        assert models.ConfluenceError(
             "authentication", remediation="token=remote-secret"
         ).remediation is None
-        assert ConfluenceError(
+        assert models.ConfluenceError(
             "authentication", remediation="Update the Confluence token."
         ).remediation == "Update the Confluence token."
 
     def test_categories_the_shared_client_raises_are_all_known(self):
         """Unknown categories silently coerce to transient and lose their signal."""
-        sys.path.insert(0, str(PLUGIN))
-        from models import SAFE_ERROR_MESSAGES
+        models = _load_models_module()
 
         for category in (
             "conflict",
@@ -90,7 +97,16 @@ class TestErrors:
             "deadline",
             "cancelled",
         ):
-            assert category in SAFE_ERROR_MESSAGES, category
+            assert category in models.SAFE_ERROR_MESSAGES, category
+
+    def test_unique_loader_does_not_replace_a_foreign_models_module(self, monkeypatch):
+        foreign = types.ModuleType("models")
+        monkeypatch.setitem(sys.modules, "models", foreign)
+
+        models = _load_models_module()
+
+        assert models.ConfluenceError("authentication").category == "authentication"
+        assert sys.modules["models"] is foreign
 
 
 class _HookContext:
@@ -124,3 +140,10 @@ def test_empty_write_approval_hook_ignores_untrusted_arguments():
 
     assert ctx.event_name == "pre_tool_call"
     assert ctx.hook("future_confluence_write", recursive) is None
+
+
+def test_write_contracts_are_empty_until_tools_exist():
+    plugin = _load_plugin_module()
+
+    assert plugin._WRITE_TOOLS == frozenset()
+    assert plugin.WRITE_APPROVALS == {}

@@ -3,12 +3,26 @@
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "ericsson-arm"
+
+
+def _load_models_module():
+    module_name = "ericsson_arm_manifest_models"
+    spec = importlib.util.spec_from_file_location(module_name, PLUGIN / "models.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+    return module
 
 
 class TestManifest:
@@ -67,30 +81,25 @@ class TestManifest:
 
 class TestErrors:
     def test_unknown_category_coerces_to_transient(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import ArmError
-
-        assert ArmError("not-a-real-category").category == "transient"
+        models = _load_models_module()
+        assert models.ArmError("not-a-real-category").category == "transient"
 
     def test_non_string_category_coerces_to_transient(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import ArmError
-
-        assert ArmError(["authentication"]).category == "transient"
+        models = _load_models_module()
+        assert models.ArmError(["authentication"]).category == "transient"
 
     def test_remediation_only_keeps_connector_owned_guidance(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import ArmError
-
-        assert ArmError("authentication", remediation="token=remote-secret").remediation is None
-        assert ArmError(
+        models = _load_models_module()
+        assert models.ArmError(
+            "authentication", remediation="token=remote-secret"
+        ).remediation is None
+        assert models.ArmError(
             "authentication", remediation="Update the Artifactory token."
         ).remediation == "Update the Artifactory token."
 
     def test_categories_the_shared_client_raises_are_all_known(self):
         """Unknown categories silently coerce to transient and lose their signal."""
-        sys.path.insert(0, str(PLUGIN))
-        from models import SAFE_ERROR_MESSAGES
+        models = _load_models_module()
 
         for category in (
             "conflict",
@@ -101,22 +110,30 @@ class TestErrors:
             "deadline",
             "cancelled",
         ):
-            assert category in SAFE_ERROR_MESSAGES, category
+            assert category in models.SAFE_ERROR_MESSAGES, category
 
     def test_arm_specific_categories_exist(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import SAFE_ERROR_MESSAGES
+        models = _load_models_module()
 
         for category in ("edge_authentication", "certificate_invalid"):
-            assert category in SAFE_ERROR_MESSAGES, category
+            assert category in models.SAFE_ERROR_MESSAGES, category
 
     def test_edge_authentication_is_distinct_from_authentication(self):
-        sys.path.insert(0, str(PLUGIN))
-        from models import SAFE_ERROR_MESSAGES
+        models = _load_models_module()
 
-        assert SAFE_ERROR_MESSAGES["edge_authentication"] != SAFE_ERROR_MESSAGES[
-            "authentication"
-        ]
+        assert (
+            models.SAFE_ERROR_MESSAGES["edge_authentication"]
+            != models.SAFE_ERROR_MESSAGES["authentication"]
+        )
+
+    def test_unique_loader_does_not_replace_a_foreign_models_module(self, monkeypatch):
+        foreign = types.ModuleType("models")
+        monkeypatch.setitem(sys.modules, "models", foreign)
+
+        models = _load_models_module()
+
+        assert models.ArmError("authentication").category == "authentication"
+        assert sys.modules["models"] is foreign
 
 
 class _HookContext:

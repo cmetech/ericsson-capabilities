@@ -59,6 +59,8 @@ EXPECTED_IDS = {
     "re-identification",
     "windows-laptop-diagnostic",
     "sharepoint-tools",
+    "confluence-tools",
+    "artifactory-arm-tools",
 }
 
 EMPTY_IMPLEMENTATION = {
@@ -105,6 +107,17 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
                 "jira_search_issues",
                 "jira_get_issue",
                 "jira_add_comment",
+                "jira_list_fields",
+                "jira_get_project",
+                "jira_list_transitions",
+                "jira_search_assignable_users",
+                "jira_transition_issue",
+                "jira_assign_issue",
+                "jira_update_fields",
+                "jira_manage_labels",
+                "jira_create_issue",
+                "jira_list_link_types",
+                "jira_link_issues",
             ],
         },
     ),
@@ -269,6 +282,16 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         False,
         EMPTY_IMPLEMENTATION,
     ),
+    "confluence-tools": (
+        "planned-not-implemented",
+        False,
+        EMPTY_IMPLEMENTATION | {"plugins": ["plugins/ericsson-confluence"]},
+    ),
+    "artifactory-arm-tools": (
+        "planned-not-implemented",
+        False,
+        EMPTY_IMPLEMENTATION | {"plugins": ["plugins/ericsson-arm"]},
+    ),
 }
 
 EXPECTED_CRITICAL_CONFIGURATION = {
@@ -329,6 +352,24 @@ EXPECTED_CRITICAL_CONFIGURATION = {
     },
     "glean-search": {
         ("GLEAN_API_TOKEN", "static-secret", True),
+    },
+    "confluence-tools": {
+        ("base_url", "static-setting", True),
+        ("pat", "static-secret", True),
+        ("api_base_override", "static-setting", False),
+        ("request_timeout_seconds", "static-setting", False),
+        ("default_max_results", "static-setting", False),
+    },
+    "artifactory-arm-tools": {
+        ("base_url", "static-setting", True),
+        ("auth_mode", "static-setting", True),
+        ("token", "static-secret", True),
+        ("client_cert_path", "static-setting", False),
+        ("client_key_path", "static-setting", False),
+        ("deploy_root", "static-setting", False),
+        ("max_deploy_megabytes", "static-setting", False),
+        ("request_timeout_seconds", "static-setting", False),
+        ("default_max_results", "static-setting", False),
     },
 }
 
@@ -551,6 +592,17 @@ def test_jira_onboarding_uses_standalone_descriptor_names_and_complete_tool_surf
         "jira_search_issues",
         "jira_get_issue",
         "jira_add_comment",
+        "jira_list_fields",
+        "jira_get_project",
+        "jira_list_transitions",
+        "jira_search_assignable_users",
+        "jira_transition_issue",
+        "jira_assign_issue",
+        "jira_update_fields",
+        "jira_manage_labels",
+        "jira_create_issue",
+        "jira_list_link_types",
+        "jira_link_issues",
     }
     assert "skills/ericsson/jira" in jira["implementation"]["skills"]
 
@@ -570,6 +622,8 @@ def test_real_catalog_maturity_is_honest() -> None:
         "third-party-support-lcm-tracker",
         "re-identification",
         "windows-laptop-diagnostic",
+        "confluence-tools",
+        "artifactory-arm-tools",
     }
     assert {
         entry_id
@@ -702,6 +756,20 @@ def test_jira_and_teams_entries_teach_only_supported_narrowing() -> None:
     assert "bounded explicit search" in jira
     assert "supported team, channel, and message count" in teams
     assert "date filter" not in teams
+
+
+def test_scaffold_entries_make_no_runnable_claims() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    entries = {entry["id"]: entry for entry in load_entries(repo)}
+
+    for entry_id in ("confluence-tools", "artifactory-arm-tools"):
+        entry = entries[entry_id]
+        assert entry["maturity"] == "planned-not-implemented"
+        assert entry["recommendation_eligible"] is False
+        assert entry["implementation"]["tools"] == []
+        assert entry["reads"] == []
+        assert entry["writes"] == []
+        assert entry["demonstrations"] == []
 
 
 def test_real_capability_entries_have_the_education_contract() -> None:

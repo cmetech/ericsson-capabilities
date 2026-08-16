@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-# Task 1 registers the hook shape before write tools exist.  Keep this empty
-# until Task 6 adds bounded, argument-scoped approval summaries.
+# Task 1 registers the hook shape before write tools exist. Keep both write
+# collections empty until bounded, argument-scoped approval summaries exist.
+_WRITE_TOOLS: frozenset[str] = frozenset()
 WRITE_APPROVALS: dict[str, object] = {}
 
 

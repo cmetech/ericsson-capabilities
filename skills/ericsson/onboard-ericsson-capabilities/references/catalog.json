@@ -2,6 +2,23 @@
   "capabilities": [
     {
       "aliases": [
+        "Ericsson ARM",
+        "Ericsson Artifactory",
+        "Artifactory connector scaffold"
+      ],
+      "displayName": "Ericsson Artifactory/ARM Tools (Planned)",
+      "entry": "references/capabilities/artifactory-arm-tools.md",
+      "goals": [
+        "Explain the current status of the Ericsson Artifactory/ARM connector scaffold.",
+        "Review the configuration that a future Artifactory connector will require.",
+        "Tell me whether Artifactory tools, reads, writes, or demonstrations are runnable today."
+      ],
+      "id": "artifactory-arm-tools",
+      "maturity": "planned-not-implemented",
+      "recommendationEligible": false
+    },
+    {
+      "aliases": [
         "GitLab CI audit",
         "pipeline policy audit",
         "CI security review"
@@ -15,6 +32,23 @@
       ],
       "id": "ci-file-auditor",
       "maturity": "partially-ported",
+      "recommendationEligible": false
+    },
+    {
+      "aliases": [
+        "Ericsson Confluence",
+        "Confluence connector scaffold",
+        "Confluence tools"
+      ],
+      "displayName": "Ericsson Confluence Tools (Planned)",
+      "entry": "references/capabilities/confluence-tools.md",
+      "goals": [
+        "Explain the current status of the Ericsson Confluence connector scaffold.",
+        "Review the configuration that a future Confluence connector will require.",
+        "Tell me whether Confluence tools, reads, writes, or demonstrations are runnable today."
+      ],
+      "id": "confluence-tools",
+      "maturity": "planned-not-implemented",
       "recommendationEligible": false
     },
     {
@@ -127,14 +161,14 @@
       "aliases": [
         "Jira issue tools",
         "Jira ticket lookup",
-        "Jira comment tool"
+        "Jira issue management"
       ],
       "displayName": "Ericsson Jira Tools",
       "entry": "references/capabilities/jira-tools.md",
       "goals": [
-        "Show the unresolved Jira tickets assigned to me.",
-        "Get the details of a Jira issue.",
-        "Prepare a Jira comment for my approval."
+        "Discover bounded Jira issues, fields, projects, transitions, assignable users, and link types.",
+        "Read assigned work, explicit searches, issue details, and recent comments.",
+        "Preview and perform an explicitly approved Jira comment, transition, assignment, field update, label change, issue creation, or issue link."
       ],
       "id": "jira-tools",
       "maturity": "available",

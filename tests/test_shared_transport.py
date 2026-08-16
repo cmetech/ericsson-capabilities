@@ -79,3 +79,14 @@ class TestHttpxTransport:
                 "GET", "https://evil.test/api/v4/x", params=None, json_body=None,
                 timeout_seconds=5,
             )
+
+    @pytest.mark.parametrize("path", ["/api/v4/../admin/secrets", "/api/v4/%2e%2e/admin/secrets"])
+    def test_dot_segments_cannot_escape_prefix(self, path):
+        def handler(request):  # pragma: no cover - must never be reached
+            raise AssertionError("request should not have been issued")
+
+        with pytest.raises(ConnectorError) as excinfo:
+            _transport(handler).request(
+                "GET", path, params=None, json_body=None, timeout_seconds=5,
+            )
+        assert excinfo.value.category == "invalid_input"

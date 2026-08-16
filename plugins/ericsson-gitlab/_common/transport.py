@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -76,12 +76,14 @@ class HttpxTransport:
         self._client.close()
 
     def _validate_path(self, path: str) -> None:
+        decoded_segments = unquote(path).split("/") if isinstance(path, str) else ()
         if (
             not isinstance(path, str)
             or not path.startswith(self._path_prefix)
             or len(path) > 8192
             or urlsplit(path).scheme
             or "\x00" in path
+            or any(segment in {".", ".."} for segment in decoded_segments)
         ):
             raise ConnectorError("invalid_input")
 

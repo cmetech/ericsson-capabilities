@@ -68,3 +68,48 @@ run is blocked by pre-existing environment-dependent GitLab workflow tests that
 require a paired Hermes checkout with `plugins/workflow/schema.py`; the first
 failure is `tests/test_gitlab_workflows.py::test_real_scheduler_makes_every_application_terminal_state_total[...]`
 with `AssertionError: paired Hermes checkout with the real workflow compiler is missing`.
+
+## Fix Round 1
+
+Closed the prefix-boundary bypass for literal and percent-encoded dot segments.
+Path validation now percent-decodes the path before splitting it and rejects any
+`.` or `..` segment, so HTTPX cannot normalize or forward a request outside the
+configured prefix.
+
+Added the parameterized regression in `tests/test_shared_transport.py` covering:
+
+- `/api/v4/../admin/secrets`
+- `/api/v4/%2e%2e/admin/secrets`
+
+TDD evidence before the fix:
+
+```text
+. .venv/bin/activate && PYTHONPATH=shared pytest tests/test_shared_transport.py -q
+```
+
+```text
+.......FF                                                               [100%]
+2 failed, 7 passed
+```
+
+Both failures showed the mock handler being reached; HTTPX normalized the
+literal path to `/api/admin/secrets`, while the encoded path remained an
+out-of-prefix request.
+
+Verification after the fix and regeneration:
+
+```text
+. .venv/bin/activate && PYTHONPATH=shared pytest tests/test_shared_transport.py -q
+python scripts/sync_shared.py
+pytest tests/test_shared_sync.py -q
+```
+
+```text
+.........                                                                [100%]
+synced -> plugins/ericsson-jira/_common
+synced -> plugins/ericsson-gitlab/_common
+.......                                                                  [100%]
+```
+
+The canonical and both generated transport files have identical SHA-256:
+`0e3c94d5283e3e11d6cf4c4f7e886b6ecea1ecc659aece21de9df9338fa31cbe`.

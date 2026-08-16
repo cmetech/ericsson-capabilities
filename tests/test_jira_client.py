@@ -227,6 +227,44 @@ def test_versioned_mutation_caches_the_auto_probe_result():
     ]
 
 
+def test_versioned_mutation_accepts_only_declared_empty_success_statuses():
+    transport = FakeTransport(response(201, body=b""))
+    jira = JiraClient(auth(rest_api_version="3"), native_transport=transport)
+
+    try:
+        result = jira.rest_json_versioned_mutation(
+            "POST",
+            "issueLink",
+            json_body_by_version={"3": {}, "2": {}},
+            empty_success_statuses=frozenset({201, 204}),
+        )
+    except TypeError:
+        pytest.fail("versioned mutations do not accept an empty-success contract")
+
+    assert result is None
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [set(), {201}, frozenset({199}), frozenset({300}), frozenset({True})],
+)
+def test_versioned_mutation_rejects_invalid_empty_success_contract(invalid):
+    jira = JiraClient(auth(rest_api_version="3"), native_transport=FakeTransport())
+
+    try:
+        with pytest.raises(JiraError) as caught:
+            jira.rest_json_versioned_mutation(
+                "POST",
+                "issueLink",
+                json_body_by_version={"3": {}, "2": {}},
+                empty_success_statuses=invalid,
+            )
+    except TypeError:
+        pytest.fail("versioned mutations do not validate an empty-success contract")
+
+    assert caught.value.category == "invalid_input"
+
+
 @pytest.mark.parametrize(
     ("rest_api_version", "expected_path", "expected_description"),
     [
@@ -347,6 +385,34 @@ def test_create_issue_probe_failure_prevents_every_post():
         ("GET", "/rest/api/3/serverInfo")
     ]
     assert not any(method == "POST" for method, _path, _kwargs in transport.calls)
+
+
+def test_create_issue_empty_201_remains_ambiguous():
+    transport = FakeTransport(response(201, body=b""))
+    jira = JiraClient(auth(rest_api_version="3"), native_transport=transport)
+
+    with pytest.raises(JiraError) as caught:
+        JiraOperations(jira).create_issue("PROJ", "Bug", "Broken", confirm=True)
+
+    assert caught.value.category == "write_ambiguous"
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("POST", "/rest/api/3/issue")
+    ]
+
+
+def test_explicit_v2_read_never_probes_or_falls_back():
+    transport = FakeTransport(response(payload={"fields": {}}))
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+
+    try:
+        result = jira.rest_json_v2("GET", "issue/ABC-1")
+    except AttributeError:
+        pytest.fail("JiraClient does not expose the narrow explicit-v2 read API")
+
+    assert result == {"fields": {}}
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/2/issue/ABC-1")
+    ]
 
 
 def test_get_retries_bounded_transient_status_and_honors_retry_after():

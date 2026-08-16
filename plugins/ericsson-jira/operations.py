@@ -300,7 +300,7 @@ class JiraOperations:
 
     def _status_name(self, key: str) -> str | None:
         """Read one issue status solely to reconcile an ambiguous write."""
-        payload = self.client.rest_json("GET", f"issue/{key}")
+        payload = self.client.rest_json_v2("GET", f"issue/{key}")
         if not isinstance(payload, Mapping):
             return None
         fields = payload.get("fields")
@@ -992,6 +992,7 @@ class JiraOperations:
             "POST",
             "issueLink",
             json_body_by_version={"3": body, "2": body},
+            empty_success_statuses=frozenset({201, 204}),
         )
         return result
 
@@ -1062,7 +1063,7 @@ class JiraOperations:
         if not isinstance(raw, dict) or not isinstance(raw.get("fields"), dict):
             raise JiraError("invalid_remote_data")
         key = _bounded_string(raw.get("key"), 128)
-        if not key:
+        if not key or _ISSUE_KEY.fullmatch(key) is None:
             raise JiraError("invalid_remote_data")
         fields = raw["fields"]
         labels = fields.get("labels", [])
@@ -1085,21 +1086,22 @@ class JiraOperations:
         sentence = re.split(r"(?<=[.!?])\s", compact, maxsplit=1)[0] if compact else ""
         if len(sentence) > 260:
             sentence = sentence[:257].rstrip() + "..."
+        projected_key = self._redact(key) or ""
         return {
-            "key": key,
+            "key": projected_key,
             "summary": summary,
             "status": status,
             "status_category": status_category,
             "priority": self._redact(_name(fields.get("priority"))),
             "issue_type": self._redact(_name(fields.get("issuetype"))),
             "labels": [self._redact(label) or "" for label in labels],
-            "updated": _bounded_string(fields.get("updated"), 128),
-            "created": _bounded_string(fields.get("created"), 128),
+            "updated": self._redact(_bounded_string(fields.get("updated"), 128)),
+            "created": self._redact(_bounded_string(fields.get("created"), 128)),
             "description": description,
             "environment": environment,
             "problem_summary": sentence,
             "gitlab_urls": extract_gitlab_urls(description, environment, summary),
-            "issue_url": f"{self.client.auth.origin}/browse/{key}",
+            "issue_url": self._redact(f"{self.client.auth.origin}/browse/{key}"),
         }
 
     def _matches(
@@ -1201,8 +1203,9 @@ class JiraOperations:
 
         selected: list[dict[str, Any]] = []
         start_at = 0
-        total = None
+        remote_total = None
         truncated = False
+        fully_scanned = False
         pages = 0
         while pages < self.max_pages:
             pages += 1
@@ -1223,7 +1226,7 @@ class JiraOperations:
             raw_total = payload.get("total", start_at + len(raw_issues))
             if type(raw_total) is not int or raw_total < 0:
                 raise JiraError("invalid_remote_data")
-            total = raw_total
+            remote_total = raw_total
             consumed = 0
             for raw in raw_issues:
                 consumed += 1
@@ -1239,22 +1242,35 @@ class JiraOperations:
                 ):
                     selected.append(normalized)
                     if len(selected) >= max_results:
-                        truncated = start_at + consumed < total
+                        fully_scanned = start_at + consumed >= remote_total
+                        truncated = not fully_scanned
                         break
             start_at += len(raw_issues)
             if len(selected) >= max_results:
                 break
-            if not raw_issues or start_at >= total:
+            if not raw_issues or start_at >= remote_total:
+                fully_scanned = True
                 break
         else:
-            truncated = total is None or start_at < total
+            truncated = remote_total is None or start_at < remote_total
+        if not has_filters:
+            result_total = remote_total
+        elif fully_scanned:
+            result_total = len(selected)
+        else:
+            result_total = None
         return result_envelope(
             selected[:max_results],
-            total=total,
+            total=result_total,
             truncated=truncated,
             hint=(
-                "More issues match this JQL. Raise max_results or narrow the "
-                "query."
+                "More Jira issues remain unscanned. Narrow the JQL or filters "
+                "before treating this filtered result as complete."
+                if truncated and has_filters
+                else (
+                    "More issues match this JQL. Raise max_results or narrow "
+                    "the query."
+                )
                 if truncated
                 else None
             ),
@@ -1299,7 +1315,9 @@ class JiraOperations:
                         _bounded_string(author.get("displayName"), 256)
                     ),
                     "body": self._redact(adf_to_text(comment.get("body"))) or "",
-                    "created": _bounded_string(comment.get("created"), 128),
+                    "created": self._redact(
+                        _bounded_string(comment.get("created"), 128)
+                    ),
                 }
             )
         normalized["comments"] = comments
@@ -1307,9 +1325,19 @@ class JiraOperations:
         return normalized
 
     def _find_comment(
-        self, key: str, body: str, *, deadline: float
+        self,
+        key: str,
+        body: str,
+        *,
+        deadline: float,
+        resolved_version: bool = False,
     ) -> str | None:
-        payload = self.client.rest_json(
+        read = (
+            self.client.rest_json_resolved_version
+            if resolved_version
+            else self.client.rest_json
+        )
+        payload = read(
             "GET",
             f"issue/{key}/comment",
             params={"maxResults": 100, "orderBy": "-created"},
@@ -1325,8 +1353,10 @@ class JiraOperations:
             if not isinstance(comment, dict):
                 raise JiraError("invalid_remote_data")
             comment_id = _bounded_string(comment.get("id"), 128)
-            if comment_id and adf_to_text(comment.get("body")).strip() == target:
-                return comment_id
+            if comment_id is None or _NUMERIC_ID.fullmatch(comment_id) is None:
+                raise JiraError("invalid_remote_data")
+            if adf_to_text(comment.get("body")).strip() == target:
+                return self._redact(comment_id)
         return None
 
     @staticmethod
@@ -1394,13 +1424,11 @@ class JiraOperations:
             }
         }
         v2_body = {"body": body}
-        selected_body = v2_body if self.client.auth.rest_api_version == "2" else v3_body
         original_failure = None
         try:
-            payload = self.client.rest_json(
+            payload = self.client.rest_json_versioned_mutation(
                 "POST",
                 f"issue/{key}/comment",
-                json_body=selected_body,
                 json_body_by_version={"3": v3_body, "2": v2_body},
                 deadline=deadline,
             )
@@ -1411,9 +1439,9 @@ class JiraOperations:
         if original_failure is None:
             if isinstance(payload, dict):
                 comment_id = _bounded_string(payload.get("id"), 128)
-                if comment_id:
+                if comment_id and _NUMERIC_ID.fullmatch(comment_id) is not None:
                     return self._comment_result(
-                        comment_id,
+                        self._redact(comment_id),
                         created=True,
                         duplicate=False,
                         reconciled=False,
@@ -1423,7 +1451,9 @@ class JiraOperations:
 
         reconciled = None
         try:
-            reconciled = self._find_comment(key, body, deadline=deadline)
+            reconciled = self._find_comment(
+                key, body, deadline=deadline, resolved_version=True
+            )
         except JiraError:
             pass
         if reconciled is not None:

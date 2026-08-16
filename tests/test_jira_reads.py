@@ -128,6 +128,7 @@ def test_search_paginates_to_bound_and_returns_explicit_truncation_warning():
     )
 
     assert [row["key"] for row in result["items"]] == ["ABC-1", "ABC-2", "ABC-3"]
+    assert result["total"] == 5
     assert result["truncated"] is True
     assert result["hint"] == "More issues match this JQL. Raise max_results or narrow the query."
     assert [call[2]["params"]["startAt"] for call in client.calls] == [0, 2]
@@ -143,13 +144,13 @@ def test_filters_are_case_insensitive_and_age_thresholds_are_deterministic():
     client = FakeClient(
         {
             "issues": [
-                issue("KEEP", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
-                issue("STATUS", status="Closed", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
-                issue("TYPE", issue_type="Story", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
-                issue("PRIORITY", priority="Low", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
-                issue("LABEL", labels=["Frontend"], updated="2026-08-02T12:00:00Z"),
-                issue("TOO-NEW", labels=["Backend"], updated="2026-08-11T12:00:00Z"),
-                issue("TOO-OLD", labels=["Backend"], updated="2026-06-01T12:00:00Z"),
+                issue("ABC-1", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
+                issue("ABC-2", status="Closed", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
+                issue("ABC-3", issue_type="Story", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
+                issue("ABC-4", priority="Low", labels=["Backend"], updated="2026-08-02T12:00:00Z"),
+                issue("ABC-5", labels=["Frontend"], updated="2026-08-02T12:00:00Z"),
+                issue("ABC-6", labels=["Backend"], updated="2026-08-11T12:00:00Z"),
+                issue("ABC-7", labels=["Backend"], updated="2026-06-01T12:00:00Z"),
             ],
             "total": 7,
             "startAt": 0,
@@ -170,8 +171,47 @@ def test_filters_are_case_insensitive_and_age_thresholds_are_deterministic():
         max_age_days=20,
     )
 
-    assert [row["key"] for row in result["items"]] == ["KEEP"]
+    assert [row["key"] for row in result["items"]] == ["ABC-1"]
+    assert result["total"] == 1
     assert result["truncated"] is False
+
+
+def test_selection_limited_filtered_search_omits_unknown_total():
+    client = FakeClient(
+        {
+            "issues": [issue("ABC-1"), issue("ABC-2"), issue("ABC-3")],
+            "total": 4,
+            "startAt": 0,
+        }
+    )
+
+    result = JiraOperations(client).search_issues(
+        jql="project = ABC", max_results=2, statuses=["Open"]
+    )
+
+    assert [row["key"] for row in result["items"]] == ["ABC-1", "ABC-2"]
+    assert "total" not in result
+    assert result["truncated"] is True
+    assert "unscanned" in result["hint"]
+
+
+def test_max_page_limited_filtered_search_omits_unknown_total():
+    client = FakeClient(
+        {
+            "issues": [issue("ABC-1", status="Closed"), issue("ABC-2", status="Closed")],
+            "total": 4,
+            "startAt": 0,
+        }
+    )
+
+    result = JiraOperations(client, max_pages=1).search_issues(
+        jql="project = ABC", max_results=2, statuses=["Open"]
+    )
+
+    assert result["items"] == []
+    assert "total" not in result
+    assert result["truncated"] is True
+    assert "unscanned" in result["hint"]
 
 
 def test_get_issue_normalizes_adf_context_and_safe_comment_projection():
@@ -226,6 +266,56 @@ def test_get_issue_normalizes_adf_context_and_safe_comment_projection():
     assert "private@example.test" not in repr(result)
     assert "raw-secret" not in repr(result)
     assert "connector-secret" not in repr(result)
+
+
+def test_remote_issue_projection_redacts_key_timestamps_comment_created_and_url():
+    payload = issue(
+        "ABC-1",
+        updated="updated ABC-1",
+        created="created ABC-1",
+        extra={
+            "comment": {
+                "comments": [
+                    {
+                        "id": "10001",
+                        "author": {"displayName": "A"},
+                        "body": "body",
+                        "created": "comment ABC-1",
+                    }
+                ]
+            }
+        },
+    )
+    remote_client = FakeClient(payload)
+    remote_client.auth = JiraAuth(
+        origin="https://jira.example.test",
+        authorization="Bearer ABC-1",
+        auth_mode="bearer",
+        rest_api_version="3",
+        transport="native",
+        curl_executable="/usr/bin/curl",
+        request_timeout_seconds=30,
+        default_max_results=25,
+    )
+
+    result = JiraOperations(remote_client).get_issue("ABC-1")
+
+    assert result["key"] == "<redacted>"
+    assert result["updated"] == "updated <redacted>"
+    assert result["created"] == "created <redacted>"
+    assert result["comments"][0]["created"] == "comment <redacted>"
+    assert result["issue_url"] == "https://jira.example.test/browse/<redacted>"
+    assert "ABC-1" not in repr(result)
+
+
+def test_invalid_remote_issue_key_fails_closed_without_echo():
+    with pytest.raises(JiraError) as caught:
+        JiraOperations(FakeClient(issue("remote-secret"))).search_issues(
+            jql="project = ABC", max_results=10
+        )
+
+    assert caught.value.category == "invalid_remote_data"
+    assert "remote-secret" not in str(caught.value)
 
 
 def test_malformed_search_and_issue_payloads_fail_closed_without_raw_echo():

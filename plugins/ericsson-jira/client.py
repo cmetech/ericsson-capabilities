@@ -355,6 +355,30 @@ class JiraClient:
             return None
         return self._decode(response, method)
 
+    def rest_json_v2(
+        self,
+        method: str,
+        resource: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        deadline: float | None = None,
+    ) -> Any:
+        """Perform one GET against REST API v2 without probing or fallback."""
+        method = method.upper() if isinstance(method, str) else ""
+        if method != "GET":
+            raise JiraError("invalid_input")
+        self._validate_resource(resource)
+        if deadline is None:
+            deadline = self.operation_deadline()
+        response = self._perform(
+            method,
+            f"/rest/api/2/{resource}",
+            params=params,
+            json_body=None,
+            deadline=deadline,
+        )
+        return self._decode(response, method)
+
     def _resolved_mutation_version(self, *, deadline: float) -> str:
         """Resolve auto configuration using only bounded GET requests.
 
@@ -397,6 +421,7 @@ class JiraClient:
         *,
         params: Mapping[str, Any] | None = None,
         json_body_by_version: Mapping[str, Any],
+        empty_success_statuses: frozenset[int] = frozenset({204}),
         deadline: float | None = None,
     ) -> Any:
         """Perform exactly one mutation using a safely selected REST version.
@@ -414,6 +439,15 @@ class JiraClient:
             or set(json_body_by_version) != {"3", "2"}
         ):
             raise JiraError("invalid_input")
+        if (
+            type(empty_success_statuses) is not frozenset
+            or not empty_success_statuses
+            or any(
+                type(status) is not int or not 200 <= status < 300
+                for status in empty_success_statuses
+            )
+        ):
+            raise JiraError("invalid_input")
         if deadline is None:
             deadline = self.operation_deadline()
         version = self._resolved_mutation_version(deadline=deadline)
@@ -424,7 +458,7 @@ class JiraClient:
             json_body=json_body_by_version[version],
             deadline=deadline,
         )
-        if response.status == 204:
+        if response.status in empty_success_statuses and response.body == b"":
             self._raise_status(response, method)
             return None
         return self._decode(response, method)

@@ -59,6 +59,9 @@ class FakeClient:
     def rest_json_v2_mutation(self, method, resource, **kwargs):
         return self.rest_json(method, resource, **kwargs)
 
+    def rest_json_v2(self, method, resource, **kwargs):
+        return self.rest_json(method, resource, **kwargs)
+
     def rest_json_versioned_mutation(self, method, resource, **kwargs):
         return self.rest_json(method, resource, **kwargs)
 
@@ -234,6 +237,47 @@ class TestTransitionReconciliation:
             ("GET", "issue/ABC-1"),
         ]
         assert [call[0] for call in client.calls].count("POST") == 1
+
+    def test_auto_data_center_ambiguity_reads_status_once_from_v2(self):
+        class Transport:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, path, **kwargs):
+                self.calls.append((method, path, kwargs))
+                if method == "POST":
+                    return TransportResponse(500, {}, b"{}")
+                if method == "GET" and path == "/rest/api/2/issue/ABC-1":
+                    return TransportResponse(
+                        200, {}, b'{"fields":{"status":{"name":"Done"}}}'
+                    )
+                raise AssertionError((method, path))
+
+            def close(self):
+                pass
+
+        auth = JiraAuth(
+            origin="https://jira.example.test",
+            authorization="Bearer secret-token-value",
+            auth_mode="bearer",
+            rest_api_version="auto",
+            transport="native",
+            curl_executable="/usr/bin/curl",
+            request_timeout_seconds=30,
+            default_max_results=25,
+        )
+        transport = Transport()
+        jira = JiraClient(auth, native_transport=transport, max_retries=0)
+
+        result = JiraOperations(jira).transition_issue(
+            "ABC-1", "31", confirm=True, expected_status="Done"
+        )
+
+        assert result["reconciled"] is True
+        assert [call[:2] for call in transport.calls] == [
+            ("POST", "/rest/api/2/issue/ABC-1/transitions"),
+            ("GET", "/rest/api/2/issue/ABC-1"),
+        ]
 
     def test_ambiguous_write_with_no_expected_status_does_not_read_or_retry(self):
         client = FakeClient([JiraError("write_ambiguous")])
@@ -1706,7 +1750,8 @@ class TestLinkIssues:
                             "inwardIssue": {"key": "ABC-1"},
                             "outwardIssue": {"key": "ABC-2"},
                         },
-                    }
+                    },
+                    "empty_success_statuses": frozenset({201, 204}),
                 },
             )
         ]
@@ -1772,6 +1817,51 @@ def test_link_issues_performs_exactly_one_post_at_the_resolved_version(rest_api_
         "outwardIssue": {"key": "ABC-2"},
     }
     assert result["dry_run"] is False
+
+
+@pytest.mark.parametrize("deployment", ["cloud", "data_center"])
+def test_link_issues_accepts_bodyless_201_on_cloud_and_data_center(deployment):
+    class LinkTransport:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, path, **kwargs):
+            self.calls.append((method, path, kwargs))
+            if path == "/rest/api/3/serverInfo" and deployment == "data_center":
+                return TransportResponse(
+                    404,
+                    {"content-type": "application/json"},
+                    b'{"errorMessages":["REST API v3 endpoint is not available"]}',
+                )
+            if path.endswith("/serverInfo"):
+                return TransportResponse(200, {}, b"{}")
+            return TransportResponse(201, {}, b"")
+
+        def close(self):
+            pass
+
+    auth = JiraAuth(
+        origin="https://jira.example.test",
+        authorization="Bearer secret-token-value",
+        auth_mode="bearer",
+        rest_api_version="auto",
+        transport="native",
+        curl_executable="/usr/bin/curl",
+        request_timeout_seconds=30,
+        default_max_results=25,
+    )
+    transport = LinkTransport()
+
+    result = JiraOperations(JiraClient(auth, native_transport=transport)).link_issues(
+        "ABC-1", "ABC-2", "Blocks", confirm=True
+    )
+
+    posts = [call for call in transport.calls if call[0] == "POST"]
+    expected_version = "3" if deployment == "cloud" else "2"
+    assert result["ok"] is True
+    assert [call[:2] for call in posts] == [
+        ("POST", f"/rest/api/{expected_version}/issueLink")
+    ]
 
 
 def test_link_issues_has_complete_schema_wiring_and_argument_bound_approval():

@@ -51,6 +51,12 @@ class FakeClient:
             raise outcome
         return outcome
 
+    def rest_json_versioned_mutation(self, method, resource, **kwargs):
+        return self.rest_json(method, resource, **kwargs)
+
+    def rest_json_resolved_version(self, method, resource, **kwargs):
+        return self.rest_json(method, resource, **kwargs)
+
 
 def comments(*items):
     return {"comments": list(items), "total": len(items)}
@@ -149,28 +155,40 @@ def test_comment_uses_version_appropriate_body_and_preserves_result_fields(
         },
         "2": {"body": "approved body"},
     }
-    assert client.calls[1][2]["json_body"] == expected_body
+    assert client.calls[1][2]["json_body_by_version"][version] == expected_body
 
 
-def test_auto_v3_missing_endpoint_falls_back_with_v2_plain_body():
+@pytest.mark.parametrize("deployment", ["cloud", "data_center"])
+def test_auto_comment_probes_with_gets_but_posts_exactly_once(deployment):
     class Transport:
         def __init__(self):
             self.calls = []
-            self.responses = deque(
-                [
-                    TransportResponse(200, {}, b'{"comments":[],"total":0}'),
-                    TransportResponse(
-                        404,
-                        {"content-type": "application/json"},
-                        b'{"errorMessages":["REST API v3 endpoint is not available"]}',
-                    ),
-                    TransportResponse(201, {}, b'{"id":"10002"}'),
-                ]
+
+        @staticmethod
+        def unsupported():
+            return TransportResponse(
+                404,
+                {"content-type": "application/json"},
+                b'{"errorMessages":["REST API v3 endpoint is not available"]}',
             )
 
         def request(self, method, path, **kwargs):
             self.calls.append((method, path, kwargs))
-            return self.responses.popleft()
+            if path == "/rest/api/3/issue/ABC-1/comment" and method == "GET":
+                if deployment == "data_center":
+                    return self.unsupported()
+                return TransportResponse(200, {}, b'{"comments":[],"total":0}')
+            if path == "/rest/api/2/issue/ABC-1/comment" and method == "GET":
+                return TransportResponse(200, {}, b'{"comments":[],"total":0}')
+            if path == "/rest/api/3/serverInfo":
+                if deployment == "data_center":
+                    return self.unsupported()
+                return TransportResponse(200, {}, b"{}")
+            if path == "/rest/api/2/serverInfo":
+                return TransportResponse(200, {}, b"{}")
+            if method == "POST":
+                return TransportResponse(201, {}, b'{"id":"10002"}')
+            raise AssertionError((method, path))
 
         def close(self):
             pass
@@ -181,13 +199,16 @@ def test_auto_v3_missing_endpoint_falls_back_with_v2_plain_body():
     result = JiraOperations(client).add_comment("ABC-1", "approved body")
 
     assert result["id"] == "10002"
-    assert [call[1] for call in transport.calls] == [
-        "/rest/api/3/issue/ABC-1/comment",
-        "/rest/api/3/issue/ABC-1/comment",
-        "/rest/api/2/issue/ABC-1/comment",
+    posts = [call for call in transport.calls if call[0] == "POST"]
+    expected_version = "3" if deployment == "cloud" else "2"
+    assert [call[:2] for call in posts] == [
+        ("POST", f"/rest/api/{expected_version}/issue/ABC-1/comment")
     ]
-    assert transport.calls[1][2]["json_body"]["body"]["type"] == "doc"
-    assert transport.calls[2][2]["json_body"] == {"body": "approved body"}
+    assert any(call[1].endswith("/serverInfo") for call in transport.calls)
+    if deployment == "cloud":
+        assert posts[0][2]["json_body"]["body"]["type"] == "doc"
+    else:
+        assert posts[0][2]["json_body"] == {"body": "approved body"}
 
 
 def test_exact_existing_comment_is_reused_without_posting():
@@ -229,6 +250,69 @@ def test_unreconciled_ambiguous_write_is_reported_and_never_retried():
     assert [call[0] for call in client.calls] == ["GET", "POST", "GET"]
 
 
+def test_reconciliation_read_failure_preserves_original_write_ambiguity():
+    client = FakeClient(
+        comments(), JiraError("write_ambiguous"), JiraError("permission")
+    )
+
+    with pytest.raises(JiraError) as caught:
+        JiraOperations(client).add_comment("ABC-1", "approved body")
+
+    assert caught.value.category == "write_ambiguous"
+    assert [call[0] for call in client.calls] == ["GET", "POST", "GET"]
+
+
+def test_auto_data_center_comment_reconciliation_uses_one_resolved_v2_get():
+    class Transport:
+        def __init__(self):
+            self.calls = []
+            self.comment_gets = 0
+
+        @staticmethod
+        def unsupported():
+            return TransportResponse(
+                404,
+                {"content-type": "application/json"},
+                b'{"errorMessages":["REST API v3 endpoint is not available"]}',
+            )
+
+        def request(self, method, path, **kwargs):
+            self.calls.append((method, path, kwargs))
+            if path == "/rest/api/3/issue/ABC-1/comment":
+                return self.unsupported()
+            if path == "/rest/api/2/issue/ABC-1/comment" and method == "GET":
+                self.comment_gets += 1
+                body = (
+                    b'{"comments":[],"total":0}'
+                    if self.comment_gets == 1
+                    else b'{"comments":[{"id":"88","body":"approved body"}],"total":1}'
+                )
+                return TransportResponse(200, {}, body)
+            if path == "/rest/api/3/serverInfo":
+                return self.unsupported()
+            if path == "/rest/api/2/serverInfo":
+                return TransportResponse(200, {}, b"{}")
+            if method == "POST" and path == "/rest/api/2/issue/ABC-1/comment":
+                return TransportResponse(500, {}, b"{}")
+            raise AssertionError((method, path))
+
+        def close(self):
+            pass
+
+    transport = Transport()
+    jira = JiraClient(auth("auto"), native_transport=transport, max_retries=0)
+
+    result = JiraOperations(jira).add_comment("ABC-1", "approved body")
+
+    assert result["id"] == "88"
+    assert result["reconciled"] is True
+    assert sum(call[0] == "POST" for call in transport.calls) == 1
+    post_index = next(i for i, call in enumerate(transport.calls) if call[0] == "POST")
+    assert [call[:2] for call in transport.calls[post_index + 1 :]] == [
+        ("GET", "/rest/api/2/issue/ABC-1/comment")
+    ]
+
+
 def test_incomplete_success_payload_reconciles_or_reports_write_ambiguous():
     client = FakeClient(comments(), {}, comments())
 
@@ -239,6 +323,36 @@ def test_incomplete_success_payload_reconciles_or_reports_write_ambiguous():
     assert [call[0] for call in client.calls] == ["GET", "POST", "GET"]
     assert {call[2]["deadline"] for call in client.calls} == {123.0}
     assert client.deadline_calls == 1
+
+
+def test_invalid_create_comment_id_is_treated_as_ambiguous_without_echo():
+    client = FakeClient(comments(), {"id": "secret-token"}, comments())
+
+    with pytest.raises(JiraError) as caught:
+        JiraOperations(client).add_comment("ABC-1", "approved body")
+
+    assert caught.value.category == "write_ambiguous"
+    assert "secret-token" not in str(caught.value)
+
+
+def test_invalid_duplicate_comment_id_fails_closed_without_echo():
+    client = FakeClient(comments(comment("secret-token", "approved body")))
+
+    with pytest.raises(JiraError) as caught:
+        JiraOperations(client).add_comment("ABC-1", "approved body")
+
+    assert caught.value.category == "invalid_remote_data"
+    assert "secret-token" not in str(caught.value)
+
+
+def test_create_comment_id_is_redacted_after_structural_validation():
+    client = FakeClient(comments(), {"id": "10001"})
+    client.auth = auth("3")
+    object.__setattr__(client.auth, "authorization", "Bearer 10001")
+
+    result = JiraOperations(client).add_comment("ABC-1", "approved body")
+
+    assert result["id"] == "<redacted>"
 
 
 @pytest.mark.parametrize("category", ["authentication", "permission"])

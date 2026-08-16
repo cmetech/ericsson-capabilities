@@ -1,0 +1,7 @@
+name: ericsson-arm
+version: 1.0.0
+description: "Ericsson Artifactory tools — AQL search, artefact metadata and build properties, repository enumeration, and gated checksum-first deploy and delete."
+author: Ericsson (cmetech)
+kind: standalone
+config_schema: config.schema.json
+provides_tools: []

@@ -14,7 +14,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 CANONICAL = REPO / "shared" / "ericsson_common"
 PLUGINS = REPO / "plugins"
-CONSUMERS = ["ericsson-jira", "ericsson-gitlab", "ericsson-confluence"]
+CONSUMERS = [
+    "ericsson-jira",
+    "ericsson-gitlab",
+    "ericsson-confluence",
+    "ericsson-arm",
+]
 
 
 def sync() -> int:

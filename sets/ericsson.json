@@ -36,6 +36,11 @@
       "path": "plugins/ericsson-confluence",
       "id": "ericsson-confluence",
       "enabled": false
+    },
+    {
+      "path": "plugins/ericsson-arm",
+      "id": "ericsson-arm",
+      "enabled": false
     }
   ],
   "mcpServers": "mcp/mcp-servers.yaml",

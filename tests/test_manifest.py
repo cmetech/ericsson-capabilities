@@ -350,6 +350,11 @@ def test_manifest_content():
             "id": "ericsson-confluence",
             "enabled": False,
         },
+        {
+            "path": "plugins/ericsson-arm",
+            "id": "ericsson-arm",
+            "enabled": False,
+        },
     ]
     assert doc["mcpServers"] == "mcp/mcp-servers.yaml"
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]
@@ -459,13 +464,14 @@ def test_lint_accepts_string_backends_and_disabled_standalone_plugins(tmp_path):
     assert code == 0 and out["ok"] is True, out
 
 
-def test_lint_accepts_four_connectors_disabled_for_new_profiles(tmp_path):
+def test_lint_accepts_five_connectors_disabled_for_new_profiles(tmp_path):
     doc = json.loads(MANIFEST.read_text())
     doc["plugins"] = [
         _standalone_plugin("ericsson-jira"),
         _standalone_plugin("ericsson-gitlab"),
         _standalone_plugin("ericsson-sharepoint"),
         _standalone_plugin("ericsson-confluence"),
+        _standalone_plugin("ericsson-arm"),
     ]
 
     code, out = _lint(_write_manifest(tmp_path, doc))

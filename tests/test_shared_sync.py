@@ -17,7 +17,12 @@ PLUGINS = REPO / "plugins"
 
 # Connectors that consume the shared transport. ericsson-teams is excluded:
 # it is Graph-only and has no REST client to share.
-CONSUMERS = ["ericsson-jira", "ericsson-gitlab", "ericsson-confluence"]
+CONSUMERS = [
+    "ericsson-jira",
+    "ericsson-gitlab",
+    "ericsson-confluence",
+    "ericsson-arm",
+]
 _CACHE_DIRECTORIES = frozenset(
     {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 )

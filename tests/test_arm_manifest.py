@@ -1,0 +1,152 @@
+"""The ARM connector must be registered and loadable."""
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+REPO = Path(__file__).resolve().parents[1]
+PLUGIN = REPO / "plugins" / "ericsson-arm"
+
+
+class TestManifest:
+    def test_plugin_directory_exists(self):
+        assert PLUGIN.is_dir()
+        assert (PLUGIN / "plugin.yaml").is_file()
+        assert (PLUGIN / "__init__.py").is_file()
+
+    def test_declared_in_the_capability_set(self):
+        entries = json.loads((REPO / "sets" / "ericsson.json").read_text())["plugins"]
+        matches = [
+            entry
+            for entry in entries
+            if type(entry) is dict and entry.get("id") == "ericsson-arm"
+        ]
+        assert len(matches) == 1
+        assert matches[0]["path"] == "plugins/ericsson-arm"
+
+    def test_disabled_by_default(self):
+        entries = json.loads((REPO / "sets" / "ericsson.json").read_text())["plugins"]
+        entry = next(
+            item
+            for item in entries
+            if type(item) is dict and item.get("id") == "ericsson-arm"
+        )
+        assert entry["enabled"] is False
+
+    def test_manifest_declares_a_config_schema(self):
+        manifest = yaml.safe_load((PLUGIN / "plugin.yaml").read_text())
+        assert manifest["kind"] == "standalone"
+        assert manifest["config_schema"] == "config.schema.json"
+
+    def test_token_is_secret_storage(self):
+        schema = json.loads((PLUGIN / "config.schema.json").read_text())
+        token = next(field for field in schema["fields"] if field["id"] == "token")
+        assert token["storage"] == "secret"
+
+    def test_auth_mode_offers_both_header_schemes(self):
+        """The unresolved JFrog header choice remains explicit configuration."""
+        schema = json.loads((PLUGIN / "config.schema.json").read_text())
+        mode = next(field for field in schema["fields"] if field["id"] == "auth_mode")
+        assert set(mode["validation"]["enum"]) == {"bearer", "api_key"}
+        assert mode["default"] == "bearer"
+
+    def test_client_certificate_paths_are_settings_not_secrets(self):
+        schema = json.loads((PLUGIN / "config.schema.json").read_text())
+        fields = {field["id"]: field for field in schema["fields"]}
+        assert fields["client_cert_path"]["storage"] == "setting"
+        assert fields["client_key_path"]["storage"] == "setting"
+
+    def test_shared_code_is_vendored(self):
+        assert (PLUGIN / "_common" / "client.py").is_file(), (
+            "run: python scripts/sync_shared.py"
+        )
+
+
+class TestErrors:
+    def test_unknown_category_coerces_to_transient(self):
+        sys.path.insert(0, str(PLUGIN))
+        from models import ArmError
+
+        assert ArmError("not-a-real-category").category == "transient"
+
+    def test_non_string_category_coerces_to_transient(self):
+        sys.path.insert(0, str(PLUGIN))
+        from models import ArmError
+
+        assert ArmError(["authentication"]).category == "transient"
+
+    def test_remediation_only_keeps_connector_owned_guidance(self):
+        sys.path.insert(0, str(PLUGIN))
+        from models import ArmError
+
+        assert ArmError("authentication", remediation="token=remote-secret").remediation is None
+        assert ArmError(
+            "authentication", remediation="Update the Artifactory token."
+        ).remediation == "Update the Artifactory token."
+
+    def test_categories_the_shared_client_raises_are_all_known(self):
+        """Unknown categories silently coerce to transient and lose their signal."""
+        sys.path.insert(0, str(PLUGIN))
+        from models import SAFE_ERROR_MESSAGES
+
+        for category in (
+            "conflict",
+            "confirmation_required",
+            "write_ambiguous",
+            "circuit_open",
+            "capacity",
+            "deadline",
+            "cancelled",
+        ):
+            assert category in SAFE_ERROR_MESSAGES, category
+
+    def test_arm_specific_categories_exist(self):
+        sys.path.insert(0, str(PLUGIN))
+        from models import SAFE_ERROR_MESSAGES
+
+        for category in ("edge_authentication", "certificate_invalid"):
+            assert category in SAFE_ERROR_MESSAGES, category
+
+    def test_edge_authentication_is_distinct_from_authentication(self):
+        sys.path.insert(0, str(PLUGIN))
+        from models import SAFE_ERROR_MESSAGES
+
+        assert SAFE_ERROR_MESSAGES["edge_authentication"] != SAFE_ERROR_MESSAGES[
+            "authentication"
+        ]
+
+
+class _HookContext:
+    def __init__(self):
+        self.event_name = None
+        self.hook = None
+
+    def register_hook(self, event_name, hook):
+        self.event_name = event_name
+        self.hook = hook
+
+
+def _load_plugin_module():
+    spec = importlib.util.spec_from_file_location(
+        "arm_task_one_plugin", PLUGIN / "__init__.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_empty_write_approval_hook_ignores_untrusted_arguments():
+    """Task 1 has no writes, so no input may be serialized by the hook."""
+    plugin = _load_plugin_module()
+    ctx = _HookContext()
+    recursive = {}
+    recursive["loop"] = recursive
+
+    plugin.register(ctx)
+
+    assert ctx.event_name == "pre_tool_call"
+    assert ctx.hook("future_arm_write", recursive) is None

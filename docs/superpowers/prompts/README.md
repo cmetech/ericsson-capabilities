@@ -90,6 +90,18 @@ ericsson-capabilities.
 
 No session merges its own work. Each reports and stops; you decide when to merge.
 
+## Planned Wave 4 — connector CLI migration surface
+
+After Wave 2 and all three Wave 3 branches are merged, a planned Wave 4 adds
+model-free, domain-shaped Jira, GitLab, Confluence, and ARM commands plus a
+verified SuperCLI migration mapping. It does not modify or gate Waves 1–3.
+The approved interface and sequencing constraints live in
+[`2026-08-16-ericsson-connector-cli-design.md`](../specs/2026-08-16-ericsson-connector-cli-design.md).
+
+The Wave 4 implementation plan and trigger prompt are intentionally not present
+yet. They are written only after the design specification is reviewed and
+approved.
+
 ## Vendoring
 
 Every ericsson-capabilities plan stops at the commit in that repo. Vendoring into

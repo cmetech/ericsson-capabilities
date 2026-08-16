@@ -330,6 +330,8 @@ class JiraOperations:
     @staticmethod
     def _adf(text: str) -> dict[str, Any]:
         """Wrap plain text as one Atlassian Document Format paragraph."""
+        if not text:
+            return {"type": "doc", "version": 1, "content": []}
         return {
             "type": "doc",
             "version": 1,

@@ -265,6 +265,34 @@ def test_create_issue_uses_one_explicit_versioned_post_with_matching_body(
     assert sum(method == "POST" for method, _path, _kwargs in transport.calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("rest_api_version", "expected_path", "expected_description"),
+    [
+        ("2", "/rest/api/2/issue", ""),
+        (
+            "3",
+            "/rest/api/3/issue",
+            {"type": "doc", "version": 1, "content": []},
+        ),
+    ],
+)
+def test_create_issue_empty_description_uses_one_post_with_version_safe_body(
+    rest_api_version, expected_path, expected_description
+):
+    transport = FakeTransport(response(201, {"key": "PROJ-42"}))
+    jira = JiraClient(auth(rest_api_version=rest_api_version), native_transport=transport)
+
+    JiraOperations(jira).create_issue(
+        "PROJ", "Bug", "Broken", description="", confirm=True
+    )
+
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("POST", expected_path)
+    ]
+    assert transport.calls[0][2]["json_body"]["fields"]["description"] == expected_description
+    assert sum(method == "POST" for method, _path, _kwargs in transport.calls) == 1
+
+
 def test_create_issue_auto_cloud_probes_then_posts_v3_once_with_adf():
     transport = FakeTransport(
         response(payload={}), response(201, {"key": "PROJ-42"})

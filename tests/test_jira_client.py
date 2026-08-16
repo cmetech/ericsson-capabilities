@@ -8,10 +8,11 @@ from collections import deque
 import httpx
 import pytest
 
-from jira_test_support import client, models, transport
+from jira_test_support import client, models, operations, transport
 
 
 JiraClient = client.JiraClient
+JiraOperations = operations.JiraOperations
 is_cloudflare_1010_response = client.is_cloudflare_1010_response
 is_rest_version_unsupported = client.is_rest_version_unsupported
 JiraAuth = models.JiraAuth
@@ -224,6 +225,100 @@ def test_versioned_mutation_caches_the_auto_probe_result():
         ("PUT", "/rest/api/3/issue/ABC-1/assignee"),
         ("PUT", "/rest/api/3/issue/ABC-2/assignee"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("rest_api_version", "expected_path", "expected_description"),
+    [
+        ("2", "/rest/api/2/issue", "Details"),
+        (
+            "3",
+            "/rest/api/3/issue",
+            {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": "Details"}],
+                    }
+                ],
+            },
+        ),
+    ],
+)
+def test_create_issue_uses_one_explicit_versioned_post_with_matching_body(
+    rest_api_version, expected_path, expected_description
+):
+    transport = FakeTransport(response(201, {"key": "PROJ-42"}))
+    jira = JiraClient(auth(rest_api_version=rest_api_version), native_transport=transport)
+
+    result = JiraOperations(jira).create_issue(
+        "PROJ", "Bug", "Broken", description="Details", confirm=True
+    )
+
+    assert result["key"] == "PROJ-42"
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("POST", expected_path)
+    ]
+    assert transport.calls[0][2]["json_body"]["fields"]["description"] == expected_description
+    assert sum(method == "POST" for method, _path, _kwargs in transport.calls) == 1
+
+
+def test_create_issue_auto_cloud_probes_then_posts_v3_once_with_adf():
+    transport = FakeTransport(
+        response(payload={}), response(201, {"key": "PROJ-42"})
+    )
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+
+    JiraOperations(jira).create_issue(
+        "PROJ", "Bug", "Broken", description="Details", confirm=True
+    )
+
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/3/serverInfo"),
+        ("POST", "/rest/api/3/issue"),
+    ]
+    assert transport.calls[1][2]["json_body"]["fields"]["description"]["type"] == "doc"
+    assert sum(method == "POST" for method, _path, _kwargs in transport.calls) == 1
+
+
+def test_create_issue_auto_data_center_probes_then_posts_v2_once_with_text():
+    unsupported = response(
+        404,
+        {"errorMessages": ["REST API v3 endpoint is not available"]},
+        headers={"content-type": "application/json"},
+    )
+    transport = FakeTransport(
+        unsupported, response(payload={}), response(201, {"key": "PROJ-42"})
+    )
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+
+    JiraOperations(jira).create_issue(
+        "PROJ", "Bug", "Broken", description="Details", confirm=True
+    )
+
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/3/serverInfo"),
+        ("GET", "/rest/api/2/serverInfo"),
+        ("POST", "/rest/api/2/issue"),
+    ]
+    assert transport.calls[2][2]["json_body"]["fields"]["description"] == "Details"
+    assert sum(method == "POST" for method, _path, _kwargs in transport.calls) == 1
+
+
+def test_create_issue_probe_failure_prevents_every_post():
+    transport = FakeTransport(response(403, payload={}))
+    jira = JiraClient(auth(rest_api_version="auto"), native_transport=transport)
+
+    with pytest.raises(JiraError) as caught:
+        JiraOperations(jira).create_issue("PROJ", "Bug", "Broken", confirm=True)
+
+    assert caught.value.category == "permission"
+    assert [(method, path) for method, path, _kwargs in transport.calls] == [
+        ("GET", "/rest/api/3/serverInfo")
+    ]
+    assert not any(method == "POST" for method, _path, _kwargs in transport.calls)
 
 
 def test_get_retries_bounded_transient_status_and_honors_retry_after():

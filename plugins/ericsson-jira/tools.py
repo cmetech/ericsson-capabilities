@@ -239,6 +239,27 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_create_issue": {
+        "name": "jira_create_issue",
+        "description": (
+            "Create one Jira issue. Use jira_get_project first to obtain a "
+            "valid issue type name for the project. Requires dry_run or "
+            "confirm."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "minLength": 1, "maxLength": 64},
+                "issue_type": {"type": "string", "minLength": 1, "maxLength": 255},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 255},
+                "description": {"type": "string", "maxLength": 32_000},
+                "dry_run": {"type": "boolean", "default": False},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["project", "issue_type", "summary"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -294,6 +315,14 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "dry_run",
             "confirm",
         },
+        "jira_create_issue": {
+            "project",
+            "issue_type",
+            "summary",
+            "description",
+            "dry_run",
+            "confirm",
+        },
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -312,6 +341,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_assign_issue": operations.assign_issue,
             "jira_update_fields": operations.update_fields,
             "jira_manage_labels": operations.manage_labels,
+            "jira_create_issue": operations.create_issue,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

@@ -327,6 +327,100 @@ class JiraOperations:
             _bounded_string(assignee.get("accountId"), 255),
         }
 
+    @staticmethod
+    def _adf(text: str) -> dict[str, Any]:
+        """Wrap plain text as one Atlassian Document Format paragraph."""
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": text}],
+                }
+            ],
+        }
+
+    def create_issue(
+        self,
+        project: str,
+        issue_type: str,
+        summary: str,
+        *,
+        description: str | None = None,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Create one Jira issue with exactly one version-aware POST.
+
+        A create has no idempotency key.  In particular, a later search could
+        not distinguish this request's issue from a similarly filed issue, so
+        an ambiguous create is deliberately neither reconciled nor retried.
+        """
+        if type(project) is not str or _PROJECT_KEY.fullmatch(project) is None:
+            raise JiraError("invalid_input")
+        if type(issue_type) is not str or not issue_type.strip() or len(issue_type) > 255:
+            raise JiraError("invalid_input")
+        if type(summary) is not str or not summary.strip() or len(summary) > 255:
+            raise JiraError("invalid_input")
+        if description is not None and (
+            type(description) is not str or len(description) > 32_000
+        ):
+            raise JiraError("invalid_input")
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise JiraError("invalid_input")
+        if dry_run and confirm:
+            raise JiraError("invalid_input")
+        if not dry_run and not confirm:
+            raise JiraError("confirmation_required")
+
+        execute = require_explicit_intent(
+            dry_run=dry_run,
+            confirm=confirm,
+            action=f"a new issue in Jira project {project}",
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "key": None,
+                "project": project,
+                "issue_type": issue_type,
+                "summary": summary,
+            }
+
+        base_fields: dict[str, Any] = {
+            "project": {"key": project},
+            "issuetype": {"name": issue_type},
+            "summary": summary,
+        }
+        v2_fields = dict(base_fields)
+        v3_fields = dict(base_fields)
+        if description is not None:
+            v2_fields["description"] = description
+            v3_fields["description"] = self._adf(description)
+        payload = self.client.rest_json_versioned_mutation(
+            "POST",
+            "issue",
+            json_body_by_version={
+                "3": {"fields": v3_fields},
+                "2": {"fields": v2_fields},
+            },
+        )
+        if not isinstance(payload, Mapping):
+            raise JiraError("invalid_remote_data")
+        created_key = _bounded_string(payload.get("key"), 128)
+        if created_key is None or _ISSUE_KEY.fullmatch(created_key) is None:
+            raise JiraError("invalid_remote_data")
+        return {
+            "ok": True,
+            "dry_run": False,
+            "key": self._redact(created_key) or "",
+            "project": project,
+            "issue_type": issue_type,
+            "summary": summary,
+        }
+
     def assign_issue(
         self,
         key: str,

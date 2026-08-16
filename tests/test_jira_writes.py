@@ -1264,3 +1264,242 @@ def test_manage_labels_requires_matching_host_admission_before_configuration(
 
     assert accepted == {"success": True, "result": {"ok": True}}
     assert calls == ["jira_manage_labels"]
+
+
+class TestCreateIssue:
+    def test_neither_intent_flag_is_refused_before_a_request(self):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).create_issue("PROJ", "Bug", "Broken")
+
+        assert caught.value.category == "confirmation_required"
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        ("dry_run", "confirm"),
+        [(1, False), (False, 1), (True, True)],
+    )
+    def test_intent_flags_require_exact_booleans_before_a_request(
+        self, dry_run, confirm
+    ):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).create_issue(
+                "PROJ", "Bug", "Broken", dry_run=dry_run, confirm=confirm
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_dry_run_previews_without_a_write_or_probe(self):
+        client = FakeClient([])
+
+        result = JiraOperations(client).create_issue(
+            "PROJ", "Bug", "Broken", description="Details", dry_run=True
+        )
+
+        assert result == {
+            "ok": True,
+            "dry_run": True,
+            "key": None,
+            "project": "PROJ",
+            "issue_type": "Bug",
+            "summary": "Broken",
+        }
+        assert client.calls == []
+
+    def test_confirm_performs_one_version_aware_post_and_returns_safe_key(self):
+        client = FakeClient([{"id": "10001", "key": "PROJ-42"}])
+
+        result = JiraOperations(client).create_issue(
+            "PROJ", "Bug", "Broken", confirm=True
+        )
+
+        assert client.calls == [
+            (
+                "POST",
+                "issue",
+                {
+                    "json_body_by_version": {
+                        "3": {
+                            "fields": {
+                                "project": {"key": "PROJ"},
+                                "issuetype": {"name": "Bug"},
+                                "summary": "Broken",
+                            }
+                        },
+                        "2": {
+                            "fields": {
+                                "project": {"key": "PROJ"},
+                                "issuetype": {"name": "Bug"},
+                                "summary": "Broken",
+                            }
+                        },
+                    }
+                },
+            )
+        ]
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "key": "PROJ-42",
+            "project": "PROJ",
+            "issue_type": "Bug",
+            "summary": "Broken",
+        }
+
+    def test_description_uses_adf_on_v3_and_text_on_v2(self):
+        client = FakeClient([{"id": "1", "key": "PROJ-1"}])
+
+        JiraOperations(client).create_issue(
+            "PROJ", "Bug", "Broken", description="Details", confirm=True
+        )
+
+        by_version = client.calls[0][2]["json_body_by_version"]
+        assert by_version["2"]["fields"]["description"] == "Details"
+        assert by_version["3"]["fields"]["description"] == {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "Details"}],
+                }
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        ("project", "issue_type", "summary", "description"),
+        [
+            ("../x", "Bug", "Broken", None),
+            (StringSubclass("PROJ"), "Bug", "Broken", None),
+            ("PROJ", "   ", "Broken", None),
+            ("PROJ", StringSubclass("Bug"), "Broken", None),
+            ("PROJ", "Bug", "   ", None),
+            ("PROJ", "Bug", StringSubclass("Broken"), None),
+            ("PROJ", "Bug", "Broken", "x" * 32_001),
+            ("PROJ", "Bug", "Broken", StringSubclass("Details")),
+        ],
+    )
+    def test_invalid_inputs_are_rejected_before_a_request(
+        self, project, issue_type, summary, description
+    ):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).create_issue(
+                project, issue_type, summary, description=description, confirm=True
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            [],
+            {"id": "10001"},
+            {"key": "not a key"},
+            {"key": "PROJ-" + "9" * 128},
+        ],
+    )
+    def test_response_requires_a_bounded_valid_key(self, payload):
+        client = FakeClient([payload])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).create_issue("PROJ", "Bug", "Broken", confirm=True)
+
+        assert caught.value.category == "invalid_remote_data"
+
+    def test_remote_key_is_redacted_before_model_output(self):
+        client = FakeClient([{"key": "PROJ-42"}])
+        client.auth.authorization = "Bearer PROJ-42"
+
+        result = JiraOperations(client).create_issue(
+            "PROJ", "Bug", "Broken", confirm=True
+        )
+
+        assert result["key"] == "<redacted>"
+        assert "PROJ-42" not in repr(result)
+
+    def test_ambiguous_create_is_not_reconciled_or_retried(self):
+        client = FakeClient([JiraError("write_ambiguous")])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).create_issue("PROJ", "Bug", "Broken", confirm=True)
+
+        assert caught.value.category == "write_ambiguous"
+        assert [call[:2] for call in client.calls] == [("POST", "issue")]
+
+
+def test_create_issue_has_complete_schema_wiring_and_bound_approval_digest():
+    from jira_test_support import tools
+
+    schema = tools.SCHEMAS["jira_create_issue"]["parameters"]
+    assert schema["required"] == ["project", "issue_type", "summary"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == {
+        "project", "issue_type", "summary", "description", "dry_run", "confirm"
+    }
+    assert schema["properties"]["description"] == {
+        "type": "string",
+        "maxLength": 32_000,
+    }
+
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    hook = context.hooks["pre_tool_call"]
+    args = {
+        "project": "PROJ",
+        "issue_type": "Bug",
+        "summary": "Broken",
+        "description": "\0" * 32_000,
+        "confirm": True,
+    }
+    request = hook("jira_create_issue", args)
+
+    invalid_digest = hashlib.sha256(
+        plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
+    ).hexdigest()
+    assert request["action"] == "approve"
+    assert "jira_create_issue" in request["message"]
+    assert '"PROJ"' in request["message"]
+    assert '"Bug"' in request["message"]
+    assert '"Broken"' in request["message"]
+    assert args["description"] not in request["message"]
+    assert len(request["message"]) <= 600
+    assert request["rule_key"] != "jira_create_issue:" + invalid_digest
+
+
+def test_create_issue_requires_matching_host_admission_before_configuration(monkeypatch):
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    calls = []
+    monkeypatch.setattr(
+        plugin.jira_tools,
+        "invoke",
+        lambda name, args, configuration, **options: calls.append(name) or {"ok": True},
+    )
+    handler = context.registrations["jira_create_issue"]["handler"]
+    args = {
+        "project": "PROJ",
+        "issue_type": "Bug",
+        "summary": "Broken",
+        "confirm": True,
+    }
+
+    refused = json.loads(handler(args))
+    assert refused["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
+
+    accepted = json.loads(
+        handler(args, tool_admission=_admission("jira_create_issue"))
+    )
+    assert accepted == {"success": True, "result": {"ok": True}}
+    assert calls == ["jira_create_issue"]

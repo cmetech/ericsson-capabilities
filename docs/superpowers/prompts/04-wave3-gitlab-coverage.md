@@ -7,7 +7,7 @@
 
 Execute an implementation plan, task by task.
 
-**Repository:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repository:** `ericsson-capabilities` (this repo)
 
 **Plan file:** `docs/superpowers/plans/2026-08-15-ericsson-gitlab-coverage.md`
 
@@ -19,7 +19,7 @@ Two other sessions are working in this repo at the same time. Work in your own g
 worktree so you cannot collide with them:
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities
+# run from the ericsson-capabilities repo root
 git worktree add .worktrees/gitlab-coverage -b feat/ericsson-gitlab-coverage main
 cd .worktrees/gitlab-coverage
 ```

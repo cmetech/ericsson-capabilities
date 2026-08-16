@@ -14,9 +14,9 @@ The connector's distinguishing feature is that it **fails legibly**. The three s
 
 **Tech Stack:** Python 3.11+, shared `_common` from Plan 2, stdlib `ssl` + `hashlib` (no new dependency), `httpx>=0.27` via `_common`, pytest via `./bootstrap.sh`.
 
-**Spec:** Endpoints in `/Users/coreyellis/tmp_supercli/SUPER-CLI-ARCHITECTURE.md` §6.6 and the per-function string table in `/Users/coreyellis/tmp_supercli/out/func-strings.txt`; operational behaviour in `oscar_app/oscar/utils/{bulk_upload_verify.sh,cleanup_artifactory_releases.sh,pull_images_from_artifactory_repo.sh}`; gap analysis in `/Users/coreyellis/tmp_supercli/PLUGIN-GAP-ANALYSIS.md`.
+**Spec:** Endpoints in `SUPER-CLI-ARCHITECTURE.md` (super-cli analysis workspace) §6.6 and the per-function string table in `out/func-strings.txt` (super-cli analysis workspace); operational behaviour in `oscar_app/oscar/utils/{bulk_upload_verify.sh,cleanup_artifactory_releases.sh,pull_images_from_artifactory_repo.sh}`; gap analysis in `PLUGIN-GAP-ANALYSIS.md` (super-cli analysis workspace).
 
-**Repo:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repo:** `ericsson-capabilities` (this repo)
 
 **Depends on:** Plan 2 (`2026-08-15-ericsson-shared-transport.md`) — built on `_common` from the first commit rather than migrated later. Task 2 of this plan additively amends that shared code.
 

@@ -7,7 +7,7 @@
 
 Execute part of an implementation plan, task by task.
 
-**Repository:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repository:** `ericsson-capabilities` (this repo)
 
 **Plan file:** `docs/superpowers/plans/2026-08-15-ericsson-arm-connector.md`
 
@@ -27,7 +27,7 @@ Read both for context so you know what exists, then start work at Task 3.
 Two other sessions are working in this repo at the same time. Work in your own worktree:
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities
+# run from the ericsson-capabilities repo root
 git worktree add .worktrees/arm-connector -b feat/ericsson-arm-connector main
 cd .worktrees/arm-connector
 ./bootstrap.sh

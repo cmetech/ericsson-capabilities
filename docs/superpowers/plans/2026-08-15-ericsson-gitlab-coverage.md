@@ -8,9 +8,9 @@
 
 **Tech Stack:** Python 3.11+, the shared `_common` package from Plan 2, pytest via `./bootstrap.sh`.
 
-**Spec:** `/Users/coreyellis/tmp_supercli/PLUGIN-GAP-ANALYSIS.md` §1.2 and §4 Tier 2 items 7–8, with endpoint detail in `/Users/coreyellis/tmp_supercli/SUPER-CLI-ARCHITECTURE.md` §6.5.
+**Spec:** `PLUGIN-GAP-ANALYSIS.md` (super-cli analysis workspace) §1.2 and §4 Tier 2 items 7–8, with endpoint detail in `SUPER-CLI-ARCHITECTURE.md` (super-cli analysis workspace) §6.5.
 
-**Repo:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repo:** `ericsson-capabilities` (this repo)
 
 **Depends on:** Plan 2 (`2026-08-15-ericsson-shared-transport.md`) — Tasks here consume `_common.guardrails.require_explicit_intent` and `_common.envelope.result_envelope`, and rely on the migrated `GitLabClient`.
 

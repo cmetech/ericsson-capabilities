@@ -14,9 +14,9 @@ The result reads pages as **Markdown** (structure preserved) and accepts **Markd
 
 **Tech Stack:** Python 3.11+, shared `_common` from Plan 2, stdlib `html.parser` (no new dependency), pytest via `./bootstrap.sh`.
 
-**Spec:** `/Users/coreyellis/tmp_supercli/PLUGIN-GAP-ANALYSIS.md` §1.3 and §4 Tier 2 item 9; endpoints in `/Users/coreyellis/tmp_supercli/SUPER-CLI-ARCHITECTURE.md` §6.4; converter and API-base logic in `hermes-agent/skills/ericsson/confluence-research/scripts/`.
+**Spec:** `PLUGIN-GAP-ANALYSIS.md` (super-cli analysis workspace) §1.3 and §4 Tier 2 item 9; endpoints in `SUPER-CLI-ARCHITECTURE.md` (super-cli analysis workspace) §6.4; converter and API-base logic in `hermes-agent/skills/ericsson/confluence-research/scripts/`.
 
-**Repo:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repo:** `ericsson-capabilities` (this repo)
 
 **Depends on:** Plan 2 (`2026-08-15-ericsson-shared-transport.md`) — built on `_common` from the first commit rather than migrated later.
 

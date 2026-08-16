@@ -15,7 +15,7 @@ plans end to end.
 | 3 | `2026-08-15-ericsson-confluence-connector.md` | **Task 1 ONLY** | Registration. Must precede ARM Task 1 — see the ordering note below. |
 | 4 | `2026-08-15-ericsson-arm-connector.md` | **Task 1 ONLY** | Registration. |
 
-**Repository:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repository:** `ericsson-capabilities` (this repo)
 **Plan files:** all under `docs/superpowers/plans/`
 
 ## Explicitly out of scope
@@ -53,7 +53,7 @@ once, up front, keeps that cross-cutting change out of the parallel streams.
 ## Before you start
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities
+# run from the ericsson-capabilities repo root
 git rev-parse --abbrev-ref HEAD          # expect: main
 git status --porcelain --untracked-files=no | wc -l   # expect: 0
 ls shared/ericsson_common/client.py shared/ericsson_common/transport.py   # Plan 2 must be merged

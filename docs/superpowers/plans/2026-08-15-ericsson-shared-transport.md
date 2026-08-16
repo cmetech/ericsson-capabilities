@@ -8,9 +8,9 @@
 
 **Tech Stack:** Python 3.11+, `httpx` (already used by both connectors), pytest via `./bootstrap.sh` / `pytest -q`.
 
-**Spec:** `/Users/coreyellis/tmp_supercli/PLUGIN-GAP-ANALYSIS.md` (findings F1–F7 and §4 Tier 1 recommendations) with supporting detail in `/Users/coreyellis/tmp_supercli/SUPER-CLI-ARCHITECTURE.md` §5.
+**Spec:** `PLUGIN-GAP-ANALYSIS.md` (super-cli analysis workspace) (findings F1–F7 and §4 Tier 1 recommendations) with supporting detail in `SUPER-CLI-ARCHITECTURE.md` (super-cli analysis workspace) §5.
 
-**Repo:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repo:** `ericsson-capabilities` (this repo)
 
 ## Global Constraints
 
@@ -1958,7 +1958,7 @@ Expected: PASS (4 tests)
 - [ ] **Step 6: Run the whole GitLab connector suite for regressions**
 
 Run: `. .venv/bin/activate && pytest tests/ -q -k gitlab`
-Expected: PASS. If a test asserts on the old `GitLabError("...")` construction, update it to `ConnectorError` — `GitLabError` remains an alias, and `str(error)` still returns the category, so most assertions should be unaffected. Any test that fails on message text rather than category is telling you the alias is not enough; fix the test, not the taxonomy.
+Expected: PASS. Existing tests should keep asserting on `GitLabError` — it is **not** an alias for `ConnectorError`, and must not become one. `_as_gitlab_error` translates at the boundary precisely so the connector-local type is what any caller sees, and `str(error)` returns the *safe message* rather than the category. If a test fails, check first that Step 2 added the missing categories to `SAFE_ERROR_MESSAGES`: an absent category silently coerces to `"transient"`, which is how `write_ambiguous` would otherwise be degraded into "service temporarily unavailable" with nothing failing. Fix the taxonomy, not the assertion.
 
 - [ ] **Step 7: Commit**
 
@@ -2003,6 +2003,7 @@ from client import (  # noqa: E402
     is_cloudflare_1010_response,
     is_rest_version_unsupported,
 )
+from models import JiraError  # noqa: E402
 
 
 class FakeTransport:
@@ -2066,9 +2067,12 @@ class TestPreservedBehaviour:
 
     def test_write_is_not_retried(self):
         client, _clock = _client([Response(503, {}, b"")])
-        with pytest.raises(ConnectorError) as excinfo:
+        with pytest.raises(JiraError) as excinfo:
             client.rest_json("POST", "issue")
         assert excinfo.value.category == "write_ambiguous"
+        # ConnectorError is internal to _common; _as_jira_error translates at
+        # the boundary so the host only ever sees the connector-local type.
+        assert not isinstance(excinfo.value, ConnectorError)
 
     def test_retry_after_still_honoured(self):
         client, clock = _client(
@@ -2079,12 +2083,12 @@ class TestPreservedBehaviour:
 
     def test_resource_path_traversal_rejected(self):
         client, _clock = _client([])
-        with pytest.raises(ConnectorError):
+        with pytest.raises(JiraError):
             client.rest_json("GET", "../../admin")
 
     def test_absolute_resource_rejected(self):
         client, _clock = _client([])
-        with pytest.raises(ConnectorError):
+        with pytest.raises(JiraError):
             client.rest_json("GET", "https://evil.test/x")
 
 

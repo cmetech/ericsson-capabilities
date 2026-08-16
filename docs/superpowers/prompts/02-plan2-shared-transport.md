@@ -6,7 +6,7 @@
 
 Execute an implementation plan, task by task.
 
-**Repository:** `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
+**Repository:** `ericsson-capabilities` (this repo)
 
 **Plan file:** `docs/superpowers/plans/2026-08-15-ericsson-shared-transport.md`
 
@@ -22,7 +22,7 @@ four consumers before anyone notices, so favour stopping and asking over improvi
 ## Before you start
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities
+# run from the ericsson-capabilities repo root
 git rev-parse --abbrev-ref HEAD          # expect: main
 git status --porcelain --untracked-files=no | wc -l   # expect: 0
 ls docs/superpowers/plans/2026-08-15-ericsson-shared-transport.md

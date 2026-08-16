@@ -270,16 +270,22 @@ class TestListTransitions:
 
         assert "secret-token-value" not in repr(result)
 
-    def test_transition_results_are_bounded_to_the_first_200_items(self):
+    def test_transition_results_report_accurate_normalized_total_when_bounded(self):
         client = FakeClient([{
             "transitions": [
                 {"id": str(index), "name": f"Transition {index}"}
-                for index in range(201)
-            ]
+                for index in range(200)
+            ] + [
+                {"name": "Missing ID"},
+                "not a transition",
+                {"id": "200", "name": "Transition 200"},
+            ],
         }])
 
         result = JiraOperations(client).list_transitions("ABC-1")
 
         assert result["returned"] == 200
-        assert result["total"] == 200
+        assert result["total"] == 201
+        assert result["truncated"] is True
+        assert result["hint"]
         assert result["items"][-1]["id"] == "199"

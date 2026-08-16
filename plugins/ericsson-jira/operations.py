@@ -347,11 +347,15 @@ class JiraOperations:
         ):
             raise JiraError("invalid_remote_data")
         transitions = []
-        for item in payload["transitions"][:200]:
+        total = 0
+        for item in payload["transitions"]:
             if not isinstance(item, Mapping):
                 continue
             identifier = _bounded_string(item.get("id"), 128)
             if not identifier:
+                continue
+            total += 1
+            if len(transitions) >= 200:
                 continue
             target = item.get("to")
             transitions.append(
@@ -365,7 +369,17 @@ class JiraOperations:
                     or "",
                 }
             )
-        return result_envelope(transitions, total=len(transitions))
+        truncated = total > len(transitions)
+        return result_envelope(
+            transitions,
+            total=total,
+            truncated=truncated,
+            hint=(
+                "More valid transitions exist. This result contains the first 200."
+                if truncated
+                else None
+            ),
+        )
 
     def _normalize_issue(self, raw: Any) -> dict[str, Any]:
         if not isinstance(raw, dict) or not isinstance(raw.get("fields"), dict):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import sys
 import uuid
@@ -701,6 +702,238 @@ class TestUpdateFields:
         assert caught.value.category == "invalid_input"
 
 
+class TestManageLabels:
+    def test_add_uses_one_version_resolved_put_with_add_operations(self):
+        client = FakeClient([None])
+
+        result = JiraOperations(client).manage_labels(
+            "ABC-1", "add", ["alpha", "beta"], confirm=True
+        )
+
+        assert client.calls == [
+            (
+                "PUT",
+                "issue/ABC-1",
+                {
+                    "json_body_by_version": {
+                        "3": {
+                            "update": {
+                                "labels": [{"add": "alpha"}, {"add": "beta"}]
+                            }
+                        },
+                        "2": {
+                            "update": {
+                                "labels": [{"add": "alpha"}, {"add": "beta"}]
+                            }
+                        },
+                    }
+                },
+            )
+        ]
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "issue_key": "ABC-1",
+            "operation": "add",
+            "labels": ["alpha", "beta"],
+            "reconciled": False,
+        }
+
+    def test_remove_uses_remove_operations(self):
+        client = FakeClient([None])
+
+        JiraOperations(client).manage_labels(
+            "ABC-1", "remove", ["alpha"], confirm=True
+        )
+
+        assert client.calls[0][2]["json_body_by_version"]["3"] == {
+            "update": {"labels": [{"remove": "alpha"}]}
+        }
+
+    def test_all_validation_precedes_intent_and_io(self):
+        invalid_arguments = [
+            ("bad key", "add", ["alpha"], True, False),
+            ("ABC-1", "replace", ["alpha"], True, False),
+            ("ABC-1", StringSubclass("add"), ["alpha"], True, False),
+            ("ABC-1", "add", [], True, False),
+            ("ABC-1", "add", ["has space"], True, False),
+            ("ABC-1", "add", ["has\ttab"], True, False),
+            ("ABC-1", "add", ["x" * 256], True, False),
+            ("ABC-1", "add", [f"label-{index}" for index in range(51)], True, False),
+            ("ABC-1", "add", type("LabelsSubclass", (list,), {})(["alpha"]), True, False),
+            ("ABC-1", "add", [StringSubclass("alpha")], True, False),
+            ("ABC-1", "add", ["alpha"], 1, False),
+            ("ABC-1", "add", ["alpha"], False, 1),
+            ("ABC-1", "add", ["alpha"], True, True),
+        ]
+
+        for key, operation, labels, dry_run, confirm in invalid_arguments:
+            client = FakeClient([])
+            with pytest.raises(JiraError) as caught:
+                JiraOperations(client).manage_labels(
+                    key,
+                    operation,
+                    labels,
+                    dry_run=dry_run,
+                    confirm=confirm,
+                )
+            assert caught.value.category == "invalid_input"
+            assert client.calls == []
+
+    def test_neither_intent_flag_is_refused_before_a_request(self):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).manage_labels("ABC-1", "add", ["alpha"])
+
+        assert caught.value.category == "confirmation_required"
+        assert client.calls == []
+
+    def test_dry_run_returns_only_requested_labels_without_io(self):
+        client = FakeClient([])
+
+        result = JiraOperations(client).manage_labels(
+            "ABC-1", "add", ["alpha"], dry_run=True
+        )
+
+        assert result == {
+            "ok": True,
+            "dry_run": True,
+            "issue_key": "ABC-1",
+            "operation": "add",
+            "labels": ["alpha"],
+            "reconciled": False,
+        }
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        ("operation", "requested", "remote_labels"),
+        [
+            ("add", ["alpha", "beta"], ["alpha", "beta", "remote-only"]),
+            ("remove", ["alpha", "beta"], ["remote-only"]),
+        ],
+    )
+    def test_ambiguous_write_reconciles_label_membership_once_without_remote_labels(
+        self, operation, requested, remote_labels
+    ):
+        client = FakeClient(
+            [
+                JiraError("write_ambiguous"),
+                {"key": "ABC-1", "fields": {"labels": remote_labels}},
+            ]
+        )
+
+        result = JiraOperations(client).manage_labels(
+            "ABC-1", operation, requested, confirm=True
+        )
+
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "issue_key": "ABC-1",
+            "operation": operation,
+            "labels": requested,
+            "reconciled": True,
+        }
+        assert [call[:2] for call in client.calls] == [
+            ("PUT", "issue/ABC-1"),
+            ("GET", "issue/ABC-1"),
+        ]
+
+    @pytest.mark.parametrize(
+        "reconciliation_outcome",
+        [
+            JiraError("authentication"),
+            {"fields": {"labels": "malformed"}},
+            {"fields": {"labels": ["other"]}},
+        ],
+    )
+    def test_reconciliation_failure_or_mismatch_reraises_the_original_ambiguity(
+        self, reconciliation_outcome
+    ):
+        original = JiraError("write_ambiguous")
+        client = FakeClient([original, reconciliation_outcome])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).manage_labels(
+                "ABC-1", "add", ["alpha"], confirm=True
+            )
+
+        assert caught.value is original
+        assert [call[:2] for call in client.calls] == [
+            ("PUT", "issue/ABC-1"),
+            ("GET", "issue/ABC-1"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("deployment", "rest_api_version", "resolved_version"),
+        [
+            ("cloud", "auto", "3"),
+            ("data_center", "auto", "2"),
+            ("cloud", "3", "3"),
+            ("data_center", "2", "2"),
+        ],
+    )
+    def test_reconciliation_uses_one_put_and_one_resolved_version_get(
+        self, deployment, rest_api_version, resolved_version
+    ):
+        class AutoTransport:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, path, **kwargs):
+                self.calls.append((method, path, kwargs))
+                if path == "/rest/api/3/serverInfo":
+                    if deployment == "cloud":
+                        return TransportResponse(200, {}, b"{}")
+                    return TransportResponse(
+                        404,
+                        {"content-type": "application/json"},
+                        b'{"errorMessages":["REST API v3 endpoint is not available"]}',
+                    )
+                if path == "/rest/api/2/serverInfo":
+                    return TransportResponse(200, {}, b"{}")
+                if path == f"/rest/api/{resolved_version}/issue/ABC-1":
+                    if method == "PUT":
+                        return TransportResponse(500, {}, b"")
+                    return TransportResponse(
+                        200,
+                        {},
+                        json.dumps(
+                            {"key": "ABC-1", "fields": {"labels": ["alpha"]}}
+                        ).encode(),
+                    )
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            def close(self):
+                pass
+
+        auth = JiraAuth(
+            origin="https://jira.example.test",
+            authorization="Bearer secret-token-value",
+            auth_mode="bearer",
+            rest_api_version=rest_api_version,
+            transport="native",
+            curl_executable="/usr/bin/curl",
+            request_timeout_seconds=30,
+            default_max_results=25,
+        )
+        transport = AutoTransport()
+
+        result = JiraOperations(
+            JiraClient(auth, native_transport=transport)
+        ).manage_labels("ABC-1", "add", ["alpha"], confirm=True)
+
+        assert result["reconciled"] is True
+        assert [method for method, _path, _kwargs in transport.calls].count("PUT") == 1
+        issue_gets = [
+            (method, path)
+            for method, path, _kwargs in transport.calls
+            if method == "GET" and path.endswith("/issue/ABC-1")
+        ]
+        assert issue_gets == [("GET", f"/rest/api/{resolved_version}/issue/ABC-1")]
+
+
 class TestWriteScalarSubclasses:
     @pytest.mark.parametrize(
         "write",
@@ -947,3 +1180,87 @@ def test_update_fields_approval_handles_invalid_caller_values_without_echoing_th
     assert request["action"] == "approve"
     assert "<unsupported>" in request["message"]
     assert len(request["message"]) <= 600
+
+
+def test_manage_labels_has_complete_schema_wiring_and_bound_approval_digest():
+    from jira_test_support import tools
+
+    schema = tools.SCHEMAS["jira_manage_labels"]["parameters"]
+    assert schema["required"] == ["key", "operation", "labels"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == {
+        "key", "operation", "labels", "dry_run", "confirm"
+    }
+    assert schema["properties"]["operation"] == {
+        "type": "string",
+        "enum": ["add", "remove"],
+    }
+    assert schema["properties"]["labels"] == {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1, "maxLength": 255},
+        "minItems": 1,
+        "maxItems": 50,
+    }
+
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    hook = context.hooks["pre_tool_call"]
+    labels = [f"label-{index}" for index in range(50)]
+    alternate_labels = [*labels[:-1], "different-label"]
+    first = hook(
+        "jira_manage_labels",
+        {"key": "ABC-1", "operation": "add", "labels": labels, "confirm": True},
+    )
+    second = hook(
+        "jira_manage_labels",
+        {
+            "key": "ABC-1",
+            "operation": "add",
+            "labels": alternate_labels,
+            "confirm": True,
+        },
+    )
+
+    assert "jira_manage_labels" in first["message"]
+    assert "ABC-1" in first["message"]
+    assert "add" in first["message"]
+    assert first["rule_key"].startswith("jira_manage_labels:")
+    assert first["rule_key"] != second["rule_key"]
+    assert first["rule_key"] != "jira_manage_labels:" + hashlib.sha256(
+        plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
+    ).hexdigest()
+
+
+def test_manage_labels_requires_matching_host_admission_before_configuration(
+    monkeypatch,
+):
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    calls = []
+    monkeypatch.setattr(
+        plugin.jira_tools,
+        "invoke",
+        lambda name, args, configuration, **options: calls.append(name) or {"ok": True},
+    )
+    handler = context.registrations["jira_manage_labels"]["handler"]
+    args = {
+        "key": "ABC-1",
+        "operation": "add",
+        "labels": ["alpha"],
+        "confirm": True,
+    }
+
+    refused = json.loads(handler(args))
+
+    assert refused["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
+
+    accepted = json.loads(
+        handler(args, tool_admission=_admission("jira_manage_labels"))
+    )
+
+    assert accepted == {"success": True, "result": {"ok": True}}
+    assert calls == ["jira_manage_labels"]

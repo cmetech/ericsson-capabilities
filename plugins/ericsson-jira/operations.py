@@ -56,6 +56,8 @@ _MAX_WRITABLE_FIELDS = 20
 _MAX_UPDATE_JSON_BYTES = 65_536
 _MAX_UPDATE_JSON_DEPTH = 32
 _MAX_UPDATE_JSON_NODES = 10_000
+_LABEL = re.compile(r"^[^\s]{1,255}$")
+_MAX_LABELS = 50
 
 
 def _safe_link(value: Any) -> str | None:
@@ -457,6 +459,111 @@ class JiraOperations:
             "dry_run": False,
             "issue_key": key,
             "fields": payload,
+            "reconciled": False,
+        }
+
+    def _labels_match(
+        self, key: str, operation: str, requested: list[str]
+    ) -> bool:
+        """Read issue labels once to reconcile an ambiguous label mutation."""
+        payload = self.client.rest_json_resolved_version("GET", f"issue/{key}")
+        if type(payload) is not dict:
+            return False
+        fields = payload.get("fields")
+        if type(fields) is not dict:
+            return False
+        remote_labels = fields.get("labels")
+        if type(remote_labels) is not list or any(
+            type(label) is not str for label in remote_labels
+        ):
+            return False
+        if operation == "add":
+            return all(label in remote_labels for label in requested)
+        return all(label not in remote_labels for label in requested)
+
+    def manage_labels(
+        self,
+        key: str,
+        operation: str,
+        labels: Any,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Add or remove a bounded list of labels on an issue.
+
+        The REST version is resolved before this mutation, never after it;
+        this preserves the exactly-one-PUT contract in both Jira Cloud and
+        Data Center auto mode.
+        """
+        if type(key) is not str or _ISSUE_KEY.fullmatch(key) is None:
+            raise JiraError("invalid_input")
+        if type(operation) is not str or operation not in {"add", "remove"}:
+            raise JiraError("invalid_input")
+        if (
+            type(labels) is not list
+            or not labels
+            or len(labels) > _MAX_LABELS
+            or any(
+                type(label) is not str or _LABEL.fullmatch(label) is None
+                for label in labels
+            )
+        ):
+            raise JiraError("invalid_input")
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise JiraError("invalid_input")
+        if dry_run and confirm:
+            raise JiraError("invalid_input")
+        if not dry_run and not confirm:
+            raise JiraError("confirmation_required")
+
+        requested = list(labels)
+        execute = require_explicit_intent(
+            dry_run=dry_run, confirm=confirm, action=f"Jira issue {key}"
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "issue_key": key,
+                "operation": operation,
+                "labels": requested,
+                "reconciled": False,
+            }
+
+        body = {
+            "update": {"labels": [{operation: label} for label in requested]}
+        }
+        try:
+            self.client.rest_json_versioned_mutation(
+                "PUT",
+                f"issue/{key}",
+                json_body_by_version={"3": body, "2": body},
+            )
+        except JiraError as exc:
+            if exc.category != "write_ambiguous":
+                raise
+            try:
+                reconciled = self._labels_match(key, operation, requested)
+            except JiraError:
+                raise exc from None
+            if not reconciled:
+                raise
+            return {
+                "ok": True,
+                "dry_run": False,
+                "issue_key": key,
+                "operation": operation,
+                "labels": requested,
+                "reconciled": True,
+            }
+
+        return {
+            "ok": True,
+            "dry_run": False,
+            "issue_key": key,
+            "operation": operation,
+            "labels": requested,
             "reconciled": False,
         }
 

@@ -17,6 +17,7 @@ _WRITE_TOOLS = frozenset(
         "jira_transition_issue",
         "jira_assign_issue",
         "jira_update_fields",
+        "jira_manage_labels",
     }
 )
 _INVALID_APPROVAL_ARGS = "<invalid-approval-args>"
@@ -220,6 +221,10 @@ WRITE_APPROVALS = {
     ),
     "jira_update_fields": lambda a: (
         f"Issue: {_arg(a, 'key')}\nFields: {_arg(a, 'fields')}"
+    ),
+    "jira_manage_labels": lambda a: (
+        f"Issue: {_arg(a, 'key')}\n"
+        f"{_arg(a, 'operation')} labels: {_arg(a, 'labels')}"
     ),
 }
 

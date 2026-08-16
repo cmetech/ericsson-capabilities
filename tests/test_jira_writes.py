@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 import uuid
+from collections import UserDict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -639,6 +640,53 @@ class TestUpdateFields:
 
         assert caught.value.category == "write_ambiguous"
         assert [call[0] for call in client.calls] == ["PUT"]
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            UserDict({"summary": "New"}),
+            type("FieldsSubclass", (dict,), {})({"summary": "New"}),
+            {"priority": UserDict({"id": "3"})},
+            {"priority": type("ValueSubclass", (dict,), {})({"id": "3"})},
+            {"labels": type("LabelsSubclass", (list,), {})(["release"])},
+        ],
+    )
+    def test_non_json_container_fields_are_refused_before_a_put(self, fields):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields("ABC-1", fields, confirm=True)
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            UserDict(
+                {
+                    "key": "ABC-1",
+                    "fields": {"summary": "New"},
+                    "confirm": True,
+                }
+            ),
+            type("ArgsSubclass", (dict,), {})
+            (
+                {
+                    "key": "ABC-1",
+                    "fields": {"summary": "New"},
+                    "confirm": True,
+                }
+            ),
+        ],
+    )
+    def test_non_json_outer_tool_arguments_are_refused_before_configuration(self, args):
+        from jira_test_support import tools
+
+        with pytest.raises(JiraError) as caught:
+            tools.invoke("jira_update_fields", args, object())
+
+        assert caught.value.category == "invalid_input"
 
 
 class Configuration:

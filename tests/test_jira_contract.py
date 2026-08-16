@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+from collections import UserDict
 import importlib.util
 import sys
 import uuid
@@ -161,10 +162,10 @@ class TestApprovalCoverage:
 
         assert comment_first["rule_key"] == comment_second["rule_key"]
         assert update_first["rule_key"] != update_second["rule_key"]
-        assert (
-            plugin._canonical_approval_args(unicode_update)
-            != plugin._INVALID_APPROVAL_ARGS
-        )
+        invalid_digest = hashlib.sha256(
+            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
+        ).hexdigest()
+        assert plugin._approval_rule_digest(unicode_update) != invalid_digest
         assert comment["body"] not in comment_first["message"]
         assert update["fields"]["description"] not in update_first["message"]
 
@@ -181,19 +182,50 @@ class TestApprovalCoverage:
             {"key": "ABC-1", "fields": {"summary": cyclic}},
             {"key": "ABC-1", "fields": {"summary": oversized}},
             {"key": "ABC-1", "fields": {"summary": object()}},
+            UserDict({"key": "ABC-1", "fields": {"summary": "New"}}),
+            type("ArgsSubclass", (dict,), {})
+            ({"key": "ABC-1", "fields": {"summary": "New"}}),
+            {"key": "ABC-1", "fields": UserDict({"summary": "New"})},
+            {
+                "key": "ABC-1",
+                "fields": {"priority": UserDict({"id": "3"})},
+            },
         ]
 
-        canonical = [plugin._canonical_approval_args(value) for value in invalid]
+        invalid_digest = hashlib.sha256(
+            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
+        ).hexdigest()
+        canonical = [plugin._approval_rule_digest(value) for value in invalid]
 
-        assert canonical == [plugin._INVALID_APPROVAL_ARGS] * len(invalid)
+        assert canonical == [invalid_digest] * len(invalid)
         ctx = FakeCtx()
         plugin.register(ctx)
         hook = ctx.hooks["pre_tool_call"]
-        expected_rule_key = "jira_update_fields:" + hashlib.sha256(
-            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
-        ).hexdigest()
+        expected_rule_key = "jira_update_fields:" + invalid_digest
         for value in invalid:
             request = hook("jira_update_fields", value)
             assert request["rule_key"] == expected_rule_key
             assert len(request["message"]) <= 600
             assert "caller-secret-should-not-appear" not in request["message"]
+
+    def test_approval_digest_stops_before_full_multi_value_serialization(
+        self, monkeypatch
+    ):
+        plugin = _load_plugin()
+        original_dumps = plugin.json.dumps
+        serialized_types = []
+
+        def track_primitive_serialization(value, *args, **kwargs):
+            assert type(value) is not dict
+            serialized_types.append(type(value))
+            return original_dumps(value, *args, **kwargs)
+
+        monkeypatch.setattr(plugin.json, "dumps", track_primitive_serialization)
+        oversized = {"first": "x" * 70_000, "second": "y" * 70_000}
+
+        digest = plugin._approval_rule_digest(oversized)
+
+        assert digest == hashlib.sha256(
+            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
+        ).hexdigest()
+        assert serialized_types == []

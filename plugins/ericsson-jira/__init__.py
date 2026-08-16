@@ -31,21 +31,63 @@ class _InvalidApprovalArguments(Exception):
     """Internal marker for values that cannot safely bind an approval."""
 
 
-def _canonical_approval_args(args) -> str:
-    """Return an exact bounded canonical form, or one invalid-input sentinel.
+def _approval_rule_digest(args) -> str:
+    """Hash exact JSON arguments under a running byte budget.
 
-    Valid tool arguments are JSON-shaped and fit the operation-level limits,
-    so a sorted compact encoding binds every argument byte-for-byte.  This
-    boundary runs before operation validation, however, and must also safely
-    absorb arbitrary Python objects, cycles, and pathological JSON shapes.
-    Those cannot reach a write: they use one deliberately non-specific
-    sentinel rather than serializing or exposing their caller content.
+    This hook runs before operation validation. Exact ``dict``/``list`` JSON
+    containers are the only shapes that a write may subsequently execute;
+    anything else, including a cycle or over-budget structure, is assigned a
+    single sentinel digest. Valid values are emitted in sorted-key JSON form
+    directly into the digest, so the full canonical object is never built.
     """
 
+    digest = hashlib.sha256()
+    used = 0
     nodes = 0
     active: set[int] = set()
 
-    def normalize(value, depth: int):
+    def emit(fragment: str) -> None:
+        nonlocal used
+        try:
+            encoded = fragment.encode("utf-8")
+        except UnicodeEncodeError:
+            raise _InvalidApprovalArguments from None
+        if used + len(encoded) > _MAX_APPROVAL_CANONICAL_BYTES:
+            raise _InvalidApprovalArguments
+        digest.update(encoded)
+        used += len(encoded)
+
+    def emit_string(value: str) -> None:
+        emit('"')
+        fragments: list[str] = []
+        for character in value:
+            if character == '"':
+                escaped = '\\"'
+            elif character == "\\":
+                escaped = "\\\\"
+            elif character == "\b":
+                escaped = "\\b"
+            elif character == "\f":
+                escaped = "\\f"
+            elif character == "\n":
+                escaped = "\\n"
+            elif character == "\r":
+                escaped = "\\r"
+            elif character == "\t":
+                escaped = "\\t"
+            elif ord(character) < 0x20:
+                escaped = f"\\u{ord(character):04x}"
+            else:
+                escaped = character
+            fragments.append(escaped)
+            if len(fragments) >= 256:
+                emit("".join(fragments))
+                fragments.clear()
+        if fragments:
+            emit("".join(fragments))
+        emit('"')
+
+    def encode(value, depth: int) -> None:
         nonlocal nodes
         nodes += 1
         if (
@@ -53,55 +95,71 @@ def _canonical_approval_args(args) -> str:
             or depth > _MAX_APPROVAL_CANONICAL_DEPTH
         ):
             raise _InvalidApprovalArguments
-        if value is None or type(value) in {bool, int, str}:
-            if type(value) is str and len(value) > _MAX_APPROVAL_CANONICAL_BYTES:
-                raise _InvalidApprovalArguments
-            return value
+        if value is None:
+            emit("null")
+            return
+        if type(value) is bool:
+            emit("true" if value else "false")
+            return
+        if type(value) is int:
+            emit(json.dumps(value, ensure_ascii=False, allow_nan=False))
+            return
         if type(value) is float:
             if not math.isfinite(value):
                 raise _InvalidApprovalArguments
-            return value
+            emit(json.dumps(value, ensure_ascii=False, allow_nan=False))
+            return
+        if type(value) is str:
+            emit_string(value)
+            return
         if type(value) is dict:
+            if len(value) > _MAX_APPROVAL_CANONICAL_NODES - nodes:
+                raise _InvalidApprovalArguments
             identity = id(value)
-            if identity in active:
+            if identity in active or any(type(key) is not str for key in value):
                 raise _InvalidApprovalArguments
             active.add(identity)
             try:
-                normalized = {}
-                for key, nested in value.items():
-                    if type(key) is not str:
+                emit("{")
+                for index, key in enumerate(sorted(value)):
+                    if index:
+                        emit(",")
+                    nodes += 1
+                    if nodes > _MAX_APPROVAL_CANONICAL_NODES:
                         raise _InvalidApprovalArguments
-                    if len(key) > _MAX_APPROVAL_CANONICAL_BYTES:
-                        raise _InvalidApprovalArguments
-                    normalized[key] = normalize(nested, depth + 1)
-                return normalized
+                    emit_string(key)
+                    emit(":")
+                    encode(value[key], depth + 1)
+                emit("}")
             finally:
                 active.remove(identity)
+            return
         if type(value) is list:
+            if len(value) > _MAX_APPROVAL_CANONICAL_NODES - nodes:
+                raise _InvalidApprovalArguments
             identity = id(value)
             if identity in active:
                 raise _InvalidApprovalArguments
             active.add(identity)
             try:
-                return [normalize(nested, depth + 1) for nested in value]
+                emit("[")
+                for index, nested in enumerate(value):
+                    if index:
+                        emit(",")
+                    encode(nested, depth + 1)
+                emit("]")
             finally:
                 active.remove(identity)
+            return
         raise _InvalidApprovalArguments
 
     try:
-        normalized = normalize(args, 0)
-        encoded = json.dumps(
-            normalized,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-            allow_nan=False,
-        )
-        if len(encoded.encode("utf-8")) > _MAX_APPROVAL_CANONICAL_BYTES:
+        if type(args) is not dict:
             raise _InvalidApprovalArguments
-        return encoded
-    except (Exception,):
-        return _INVALID_APPROVAL_ARGS
+        encode(args, 0)
+        return digest.hexdigest()
+    except Exception:
+        return hashlib.sha256(_INVALID_APPROVAL_ARGS.encode("utf-8")).hexdigest()
 
 
 def _arg(args: dict, name: str) -> str:
@@ -275,7 +333,7 @@ def register(ctx) -> None:
         summarise = WRITE_APPROVALS.get(tool_name)
         if summarise is None:
             return None
-        canonical_args = _canonical_approval_args(args)
+        argument_digest = _approval_rule_digest(args)
         return {
             "action": "approve",
             "message": (
@@ -284,7 +342,7 @@ def register(ctx) -> None:
             ),
             "rule_key": (
                 f"{tool_name}:"
-                f"{hashlib.sha256(canonical_args.encode('utf-8')).hexdigest()}"
+                f"{argument_digest}"
             ),
         }
 

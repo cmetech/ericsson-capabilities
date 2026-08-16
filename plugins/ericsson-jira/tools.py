@@ -233,7 +233,7 @@ def client_from_configuration(configuration, **options) -> JiraClient:
 
 
 def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
-    if not isinstance(args, Mapping):
+    if type(args) is not dict:
         raise JiraError("invalid_input")
     allowed_arguments = {
         "jira_my_tickets": {"max_results"},

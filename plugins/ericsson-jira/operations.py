@@ -244,7 +244,7 @@ def _bounded_json_value(value: Any) -> Any:
             if not math.isfinite(item):
                 raise JiraError("invalid_input")
             return item
-        if isinstance(item, Mapping):
+        if type(item) is dict:
             normalized: dict[str, Any] = {}
             for key, nested in item.items():
                 if type(key) is not str:
@@ -413,7 +413,7 @@ class JiraOperations:
         """
         if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
             raise JiraError("invalid_input")
-        if not isinstance(fields, Mapping) or not fields:
+        if type(fields) is not dict or not fields:
             raise JiraError("invalid_input")
         if len(fields) > _MAX_WRITABLE_FIELDS:
             raise JiraError("invalid_input")

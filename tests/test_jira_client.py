@@ -395,7 +395,8 @@ def test_native_transport_decodes_bounded_deflate_response():
 
     class DeflateStream(httpx.SyncByteStream):
         def __iter__(self):
-            yield compressed
+            yield compressed[:1]
+            yield compressed[1:]
 
     def send(_request):
         return httpx.Response(
@@ -408,6 +409,52 @@ def test_native_transport_decodes_bounded_deflate_response():
     result = native.request("GET", "/rest/api/3/search", timeout_seconds=7)
 
     assert result.body == b'{"ok":true}'
+
+
+def test_native_transport_decodes_raw_deflate_split_after_one_byte():
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    compressed = compressor.compress(b'{"raw":true}') + compressor.flush()
+
+    class RawDeflateStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield compressed[:1]
+            yield compressed[1:2]
+            yield compressed[2:]
+
+    def send(_request):
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "deflate"},
+            stream=RawDeflateStream(),
+        )
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    result = native.request("GET", "/rest/api/3/search", timeout_seconds=7)
+
+    assert result.body == b'{"raw":true}'
+
+
+def test_native_transport_accepts_fragmented_raw_deflate_at_exact_decoded_capacity():
+    payload = b"x" * (1024 * 1024)
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    compressed = compressor.compress(payload) + compressor.flush()
+
+    class RawDeflateStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield compressed[:1]
+            yield compressed[1:]
+
+    def send(_request):
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "deflate"},
+            stream=RawDeflateStream(),
+        )
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    result = native.request("GET", "/rest/api/3/search", timeout_seconds=7)
+
+    assert result.body == payload
 
 
 @pytest.mark.parametrize("content_encoding", ["br", "zstd", "gzip, deflate"])

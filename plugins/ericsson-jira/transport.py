@@ -145,6 +145,15 @@ def _try_zlib_decompress(decoder, data: bytes, maximum: int) -> bytes | None:
         return None
 
 
+def _is_zlib_wrapped(prefix: bytes) -> bool:
+    compression_method, flags = prefix
+    return (
+        compression_method & 0x0F == 8
+        and compression_method >> 4 <= 7
+        and ((compression_method << 8) | flags) % 31 == 0
+    )
+
+
 def _read_native_body(
     response: httpx.Response,
     *,
@@ -172,16 +181,12 @@ def _read_native_body(
 
     encoding = encodings[0] if encodings else None
     decoder = None
-    raw_deflate_fallback = False
+    deflate_prefix = bytearray()
     if encoding == "gzip":
         decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
-    elif encoding == "deflate":
-        decoder = zlib.decompressobj()
-        raw_deflate_fallback = True
 
     body = bytearray()
     raw_chunks = iter(response.iter_raw())
-    first_decode = True
     while True:
         _remaining_control(control, outcome_uncertain=True)
         if cancel_check():
@@ -191,50 +196,69 @@ def _read_native_body(
         except StopIteration:
             break
 
-        pending = raw_chunk
-        while pending:
-            _remaining_control(control, outcome_uncertain=True)
-            if cancel_check():
-                raise _JiraTransportFailure("cancelled", outcome_uncertain=True)
-            remaining = _MAX_RESPONSE_BYTES - len(body)
-            if decoder is None:
-                if len(pending) > remaining:
+        segments = (raw_chunk,)
+        if encoding == "deflate" and decoder is None:
+            needed = 2 - len(deflate_prefix)
+            deflate_prefix.extend(raw_chunk[:needed])
+            if len(deflate_prefix) < 2:
+                continue
+            decoder = zlib.decompressobj(
+                zlib.MAX_WBITS
+                if _is_zlib_wrapped(bytes(deflate_prefix))
+                else -zlib.MAX_WBITS
+            )
+            remainder = memoryview(raw_chunk)[needed:]
+            segments = (bytes(deflate_prefix),)
+            if remainder:
+                segments += (remainder,)
+            deflate_prefix.clear()
+
+        for segment in segments:
+            pending = segment
+            while pending:
+                _remaining_control(control, outcome_uncertain=True)
+                if cancel_check():
+                    raise _JiraTransportFailure(
+                        "cancelled", outcome_uncertain=True
+                    )
+                remaining = _MAX_RESPONSE_BYTES - len(body)
+                if decoder is None:
+                    if len(pending) > remaining:
+                        raise _JiraTransportFailure(
+                            "capacity", outcome_uncertain=True
+                        )
+                    body.extend(pending)
+                    break
+
+                maximum = min(_MAX_DECODE_CHUNK_BYTES, remaining + 1)
+                decoded = _try_zlib_decompress(decoder, pending, maximum)
+                if decoded is None:
+                    raise _JiraTransportFailure(
+                        "invalid_remote_data", outcome_uncertain=True
+                    )
+
+                next_pending = decoder.unconsumed_tail
+                if decoder.unused_data:
+                    raise _JiraTransportFailure(
+                        "invalid_remote_data", outcome_uncertain=True
+                    )
+                if len(decoded) > remaining:
                     raise _JiraTransportFailure(
                         "capacity", outcome_uncertain=True
                     )
-                body.extend(pending)
-                break
+                body.extend(decoded)
+                if not next_pending:
+                    break
+                if not decoded and len(next_pending) >= len(pending):
+                    raise _JiraTransportFailure(
+                        "invalid_remote_data", outcome_uncertain=True
+                    )
+                pending = next_pending
 
-            maximum = min(_MAX_DECODE_CHUNK_BYTES, remaining + 1)
-            was_first_decode = first_decode
-            first_decode = False
-            decoded = _try_zlib_decompress(decoder, pending, maximum)
-            if decoded is None and raw_deflate_fallback and was_first_decode:
-                decoder = zlib.decompressobj(-zlib.MAX_WBITS)
-                decoded = _try_zlib_decompress(decoder, pending, maximum)
-            if decoded is None:
-                raise _JiraTransportFailure(
-                    "invalid_remote_data", outcome_uncertain=True
-                )
-
-            next_pending = decoder.unconsumed_tail
-            if decoder.unused_data:
-                raise _JiraTransportFailure(
-                    "invalid_remote_data", outcome_uncertain=True
-                )
-            if len(decoded) > remaining:
-                raise _JiraTransportFailure(
-                    "capacity", outcome_uncertain=True
-                )
-            body.extend(decoded)
-            if not next_pending:
-                break
-            if not decoded and len(next_pending) >= len(pending):
-                raise _JiraTransportFailure(
-                    "invalid_remote_data", outcome_uncertain=True
-                )
-            pending = next_pending
-
+    if encoding == "deflate" and decoder is None:
+        raise _JiraTransportFailure(
+            "invalid_remote_data", outcome_uncertain=True
+        )
     if decoder is not None and not decoder.eof:
         raise _JiraTransportFailure(
             "invalid_remote_data", outcome_uncertain=True

@@ -84,6 +84,22 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_list_fields": {
+        "name": "jira_list_fields",
+        "description": (
+            "List Jira field IDs and names, so custom field identifiers such "
+            "as customfield_10234 can be resolved before reading or writing "
+            "them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "custom_only": {"type": "boolean", "default": False},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -119,6 +135,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         },
         "jira_get_issue": {"key"},
         "jira_add_comment": {"key", "body", "dry_run"},
+        "jira_list_fields": {"custom_only", "max_results"},
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -129,6 +146,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_search_issues": operations.search_issues,
             "jira_get_issue": operations.get_issue,
             "jira_add_comment": operations.add_comment,
+            "jira_list_fields": operations.list_fields,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

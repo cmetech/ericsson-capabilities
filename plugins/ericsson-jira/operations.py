@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 if __package__:
@@ -232,6 +232,54 @@ class JiraOperations:
             if isinstance(secret, str) and len(secret) >= 4:
                 value = value.replace(secret, "<redacted>")
         return value
+
+    def list_fields(
+        self, *, custom_only: bool = False, max_results: int = 100
+    ) -> dict[str, Any]:
+        """List Jira fields so custom field IDs can be resolved by name.
+
+        Without this an agent cannot map customfield_10234 to "Story Points",
+        so every custom-field interaction has to be hardcoded per Jira
+        deployment.
+        """
+        if type(custom_only) is not bool:
+            raise JiraError("invalid_input")
+        if type(max_results) is not int or not 1 <= max_results <= 200:
+            raise JiraError("invalid_input")
+        payload = self.client.rest_json("GET", "field")
+        if not isinstance(payload, list):
+            raise JiraError("invalid_remote_data")
+        fields: list[dict[str, Any]] = []
+        for entry in payload:
+            if not isinstance(entry, Mapping):
+                continue
+            identifier = _bounded_string(entry.get("id"), 255)
+            if not identifier:
+                continue
+            is_custom = bool(entry.get("custom"))
+            if custom_only and not is_custom:
+                continue
+            fields.append(
+                {
+                    "id": self._redact(identifier),
+                    "name": self._redact(_bounded_string(entry.get("name"), 255))
+                    or "",
+                    "custom": is_custom,
+                }
+            )
+        total = len(fields)
+        truncated = total > max_results
+        return result_envelope(
+            fields[:max_results],
+            total=total,
+            truncated=truncated,
+            hint=(
+                "More fields exist. Raise max_results, or pass custom_only "
+                "to narrow the list."
+                if truncated
+                else None
+            ),
+        )
 
     def _normalize_issue(self, raw: Any) -> dict[str, Any]:
         if not isinstance(raw, dict) or not isinstance(raw.get("fields"), dict):

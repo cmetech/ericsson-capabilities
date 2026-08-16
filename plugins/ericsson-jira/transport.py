@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlencode
@@ -34,6 +35,7 @@ _MAX_RESPONSE_BYTES = 1024 * 1024
 _MAX_HEADER_BYTES = 64 * 1024
 _MAX_STDERR_BYTES = 64 * 1024
 _MAX_URL_BYTES = 8192
+_MAX_DECODE_CHUNK_BYTES = 64 * 1024
 _SAFE_RESPONSE_HEADERS = frozenset(
     {"content-type", "retry-after", "server", "cf-ray", "location"}
 )
@@ -134,6 +136,110 @@ def _local_io(operation):
 def _validate_method(method: str) -> None:
     if method not in _ALLOWED_METHODS:
         raise JiraError("invalid_input")
+
+
+def _try_zlib_decompress(decoder, data: bytes, maximum: int) -> bytes | None:
+    try:
+        return decoder.decompress(data, maximum)
+    except zlib.error:
+        return None
+
+
+def _read_native_body(
+    response: httpx.Response,
+    *,
+    control: RequestControl | None,
+    cancel_check: Callable[[], bool],
+) -> bytes:
+    encodings = [
+        value.strip().lower()
+        for value in response.headers.get_list("content-encoding", split_commas=True)
+        if value.strip() and value.strip().lower() != "identity"
+    ]
+    if len(encodings) > 1 or (encodings and encodings[0] not in {"gzip", "deflate"}):
+        raise _JiraTransportFailure(
+            "invalid_remote_data", outcome_uncertain=True
+        )
+
+    # Injected HTTPX transports may return a Response whose constructor has
+    # already decoded and cached a small body. Real streamed network responses
+    # take the raw path below; cached bodies can only be bounded after the
+    # injecting transport has materialized them.
+    if response.is_stream_consumed:
+        if len(response.content) > _MAX_RESPONSE_BYTES:
+            raise _JiraTransportFailure("capacity", outcome_uncertain=True)
+        return response.content
+
+    encoding = encodings[0] if encodings else None
+    decoder = None
+    raw_deflate_fallback = False
+    if encoding == "gzip":
+        decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
+    elif encoding == "deflate":
+        decoder = zlib.decompressobj()
+        raw_deflate_fallback = True
+
+    body = bytearray()
+    raw_chunks = iter(response.iter_raw())
+    first_decode = True
+    while True:
+        _remaining_control(control, outcome_uncertain=True)
+        if cancel_check():
+            raise _JiraTransportFailure("cancelled", outcome_uncertain=True)
+        try:
+            raw_chunk = next(raw_chunks)
+        except StopIteration:
+            break
+
+        pending = raw_chunk
+        while pending:
+            _remaining_control(control, outcome_uncertain=True)
+            if cancel_check():
+                raise _JiraTransportFailure("cancelled", outcome_uncertain=True)
+            remaining = _MAX_RESPONSE_BYTES - len(body)
+            if decoder is None:
+                if len(pending) > remaining:
+                    raise _JiraTransportFailure(
+                        "capacity", outcome_uncertain=True
+                    )
+                body.extend(pending)
+                break
+
+            maximum = min(_MAX_DECODE_CHUNK_BYTES, remaining + 1)
+            was_first_decode = first_decode
+            first_decode = False
+            decoded = _try_zlib_decompress(decoder, pending, maximum)
+            if decoded is None and raw_deflate_fallback and was_first_decode:
+                decoder = zlib.decompressobj(-zlib.MAX_WBITS)
+                decoded = _try_zlib_decompress(decoder, pending, maximum)
+            if decoded is None:
+                raise _JiraTransportFailure(
+                    "invalid_remote_data", outcome_uncertain=True
+                )
+
+            next_pending = decoder.unconsumed_tail
+            if decoder.unused_data:
+                raise _JiraTransportFailure(
+                    "invalid_remote_data", outcome_uncertain=True
+                )
+            if len(decoded) > remaining:
+                raise _JiraTransportFailure(
+                    "capacity", outcome_uncertain=True
+                )
+            body.extend(decoded)
+            if not next_pending:
+                break
+            if not decoded and len(next_pending) >= len(pending):
+                raise _JiraTransportFailure(
+                    "invalid_remote_data", outcome_uncertain=True
+                )
+            pending = next_pending
+
+    if decoder is not None and not decoder.eof:
+        raise _JiraTransportFailure(
+            "invalid_remote_data", outcome_uncertain=True
+        )
+    return bytes(body)
 
 
 class CurlTransport:
@@ -572,7 +678,11 @@ class NativeTransport:
             )
         self._client = httpx.Client(
             base_url=authentication.origin,
-            headers={**authentication.headers, "Accept": "application/json"},
+            headers={
+                **authentication.headers,
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip, deflate",
+            },
             timeout=authentication.request_timeout_seconds,
             follow_redirects=False,
             trust_env=False,
@@ -695,7 +805,6 @@ class NativeTransport:
         failure = None
         known_status = None
         known_headers = {}
-        body = bytearray()
         try:
             with closing(self._client.send(request, stream=True)) as response:
                 known_status = response.status_code
@@ -705,21 +814,15 @@ class NativeTransport:
                     raise _JiraTransportFailure(
                         "cancelled", outcome_uncertain=True
                     )
-                for chunk in response.iter_bytes():
-                    _remaining_control(control, outcome_uncertain=True)
-                    if self._cancel_check():
-                        raise _JiraTransportFailure(
-                            "cancelled", outcome_uncertain=True
-                        )
-                    if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
-                        raise _JiraTransportFailure(
-                            "capacity", outcome_uncertain=True
-                        )
-                    body.extend(chunk)
+                body = _read_native_body(
+                    response,
+                    control=control,
+                    cancel_check=self._cancel_check,
+                )
                 result = TransportResponse(
                     status=known_status,
                     headers=known_headers,
-                    body=bytes(body),
+                    body=body,
                 )
         except _JiraTransportFailure:
             if known_status is None or not 400 <= known_status < 500:

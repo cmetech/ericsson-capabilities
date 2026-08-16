@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import json
+import zlib
 from collections import deque
 
 import httpx
@@ -276,6 +278,7 @@ def test_native_transport_pins_origin_headers_deadline_and_redirect_policy():
     assert result.status == 200
     assert requests[0].url == "https://jira.example.test/rest/api/3/search"
     assert requests[0].headers["authorization"] == "Bearer secret-token"
+    assert requests[0].headers["accept-encoding"] == "gzip, deflate"
     assert requests[0].extensions["timeout"]["read"] == 7
 
 
@@ -315,6 +318,123 @@ def test_native_transport_accepts_response_at_exact_capacity():
     assert len(result.body) == 1024 * 1024
     assert result.body[:1] == b"x"
     assert result.body[-1:] == b"y"
+
+
+def test_native_gzip_decompression_never_materializes_output_larger_than_bound(
+    monkeypatch,
+):
+    decoded_chunk_sizes = []
+    real_decompressobj = zlib.decompressobj
+
+    class RecordingDecompressor:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+        def decompress(self, data, max_length=0):
+            decoded = self._wrapped.decompress(data, max_length)
+            decoded_chunk_sizes.append(len(decoded))
+            return decoded
+
+        def flush(self, length=zlib.DEF_BUF_SIZE):
+            decoded = self._wrapped.flush(length)
+            decoded_chunk_sizes.append(len(decoded))
+            return decoded
+
+    def recording_decompressobj(*args, **kwargs):
+        return RecordingDecompressor(real_decompressobj(*args, **kwargs))
+
+    monkeypatch.setattr(zlib, "decompressobj", recording_decompressobj)
+    compressed = gzip.compress(b"x" * (8 * 1024 * 1024))
+
+    class GzipStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield compressed
+
+    def send(_request):
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            stream=GzipStream(),
+        )
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    with pytest.raises(JiraError) as caught:
+        native.request("POST", "/rest/api/3/issue", timeout_seconds=7)
+
+    assert caught.value.category == "capacity"
+    assert caught.value.outcome_uncertain is True
+    assert decoded_chunk_sizes
+    assert max(decoded_chunk_sizes) <= 64 * 1024
+
+
+def test_native_transport_accepts_gzip_response_at_exact_decoded_capacity():
+    compressed = gzip.compress(b"x" * (1024 * 1024))
+
+    class GzipStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield compressed
+
+    def send(_request):
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            stream=GzipStream(),
+        )
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    result = native.request("GET", "/rest/api/3/search", timeout_seconds=7)
+
+    assert result.body == b"x" * (1024 * 1024)
+
+
+def test_native_transport_decodes_bounded_deflate_response():
+    compressed = zlib.compress(b'{"ok":true}')
+
+    class DeflateStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield compressed
+
+    def send(_request):
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "deflate"},
+            stream=DeflateStream(),
+        )
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    result = native.request("GET", "/rest/api/3/search", timeout_seconds=7)
+
+    assert result.body == b'{"ok":true}'
+
+
+@pytest.mark.parametrize("content_encoding", ["br", "zstd", "gzip, deflate"])
+def test_native_transport_fails_closed_for_unbounded_content_encoding(
+    content_encoding,
+):
+    emitted = {"count": 0}
+
+    class EncodedStream(httpx.SyncByteStream):
+        def __iter__(self):
+            emitted["count"] += 1
+            yield b"encoded"
+
+    def send(_request):
+        return httpx.Response(
+            200,
+            headers={"content-encoding": content_encoding},
+            stream=EncodedStream(),
+        )
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    with pytest.raises(JiraError) as caught:
+        native.request("GET", "/rest/api/3/search", timeout_seconds=7)
+
+    assert caught.value.category == "invalid_remote_data"
+    assert caught.value.outcome_uncertain is True
+    assert emitted["count"] == 0
 
 
 def test_native_transport_preserves_4xx_when_error_body_exceeds_capacity():

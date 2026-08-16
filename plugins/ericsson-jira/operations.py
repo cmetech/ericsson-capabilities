@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
@@ -35,6 +37,9 @@ SAFE_FIELDS = frozenset(
     }
 )
 DETAIL_FIELDS = SAFE_FIELDS | {"comment"}
+WRITABLE_FIELDS = frozenset(
+    {"summary", "description", "priority", "duedate", "labels", "environment"}
+)
 _DEFAULT_SEARCH_FIELDS = tuple(sorted(SAFE_FIELDS))
 _GITLAB_URL = re.compile(
     r"https?://[^\s|\]>)\"',]*gitlab[^\s|\]>)\"',]*", re.I
@@ -42,10 +47,15 @@ _GITLAB_URL = re.compile(
 _ISSUE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}-[1-9][0-9]{0,19}$")
 _PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,60}$")
 _NUMERIC_ID = re.compile(r"^[0-9]{1,19}$")
+_CUSTOM_FIELD = re.compile(r"^customfield_[0-9]{1,19}$")
 _MAX_ADF_CHARS = 100_000
 _MAX_ADF_NODES = 10_000
 _MAX_ADF_DEPTH = 32
 _MAX_EMAIL_LEN = 320
+_MAX_WRITABLE_FIELDS = 20
+_MAX_UPDATE_JSON_BYTES = 65_536
+_MAX_UPDATE_JSON_DEPTH = 32
+_MAX_UPDATE_JSON_NODES = 10_000
 
 
 def _safe_link(value: Any) -> str | None:
@@ -212,6 +222,54 @@ def _age_threshold(value: Any) -> int | None:
     return value
 
 
+def _bounded_json_value(value: Any) -> Any:
+    """Normalize a finite JSON value for a Jira field update.
+
+    Jira field values intentionally retain their native shape: a priority may
+    be an object, labels a list, and custom fields can have bounded nested
+    structures.  Normalizing mappings makes that contract explicit while
+    refusing Python-only values before anything reaches a transport.
+    """
+
+    nodes = 0
+
+    def normalize(item: Any, depth: int) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if nodes > _MAX_UPDATE_JSON_NODES or depth > _MAX_UPDATE_JSON_DEPTH:
+            raise JiraError("invalid_input")
+        if item is None or type(item) in {str, int, bool}:
+            return item
+        if type(item) is float:
+            if not math.isfinite(item):
+                raise JiraError("invalid_input")
+            return item
+        if isinstance(item, Mapping):
+            normalized: dict[str, Any] = {}
+            for key, nested in item.items():
+                if type(key) is not str:
+                    raise JiraError("invalid_input")
+                normalized[key] = normalize(nested, depth + 1)
+            return normalized
+        if type(item) is list:
+            return [normalize(nested, depth + 1) for nested in item]
+        raise JiraError("invalid_input")
+
+    normalized = normalize(value, 0)
+    try:
+        encoded = json.dumps(
+            {"fields": normalized},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        raise JiraError("invalid_input") from None
+    if len(encoded) > _MAX_UPDATE_JSON_BYTES:
+        raise JiraError("invalid_input")
+    return normalized
+
+
 class JiraOperations:
     def __init__(
         self,
@@ -336,6 +394,69 @@ class JiraOperations:
             "dry_run": False,
             "issue_key": key,
             "assignee": assignee,
+            "reconciled": False,
+        }
+
+    def update_fields(
+        self,
+        key: str,
+        fields: Any,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Set a bounded allowlist of fields on an issue.
+
+        Custom fields must use their ``customfield_<numeric id>`` identifier,
+        obtained through :meth:`list_fields`; security, reporter and project
+        remain deliberately unavailable to tool callers.
+        """
+        if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
+            raise JiraError("invalid_input")
+        if not isinstance(fields, Mapping) or not fields:
+            raise JiraError("invalid_input")
+        if len(fields) > _MAX_WRITABLE_FIELDS:
+            raise JiraError("invalid_input")
+        for name in fields:
+            if (
+                type(name) is not str
+                or (
+                    name not in WRITABLE_FIELDS
+                    and _CUSTOM_FIELD.fullmatch(name) is None
+                )
+            ):
+                raise JiraError("invalid_input")
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise JiraError("invalid_input")
+        if dry_run and confirm:
+            raise JiraError("invalid_input")
+        if not dry_run and not confirm:
+            raise JiraError("confirmation_required")
+
+        payload = _bounded_json_value(fields)
+        execute = require_explicit_intent(
+            dry_run=dry_run, confirm=confirm, action=f"Jira issue {key}"
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "issue_key": key,
+                "fields": payload,
+                "reconciled": False,
+            }
+
+        body = {"fields": payload}
+        self.client.rest_json_versioned_mutation(
+            "PUT",
+            f"issue/{key}",
+            json_body_by_version={"3": body, "2": body},
+        )
+        return {
+            "ok": True,
+            "dry_run": False,
+            "issue_key": key,
+            "fields": payload,
             "reconciled": False,
         }
 

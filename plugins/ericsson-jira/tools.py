@@ -192,6 +192,29 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_update_fields": {
+        "name": "jira_update_fields",
+        "description": (
+            "Set fields on a Jira issue. Accepts summary, description, "
+            "priority, duedate, labels, environment, and customfield_* IDs "
+            "resolved via jira_list_fields. Requires dry_run or confirm."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "minLength": 3, "maxLength": 128},
+                "fields": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "maxProperties": 20,
+                },
+                "dry_run": {"type": "boolean", "default": False},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["key", "fields"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -239,6 +262,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "confirm",
         },
         "jira_assign_issue": {"key", "assignee", "dry_run", "confirm"},
+        "jira_update_fields": {"key", "fields", "dry_run", "confirm"},
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -255,6 +279,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_search_assignable_users": operations.search_assignable_users,
             "jira_transition_issue": operations.transition_issue,
             "jira_assign_issue": operations.assign_issue,
+            "jira_update_fields": operations.update_fields,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

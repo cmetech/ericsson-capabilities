@@ -494,6 +494,153 @@ class TestTransitionReconciliationRemainder:
         assert [call[0] for call in client.calls] == ["POST"]
 
 
+class TestUpdateFields:
+    def test_neither_intent_flag_is_refused_before_a_request(self):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields("ABC-1", {"summary": "New"})
+
+        assert caught.value.category == "confirmation_required"
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        ("dry_run", "confirm"),
+        [(1, False), (False, 1), (True, True)],
+    )
+    def test_intent_flags_require_strict_booleans_before_a_request(
+        self, dry_run, confirm
+    ):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields(
+                "ABC-1", {"summary": "New"}, dry_run=dry_run, confirm=confirm
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_dry_run_echoes_the_bounded_change_without_a_request(self):
+        client = FakeClient([])
+
+        result = JiraOperations(client).update_fields(
+            "ABC-1", {"summary": "New"}, dry_run=True
+        )
+
+        assert result == {
+            "ok": True,
+            "dry_run": True,
+            "issue_key": "ABC-1",
+            "fields": {"summary": "New"},
+            "reconciled": False,
+        }
+        assert client.calls == []
+
+    def test_confirm_uses_the_resolved_version_mutation_path_with_one_body(self):
+        client = FakeClient([None])
+
+        result = JiraOperations(client).update_fields(
+            "ABC-1", {"summary": "New"}, confirm=True
+        )
+
+        assert client.calls == [
+            (
+                "PUT",
+                "issue/ABC-1",
+                {
+                    "json_body_by_version": {
+                        "3": {"fields": {"summary": "New"}},
+                        "2": {"fields": {"summary": "New"}},
+                    }
+                },
+            )
+        ]
+        assert result["reconciled"] is False
+
+    def test_custom_field_priority_and_labels_are_allowed(self):
+        client = FakeClient([None])
+        fields = {
+            "customfield_10234": {"value": "5"},
+            "priority": {"id": "3"},
+            "labels": ["release", "customer-facing"],
+        }
+
+        JiraOperations(client).update_fields("ABC-1", fields, confirm=True)
+
+        assert client.calls[0][2]["json_body_by_version"]["3"] == {
+            "fields": fields
+        }
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"security": {"id": "1"}},
+            {"reporter": {"name": "user"}},
+            {},
+            ["summary"],
+            {f"customfield_{index}": index for index in range(21)},
+            {"customfield_not_an_id": 1},
+            {1: "not-a-field-name"},
+        ],
+    )
+    def test_invalid_field_map_is_rejected_before_a_request(self, fields):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields("ABC-1", fields, confirm=True)
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_non_json_value_is_rejected_before_a_request(self):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields(
+                "ABC-1", {"priority": {"id": object()}}, confirm=True
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_excessively_nested_value_is_rejected_before_a_request(self):
+        client = FakeClient([])
+        value = "leaf"
+        for _ in range(33):
+            value = [value]
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields(
+                "ABC-1", {"customfield_10234": value}, confirm=True
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_oversized_serialized_value_is_rejected_before_a_request(self):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields(
+                "ABC-1", {"description": "x" * 65_537}, confirm=True
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_ambiguous_write_is_preserved_without_a_retry(self):
+        client = FakeClient([JiraError("write_ambiguous")])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).update_fields(
+                "ABC-1", {"summary": "New"}, confirm=True
+            )
+
+        assert caught.value.category == "write_ambiguous"
+        assert [call[0] for call in client.calls] == ["PUT"]
+
+
 class Configuration:
     def setting(self, field_id):
         return {
@@ -603,3 +750,84 @@ def test_transition_approval_is_argument_scoped_and_names_the_transition():
     assert "XYZ-9" in second["message"] and "31" in second["message"]
     assert first["rule_key"].startswith("jira_transition_issue:")
     assert first["rule_key"] != second["rule_key"]
+
+
+def test_update_fields_schema_exposes_only_the_bounded_write_arguments():
+    from jira_test_support import tools
+
+    schema = tools.SCHEMAS["jira_update_fields"]["parameters"]
+
+    assert schema["required"] == ["key", "fields"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == {"key", "fields", "dry_run", "confirm"}
+    assert schema["properties"]["fields"] == {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 20,
+    }
+
+
+def test_update_fields_requires_matching_host_admission_before_configuration(
+    monkeypatch,
+):
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    calls = []
+    monkeypatch.setattr(
+        plugin.jira_tools,
+        "invoke",
+        lambda name, args, configuration, **options: calls.append(name) or {"ok": True},
+    )
+    handler = context.registrations["jira_update_fields"]["handler"]
+    args = {"key": "ABC-1", "fields": {"summary": "New"}, "confirm": True}
+
+    refused = json.loads(handler(args))
+
+    assert refused["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
+
+    accepted = json.loads(
+        handler(args, tool_admission=_admission("jira_update_fields"))
+    )
+
+    assert accepted == {"success": True, "result": {"ok": True}}
+    assert calls == ["jira_update_fields"]
+
+
+def test_update_fields_approval_is_bounded_and_argument_scoped():
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    hook = context.hooks["pre_tool_call"]
+
+    first = hook(
+        "jira_update_fields", {"key": "ABC-1", "fields": {"summary": "New"}}
+    )
+    second = hook(
+        "jira_update_fields", {"key": "XYZ-9", "fields": {"labels": ["new"]}}
+    )
+
+    assert "jira_update_fields" in first["message"]
+    assert "ABC-1" in first["message"]
+    assert "summary" in first["message"]
+    assert len(first["message"]) <= 600
+    assert first["rule_key"].startswith("jira_update_fields:")
+    assert first["rule_key"] != second["rule_key"]
+
+
+def test_update_fields_approval_handles_invalid_caller_values_without_echoing_them():
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    hook = context.hooks["pre_tool_call"]
+
+    request = hook(
+        "jira_update_fields",
+        {"key": "ABC-1", "fields": {"summary": object()}},
+    )
+
+    assert request["action"] == "approve"
+    assert "<unsupported>" in request["message"]
+    assert len(request["message"]) <= 600

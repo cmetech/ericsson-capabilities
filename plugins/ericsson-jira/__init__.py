@@ -11,14 +11,43 @@ from .models import JiraError, SAFE_ERROR_MESSAGES, safe_remediation
 
 
 _WRITE_TOOLS = frozenset(
-    {"jira_add_comment", "jira_transition_issue", "jira_assign_issue"}
+    {
+        "jira_add_comment",
+        "jira_transition_issue",
+        "jira_assign_issue",
+        "jira_update_fields",
+    }
 )
 
 
 def _arg(args: dict, name: str) -> str:
     """Render one argument for an approval prompt, safely and bounded."""
     value = args.get(name) if isinstance(args, dict) else None
-    return json.dumps(value, ensure_ascii=True)[:512]
+    budget = 8
+
+    def bounded(item, depth: int = 0):
+        nonlocal budget
+        budget -= 1
+        if budget < 0 or depth > 4:
+            return "<truncated>"
+        if item is None or type(item) in {bool, int, float}:
+            return item
+        if type(item) is str:
+            return item[:128]
+        if isinstance(item, dict):
+            normalized = {}
+            for index, (key, nested) in enumerate(item.items()):
+                if index >= 8:
+                    break
+                normalized[key[:128] if type(key) is str else "<invalid-key>"] = (
+                    bounded(nested, depth + 1)
+                )
+            return normalized
+        if type(item) is list:
+            return [bounded(nested, depth + 1) for nested in item[:8]]
+        return "<unsupported>"
+
+    return json.dumps(bounded(value), ensure_ascii=True)[:512]
 
 
 WRITE_APPROVALS = {
@@ -30,6 +59,9 @@ WRITE_APPROVALS = {
     ),
     "jira_assign_issue": lambda a: (
         f"Issue: {_arg(a, 'key')}\nAssignee: {_arg(a, 'assignee')}"
+    ),
+    "jira_update_fields": lambda a: (
+        f"Issue: {_arg(a, 'key')}\nFields: {_arg(a, 'fields')}"
     ),
 }
 
@@ -146,12 +178,16 @@ def register(ctx) -> None:
         summarise = WRITE_APPROVALS.get(tool_name)
         if summarise is None:
             return None
-        canonical_args = json.dumps(
-            args if isinstance(args, dict) else {},
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        try:
+            canonical_args = json.dumps(
+                args if isinstance(args, dict) else {},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            canonical_args = _arg({"args": args}, "args")
         return {
             "action": "approve",
             "message": (

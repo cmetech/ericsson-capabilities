@@ -31,6 +31,11 @@
       "path": "plugins/ericsson-sharepoint",
       "id": "ericsson-sharepoint",
       "enabled": false
+    },
+    {
+      "path": "plugins/ericsson-confluence",
+      "id": "ericsson-confluence",
+      "enabled": false
     }
   ],
   "mcpServers": "mcp/mcp-servers.yaml",

@@ -345,6 +345,11 @@ def test_manifest_content():
             "id": "ericsson-sharepoint",
             "enabled": False,
         },
+        {
+            "path": "plugins/ericsson-confluence",
+            "id": "ericsson-confluence",
+            "enabled": False,
+        },
     ]
     assert doc["mcpServers"] == "mcp/mcp-servers.yaml"
     assert doc["mcpLocal"] == ["mcp/outlook-mcp"]

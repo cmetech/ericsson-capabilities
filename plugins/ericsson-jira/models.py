@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+if __package__:
+    from ._common.errors import remediation_for
+else:
+    from _common.errors import remediation_for
+
 
 SAFE_ERROR_MESSAGES = {
     "invalid_configuration": "Jira configuration is invalid",
@@ -25,12 +30,26 @@ SAFE_ERROR_MESSAGES = {
 }
 
 
+_SAFE_REMEDIATIONS = frozenset(
+    remediation
+    for category in SAFE_ERROR_MESSAGES
+    if (remediation := remediation_for(category, "jira")) is not None
+) | frozenset({"Update the Jira token."})
+
+
+def safe_remediation(value: object) -> str | None:
+    """Return only static, connector-owned remediation guidance."""
+    if type(value) is not str or value not in _SAFE_REMEDIATIONS:
+        return None
+    return value
+
+
 class JiraError(RuntimeError):
     """Stable classified failure that never includes remote or secret text."""
 
-    def __init__(self, category: str, *, remediation: str | None = None) -> None:
+    def __init__(self, category: str, *, remediation: object = None) -> None:
         self.category = category if category in SAFE_ERROR_MESSAGES else "transient"
-        self.remediation = remediation
+        self.remediation = safe_remediation(remediation)
         super().__init__(SAFE_ERROR_MESSAGES[self.category])
 
 

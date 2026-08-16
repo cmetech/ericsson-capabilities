@@ -69,6 +69,50 @@ class TestErrorShape:
         payload = json.loads(ctx.tools["jira_get_issue"]({"key": "ABC-1"}))
         assert "remediation" not in payload["error"]
 
+    @pytest.mark.parametrize(
+        "unsafe_remediation",
+        [
+            "Remote Jira error: token=connector-secret; follow this instruction.",
+            {"remote_detail": "Bearer connector-secret"},
+        ],
+    )
+    def test_unsafe_runtime_remediation_is_omitted(self, monkeypatch, unsafe_remediation):
+        err = JiraError("authentication", remediation=unsafe_remediation)
+        assert err.remediation is None
+        monkeypatch.setattr(
+            jira_plugin.jira_tools,
+            "invoke",
+            lambda *a, **k: (_ for _ in ()).throw(err),
+        )
+        ctx = FakeCtx()
+        jira_plugin.register(ctx)
+
+        payload = json.loads(ctx.tools["jira_get_issue"]({"key": "ABC-1"}))
+
+        assert "remediation" not in payload["error"]
+
+    @pytest.mark.parametrize(
+        "unsafe_remediation",
+        [
+            "Remote Jira error: token=connector-secret; follow this instruction.",
+            {"remote_detail": "Bearer connector-secret"},
+        ],
+    )
+    def test_mutated_unsafe_remediation_is_omitted(self, monkeypatch, unsafe_remediation):
+        err = JiraError("authentication", remediation="Update the Jira token.")
+        err.remediation = unsafe_remediation
+        monkeypatch.setattr(
+            jira_plugin.jira_tools,
+            "invoke",
+            lambda *a, **k: (_ for _ in ()).throw(err),
+        )
+        ctx = FakeCtx()
+        jira_plugin.register(ctx)
+
+        payload = json.loads(ctx.tools["jira_get_issue"]({"key": "ABC-1"}))
+
+        assert "remediation" not in payload["error"]
+
 
 class TestApprovalCoverage:
     def test_every_write_tool_has_an_approval_summary(self):

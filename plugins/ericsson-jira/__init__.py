@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from . import tools as jira_tools
-from .models import JiraError, SAFE_ERROR_MESSAGES
+from .models import JiraError, SAFE_ERROR_MESSAGES, safe_remediation
 
 
 _WRITE_TOOLS = frozenset({"jira_add_comment"})
@@ -102,7 +102,7 @@ def register(ctx) -> None:
                     "category": exc.category,
                     "message": SAFE_ERROR_MESSAGES[exc.category],
                 }
-                remediation = getattr(exc, "remediation", None)
+                remediation = safe_remediation(getattr(exc, "remediation", None))
                 if remediation:
                     error["remediation"] = remediation
                 return _json(

@@ -241,7 +241,7 @@ def test_malformed_search_and_issue_payloads_fail_closed_without_raw_echo():
         assert "remote-secret" not in str(caught.value)
 
 
-def test_tool_schemas_register_exact_bounded_read_surface_without_raw_fields():
+def test_tool_schemas_register_exact_bounded_public_surface_without_raw_fields():
     assert set(SCHEMAS) == {
         "jira_my_tickets",
         "jira_search_issues",
@@ -251,6 +251,7 @@ def test_tool_schemas_register_exact_bounded_read_surface_without_raw_fields():
         "jira_get_project",
         "jira_list_transitions",
         "jira_search_assignable_users",
+        "jira_transition_issue",
     }
     search = SCHEMAS["jira_search_issues"]["parameters"]
     assert search["additionalProperties"] is False

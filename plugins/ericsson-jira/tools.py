@@ -149,6 +149,29 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_transition_issue": {
+        "name": "jira_transition_issue",
+        "description": (
+            "Move a Jira issue through one workflow transition. Call "
+            "jira_list_transitions first to obtain a valid transition_id. "
+            "Requires dry_run or confirm."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "minLength": 3, "maxLength": 128},
+                "transition_id": {
+                    "type": "string",
+                    "pattern": "^[0-9]{1,19}$",
+                },
+                "expected_status": {"type": "string", "maxLength": 255},
+                "dry_run": {"type": "boolean", "default": False},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["key", "transition_id"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -188,6 +211,13 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         "jira_get_project": {"key"},
         "jira_list_transitions": {"key"},
         "jira_search_assignable_users": {"project", "query", "max_results"},
+        "jira_transition_issue": {
+            "key",
+            "transition_id",
+            "expected_status",
+            "dry_run",
+            "confirm",
+        },
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -202,6 +232,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_get_project": operations.get_project,
             "jira_list_transitions": operations.list_transitions,
             "jira_search_assignable_users": operations.search_assignable_users,
+            "jira_transition_issue": operations.transition_issue,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

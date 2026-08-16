@@ -39,6 +39,7 @@ def test_descriptor_is_standalone_and_preserves_stable_public_identity():
         "jira_get_project",
         "jira_list_transitions",
         "jira_search_assignable_users",
+        "jira_transition_issue",
     ]
     assert "requires_env" not in manifest
     assert {field["id"] for field in descriptor["fields"]} >= {
@@ -152,6 +153,7 @@ def test_plugin_registers_stable_toolset_and_resolves_fresh_configuration(monkey
         "jira_get_project",
         "jira_list_transitions",
         "jira_search_assignable_users",
+        "jira_transition_issue",
     }
     assert {item["toolset"] for item in context.registrations.values()} == {
         "ericsson-jira"

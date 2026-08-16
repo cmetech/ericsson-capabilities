@@ -9,9 +9,11 @@ from urllib.parse import urlsplit
 
 if __package__:
     from ._common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
+    from ._common.guardrails import require_explicit_intent
     from .models import JiraError
 else:
     from _common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
+    from _common.guardrails import require_explicit_intent
     from models import JiraError
 
 
@@ -39,6 +41,7 @@ _GITLAB_URL = re.compile(
 )
 _ISSUE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}-[1-9][0-9]{0,19}$")
 _PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,60}$")
+_NUMERIC_ID = re.compile(r"^[0-9]{1,19}$")
 _MAX_ADF_CHARS = 100_000
 _MAX_ADF_NODES = 10_000
 _MAX_ADF_DEPTH = 32
@@ -234,6 +237,93 @@ class JiraOperations:
             if isinstance(secret, str) and len(secret) >= 4:
                 value = value.replace(secret, "<redacted>")
         return value
+
+    def _status_name(self, key: str) -> str | None:
+        """Read one issue status solely to reconcile an ambiguous write."""
+        payload = self.client.rest_json("GET", f"issue/{key}")
+        if not isinstance(payload, Mapping):
+            return None
+        fields = payload.get("fields")
+        if not isinstance(fields, Mapping):
+            return None
+        status = fields.get("status")
+        return _name(status) if isinstance(status, Mapping) else None
+
+    def transition_issue(
+        self,
+        key: str,
+        transition_id: str,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+        expected_status: str | None = None,
+    ) -> dict[str, Any]:
+        """Move an issue through one explicitly selected workflow transition.
+
+        The caller obtains the workflow-specific ``transition_id`` from
+        ``list_transitions``.  A POST is never retried.  Only an ambiguous
+        write with a caller-provided target status gets one bounded read for
+        reconciliation.
+        """
+        if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
+            raise JiraError("invalid_input")
+        if (
+            not isinstance(transition_id, str)
+            or _NUMERIC_ID.fullmatch(transition_id) is None
+        ):
+            raise JiraError("invalid_input")
+        if expected_status is not None and (
+            not isinstance(expected_status, str) or len(expected_status) > 255
+        ):
+            raise JiraError("invalid_input")
+        # Keep the connector's public error boundary at JiraError.  The shared
+        # guardrail has the same strict validation, but raises its generic
+        # ConnectorError type; validate at this boundary before invoking it.
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise JiraError("invalid_input")
+        if dry_run and confirm:
+            raise JiraError("invalid_input")
+        if not dry_run and not confirm:
+            raise JiraError("confirmation_required")
+
+        execute = require_explicit_intent(
+            dry_run=dry_run, confirm=confirm, action=f"Jira issue {key}"
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "issue_key": key,
+                "transition_id": transition_id,
+                "reconciled": False,
+            }
+
+        try:
+            self.client.rest_json(
+                "POST",
+                f"issue/{key}/transitions",
+                json_body={"transition": {"id": transition_id}},
+            )
+        except JiraError as exc:
+            if exc.category != "write_ambiguous" or expected_status is None:
+                raise
+            if self._status_name(key) != expected_status:
+                raise
+            return {
+                "ok": True,
+                "dry_run": False,
+                "issue_key": key,
+                "transition_id": transition_id,
+                "reconciled": True,
+            }
+
+        return {
+            "ok": True,
+            "dry_run": False,
+            "issue_key": key,
+            "transition_id": transition_id,
+            "reconciled": False,
+        }
 
     def list_fields(
         self, *, custom_only: bool = False, max_results: int = 100

@@ -320,3 +320,36 @@ class JiraClient:
                 deadline=deadline,
             )
         return self._decode(first, method)
+
+    def rest_json_v2_mutation(
+        self,
+        method: str,
+        resource: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any | None = None,
+        deadline: float | None = None,
+    ) -> Any:
+        """Perform exactly one mutation against Jira REST API v2.
+
+        Mutations cannot use the automatic v3-to-v2 compatibility fallback:
+        probing v3 and then writing to v2 would be two write attempts.  The
+        callers of this narrow API select an endpoint whose contract is v2.
+        """
+        method = method.upper() if isinstance(method, str) else ""
+        if method not in {"POST", "PUT", "DELETE"}:
+            raise JiraError("invalid_input")
+        self._validate_resource(resource)
+        if deadline is None:
+            deadline = self.operation_deadline()
+        response = self._perform(
+            method,
+            f"/rest/api/2/{resource}",
+            params=params,
+            json_body=json_body,
+            deadline=deadline,
+        )
+        if response.status == 204:
+            self._raise_status(response, method)
+            return None
+        return self._decode(response, method)

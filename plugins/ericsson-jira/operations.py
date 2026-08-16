@@ -299,7 +299,7 @@ class JiraOperations:
             }
 
         try:
-            self.client.rest_json(
+            self.client.rest_json_v2_mutation(
                 "POST",
                 f"issue/{key}/transitions",
                 json_body={"transition": {"id": transition_id}},
@@ -307,7 +307,11 @@ class JiraOperations:
         except JiraError as exc:
             if exc.category != "write_ambiguous" or expected_status is None:
                 raise
-            if self._status_name(key) != expected_status:
+            try:
+                reconciled_status = self._status_name(key)
+            except JiraError:
+                raise exc from None
+            if reconciled_status != expected_status:
                 raise
             return {
                 "ok": True,

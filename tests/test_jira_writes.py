@@ -11,12 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from jira_test_support import models, operations
+from jira_test_support import client as jira_client, models, operations
 
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-jira"
 JiraError = models.JiraError
 JiraOperations = operations.JiraOperations
+JiraAuth = models.JiraAuth
+JiraClient = jira_client.JiraClient
+TransportResponse = models.TransportResponse
 
 
 class FakeClient:
@@ -38,6 +41,9 @@ class FakeClient:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+    def rest_json_v2_mutation(self, method, resource, **kwargs):
+        return self.rest_json(method, resource, **kwargs)
 
 
 class TestTransitionIntent:
@@ -118,6 +124,49 @@ class TestTransitionExecution:
             "reconciled": False,
         }
 
+    def test_default_auto_client_uses_one_pinned_v2_post_for_data_center(self):
+        """A v3 probe followed by v2 fallback would be two mutations."""
+
+        class AutoDataCenterTransport:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, path, **kwargs):
+                self.calls.append((method, path, kwargs))
+                if path.startswith("/rest/api/3/"):
+                    return TransportResponse(
+                        404,
+                        {"content-type": "application/json"},
+                        b'{"errorMessages":["REST API v3 endpoint is not available"]}',
+                    )
+                # Jira's transition endpoint succeeds with 204 No Content.
+                return TransportResponse(204, {}, b"")
+
+            def close(self):
+                pass
+
+        auth = JiraAuth(
+            origin="https://jira.example.test",
+            authorization="Bearer secret-token-value",
+            auth_mode="bearer",
+            rest_api_version="auto",
+            transport="native",
+            curl_executable="/usr/bin/curl",
+            request_timeout_seconds=30,
+            default_max_results=25,
+        )
+        transport = AutoDataCenterTransport()
+        client = JiraClient(auth, native_transport=transport)
+
+        result = JiraOperations(client).transition_issue(
+            "ABC-1", "21", confirm=True
+        )
+
+        assert result["ok"] is True
+        assert [call[:2] for call in transport.calls] == [
+            ("POST", "/rest/api/2/issue/ABC-1/transitions")
+        ]
+
     @pytest.mark.parametrize(
         ("key", "transition_id", "expected_status"),
         [
@@ -181,6 +230,22 @@ class TestTransitionReconciliation:
                 JiraError("write_ambiguous"),
                 {"key": "ABC-1", "fields": {"status": {"name": "To Do"}}},
             ]
+        )
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).transition_issue(
+                "ABC-1", "31", confirm=True, expected_status="Done"
+            )
+
+        assert caught.value.category == "write_ambiguous"
+        assert [call[0] for call in client.calls] == ["POST", "GET"]
+
+    @pytest.mark.parametrize("read_category", ["authentication", "transient"])
+    def test_failed_reconciliation_preserves_original_write_ambiguity(
+        self, read_category
+    ):
+        client = FakeClient(
+            [JiraError("write_ambiguous"), JiraError(read_category)]
         )
 
         with pytest.raises(JiraError) as caught:

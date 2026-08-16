@@ -100,6 +100,21 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_get_project": {
+        "name": "jira_get_project",
+        "description": (
+            "Fetch one Jira project's issue types, components and versions — "
+            "the metadata required to create or edit an issue in it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "minLength": 1, "maxLength": 64}
+            },
+            "required": ["key"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -136,6 +151,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         "jira_get_issue": {"key"},
         "jira_add_comment": {"key", "body", "dry_run"},
         "jira_list_fields": {"custom_only", "max_results"},
+        "jira_get_project": {"key"},
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -147,6 +163,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_get_issue": operations.get_issue,
             "jira_add_comment": operations.add_comment,
             "jira_list_fields": operations.list_fields,
+            "jira_get_project": operations.get_project,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

@@ -38,6 +38,7 @@ _GITLAB_URL = re.compile(
     r"https?://[^\s|\]>)\"',]*gitlab[^\s|\]>)\"',]*", re.I
 )
 _ISSUE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}-[1-9][0-9]{0,19}$")
+_PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,60}$")
 _MAX_ADF_CHARS = 100_000
 _MAX_ADF_NODES = 10_000
 _MAX_ADF_DEPTH = 32
@@ -282,6 +283,55 @@ class JiraOperations:
                 else None
             ),
         )
+
+    def _named_entries(self, raw: Any, *, extra: tuple[str, ...] = ()) -> list:
+        """Normalize a bounded Jira list of named metadata objects."""
+        if not isinstance(raw, list):
+            return []
+        entries = []
+        for item in raw[:200]:
+            if not isinstance(item, Mapping):
+                continue
+            identifier = _bounded_string(item.get("id"), 128)
+            if not identifier:
+                continue
+            entry = {
+                "id": self._redact(identifier) or "",
+                "name": self._redact(_bounded_string(item.get("name"), 255)) or "",
+            }
+            for flag in extra:
+                if flag in item and type(item[flag]) is not bool:
+                    raise JiraError("invalid_remote_data")
+                entry[flag] = item.get(flag, False)
+            entries.append(entry)
+        return entries
+
+    def get_project(self, key: str) -> dict[str, Any]:
+        """Fetch the project metadata needed to compose a valid issue."""
+        if not isinstance(key, str) or _PROJECT_KEY.fullmatch(key) is None:
+            raise JiraError("invalid_input")
+        payload = self.client.rest_json("GET", f"project/{key}")
+        if not isinstance(payload, Mapping):
+            raise JiraError("invalid_remote_data")
+        if "archived" in payload and type(payload["archived"]) is not bool:
+            raise JiraError("invalid_remote_data")
+        return {
+            "key": self._redact(_bounded_string(payload.get("key"), 128)) or "",
+            "name": self._redact(_bounded_string(payload.get("name"), 255)) or "",
+            "id": self._redact(_bounded_string(payload.get("id"), 128)) or "",
+            "project_type": self._redact(
+                _bounded_string(payload.get("projectTypeKey"), 64)
+            )
+            or "",
+            "archived": payload.get("archived", False),
+            "issue_types": self._named_entries(
+                payload.get("issueTypes"), extra=("subtask",)
+            ),
+            "components": self._named_entries(payload.get("components")),
+            "versions": self._named_entries(
+                payload.get("versions"), extra=("released",)
+            ),
+        }
 
     def _normalize_issue(self, raw: Any) -> dict[str, Any]:
         if not isinstance(raw, dict) or not isinstance(raw.get("fields"), dict):

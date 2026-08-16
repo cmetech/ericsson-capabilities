@@ -116,6 +116,8 @@ class BoundedClient:
         json_body: Any | None = None,
         deadline: float | None = None,
         raise_on_status: bool = True,
+        content: Any | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> Response:
         """Issue one request under retry, deadline and breaker policy.
 
@@ -152,6 +154,10 @@ class BoundedClient:
                         remaining, self._request_timeout_seconds
                     ),
                 }
+                if content is not None:
+                    request_options["content"] = content
+                if extra_headers is not None:
+                    request_options["extra_headers"] = extra_headers
                 if controlled_request is None:
                     response = self._transport.request(
                         method, path, **request_options

@@ -13,9 +13,27 @@ class FakeTransport:
         self.calls = []
 
     def request(
-        self, method, path, *, params, json_body, timeout_seconds, control=None
+        self,
+        method,
+        path,
+        *,
+        params,
+        json_body,
+        timeout_seconds,
+        content=None,
+        extra_headers=None,
+        control=None,
     ):
-        self.calls.append((method, path))
+        self.calls.append(
+            {
+                "method": method,
+                "path": path,
+                "params": params,
+                "json_body": json_body,
+                "content": content,
+                "extra_headers": extra_headers,
+            }
+        )
         self.control = control
         item = self.script.pop(0)
         if isinstance(item, Exception):
@@ -175,6 +193,45 @@ class TestMethodAwareRetry:
             client.request("GET", "/api/v4/projects")
         assert excinfo.value.category == "deadline"
         assert clock.slept == []
+        assert len(transport.calls) == 1
+
+
+class TestRawBodyPassthrough:
+    def test_unset_raw_options_preserve_legacy_transport_compatibility(self):
+        class LegacyTransport:
+            def request(self, method, path, *, params, json_body, timeout_seconds):
+                return Response(200, {}, b"{}")
+
+            def close(self):
+                pass
+
+        response = BoundedClient(LegacyTransport(), service="arm").request(
+            "GET", "/artifactory/api/system/ping"
+        )
+        assert response.status == 200
+
+    def test_content_and_headers_reach_the_transport(self):
+        transport = FakeTransport([Response(200, {}, b"{}")])
+        client = BoundedClient(transport, service="arm")
+        client.request(
+            "POST",
+            "/artifactory/api/search/aql",
+            content=b"items.find({})",
+            extra_headers={"Content-Type": "text/plain"},
+        )
+        call = transport.calls[0]
+        assert call["content"] == b"items.find({})"
+        assert call["extra_headers"] == {"Content-Type": "text/plain"}
+
+    def test_a_raw_body_write_is_still_not_retried(self):
+        """A raw body must not bypass method-aware write uncertainty."""
+        transport = FakeTransport(
+            [Response(503, {}, b""), Response(200, {}, b"{}")]
+        )
+        client = BoundedClient(transport, service="arm")
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("PUT", "/artifactory/repo/a.tgz", content=b"bytes")
+        assert excinfo.value.category == "write_ambiguous"
         assert len(transport.calls) == 1
 
 

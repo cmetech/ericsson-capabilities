@@ -224,3 +224,114 @@ class TestHttpxTransport:
         assert excinfo.value.category == "cancelled"
         assert excinfo.value.outcome_uncertain is False
         assert dispatched == []
+
+
+class TestRawBodies:
+    def test_content_is_sent_verbatim(self):
+        seen = {}
+
+        def handler(request):
+            seen["body"] = request.content
+            seen["content_type"] = request.headers.get("content-type")
+            return httpx.Response(200, json={"ok": True})
+
+        _transport(handler).request(
+            "POST",
+            "/api/v4/projects",
+            params=None,
+            json_body=None,
+            timeout_seconds=5,
+            content=b'items.find({"repo":"x"})',
+            extra_headers={"Content-Type": "text/plain"},
+        )
+        assert seen["body"] == b'items.find({"repo":"x"})'
+        assert seen["content_type"] == "text/plain"
+
+    def test_extra_headers_do_not_leak_into_later_requests(self):
+        """Per-request headers must not mutate the shared client header map."""
+        seen = []
+
+        def handler(request):
+            seen.append(request.headers.get("content-type"))
+            return httpx.Response(200, json={})
+
+        transport = _transport(handler)
+        transport.request(
+            "POST",
+            "/api/v4/projects",
+            params=None,
+            json_body=None,
+            timeout_seconds=5,
+            content=b"x",
+            extra_headers={"Content-Type": "text/plain"},
+        )
+        transport.request(
+            "GET", "/api/v4/projects", params=None, json_body=None,
+            timeout_seconds=5,
+        )
+        assert seen[0] == "text/plain"
+        assert seen[1] != "text/plain"
+
+    def test_content_and_json_body_together_are_rejected(self):
+        def handler(request):  # pragma: no cover - must never be reached
+            raise AssertionError("request should not have been issued")
+
+        with pytest.raises(ConnectorError) as excinfo:
+            _transport(handler).request(
+                "PUT",
+                "/api/v4/projects",
+                params=None,
+                json_body={"a": 1},
+                timeout_seconds=5,
+                content=b"bytes",
+            )
+        assert excinfo.value.category == "invalid_input"
+
+    def test_a_file_object_streams_without_being_read_into_memory(self, tmp_path):
+        source = tmp_path / "artifact.bin"
+        source.write_bytes(b"z" * 4096)
+        seen = {}
+
+        def handler(request):
+            seen["body"] = request.content
+            return httpx.Response(201, json={"ok": True})
+
+        with source.open("rb") as handle:
+            _transport(handler).request(
+                "PUT",
+                "/api/v4/projects",
+                params=None,
+                json_body=None,
+                timeout_seconds=5,
+                content=handle,
+            )
+        assert seen["body"] == b"z" * 4096
+
+    def test_content_and_headers_flow_through_controlled_request(self):
+        seen = {}
+
+        def handler(request):
+            seen["body"] = request.content
+            seen["checksum"] = request.headers.get("x-checksum-sha256")
+            return httpx.Response(201, json={})
+
+        control = RequestControl(
+            deadline=10.0,
+            cancel_check=lambda: False,
+            clock=lambda: 0.0,
+            service="arm",
+        )
+        _transport(handler).request_with_controls(
+            "PUT",
+            "/api/v4/projects",
+            params=None,
+            json_body=None,
+            timeout_seconds=5,
+            content=b"artifact-bytes",
+            extra_headers={"X-Checksum-Sha256": "abc"},
+            control=control,
+        )
+        assert seen == {
+            "body": b"artifact-bytes",
+            "checksum": "abc",
+        }

@@ -181,6 +181,8 @@ class HttpxTransport:
         params: Mapping[str, Any] | None,
         json_body: Any | None,
         timeout_seconds: float,
+        content: Any | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> Response:
         return self.request_with_controls(
             method,
@@ -188,6 +190,8 @@ class HttpxTransport:
             params=params,
             json_body=json_body,
             timeout_seconds=timeout_seconds,
+            content=content,
+            extra_headers=extra_headers,
             control=None,
         )
 
@@ -200,8 +204,15 @@ class HttpxTransport:
         json_body: Any | None,
         timeout_seconds: float,
         control: RequestControl | None,
+        content: Any | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> Response:
         self._validate_path(path)
+        if content is not None and json_body is not None:
+            raise ConnectorError(
+                "invalid_input",
+                detail="content and json_body are mutually exclusive",
+            )
         if control is not None:
             timeout_seconds = min(
                 timeout_seconds,
@@ -220,6 +231,8 @@ class HttpxTransport:
                 path,
                 params=params,
                 json=json_body,
+                content=content,
+                headers=dict(extra_headers) if extra_headers else None,
                 timeout=timeout,
             )
         except (TypeError, ValueError, OverflowError, httpx.InvalidURL):

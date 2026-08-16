@@ -434,6 +434,29 @@ def test_native_transport_decodes_raw_deflate_split_after_one_byte():
     assert result.body == b'{"raw":true}'
 
 
+def test_native_transport_decodes_raw_deflate_with_zlib_header_collision():
+    raw_deflate = bytes.fromhex("78 01 00 fe ff 41 01 00 00 ff ff")
+
+    class RawDeflateStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield raw_deflate[:1]
+            yield raw_deflate[1:2]
+            yield raw_deflate[2:6]
+            yield raw_deflate[6:]
+
+    def send(_request):
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "deflate"},
+            stream=RawDeflateStream(),
+        )
+
+    native = NativeTransport(auth(), http_transport=httpx.MockTransport(send))
+    result = native.request("GET", "/rest/api/3/search", timeout_seconds=7)
+
+    assert result.body == b"A"
+
+
 def test_native_transport_accepts_fragmented_raw_deflate_at_exact_decoded_capacity():
     payload = b"x" * (1024 * 1024)
     compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)

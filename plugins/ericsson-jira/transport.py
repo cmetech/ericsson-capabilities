@@ -36,6 +36,7 @@ _MAX_HEADER_BYTES = 64 * 1024
 _MAX_STDERR_BYTES = 64 * 1024
 _MAX_URL_BYTES = 8192
 _MAX_DECODE_CHUNK_BYTES = 64 * 1024
+_MAX_DEFLATE_PROBE_BYTES = 64 * 1024
 _SAFE_RESPONSE_HEADERS = frozenset(
     {"content-type", "retry-after", "server", "cf-ray", "location"}
 )
@@ -145,12 +146,91 @@ def _try_zlib_decompress(decoder, data: bytes, maximum: int) -> bytes | None:
         return None
 
 
-def _is_zlib_wrapped(prefix: bytes) -> bool:
-    compression_method, flags = prefix
-    return (
-        compression_method & 0x0F == 8
-        and compression_method >> 4 <= 7
-        and ((compression_method << 8) | flags) % 31 == 0
+class _DeflateCandidate:
+    def __init__(self, window_bits: int) -> None:
+        self.decoder = zlib.decompressobj(window_bits)
+        self.body = bytearray()
+        self.invalid = False
+        self.probe_exceeded = False
+
+    def feed(
+        self,
+        data,
+        *,
+        control: RequestControl | None,
+        cancel_check: Callable[[], bool],
+    ) -> None:
+        pending = data
+        while pending and not self.invalid and not self.probe_exceeded:
+            _remaining_control(control, outcome_uncertain=True)
+            if cancel_check():
+                raise _JiraTransportFailure("cancelled", outcome_uncertain=True)
+            remaining = _MAX_DEFLATE_PROBE_BYTES - len(self.body)
+            maximum = min(_MAX_DECODE_CHUNK_BYTES, remaining + 1)
+            decoded = _try_zlib_decompress(self.decoder, pending, maximum)
+            if decoded is None:
+                self.invalid = True
+                self.body.clear()
+                return
+            next_pending = self.decoder.unconsumed_tail
+            if self.decoder.unused_data:
+                self.invalid = True
+                self.body.clear()
+                return
+            self.body.extend(decoded)
+            if len(self.body) > _MAX_DEFLATE_PROBE_BYTES:
+                self.probe_exceeded = True
+                return
+            if not next_pending:
+                return
+            if not decoded and len(next_pending) >= len(pending):
+                self.invalid = True
+                self.body.clear()
+                return
+            pending = next_pending
+
+
+def _feed_deflate_candidates(
+    candidates: tuple[_DeflateCandidate, _DeflateCandidate],
+    data,
+    *,
+    control: RequestControl | None,
+    cancel_check: Callable[[], bool],
+) -> _DeflateCandidate | None:
+    for candidate in candidates:
+        candidate.feed(
+            data,
+            control=control,
+            cancel_check=cancel_check,
+        )
+    valid = [candidate for candidate in candidates if not candidate.invalid]
+    if not valid:
+        raise _JiraTransportFailure(
+            "invalid_remote_data", outcome_uncertain=True
+        )
+    if len(valid) == 1:
+        return valid[0]
+    if any(candidate.probe_exceeded for candidate in valid):
+        raise _JiraTransportFailure(
+            "invalid_remote_data", outcome_uncertain=True
+        )
+    return None
+
+
+def _finish_deflate_candidates(
+    candidates: tuple[_DeflateCandidate, _DeflateCandidate],
+) -> _DeflateCandidate:
+    complete = [
+        candidate
+        for candidate in candidates
+        if not candidate.invalid and candidate.decoder.eof
+    ]
+    if len(complete) == 1:
+        return complete[0]
+    if len(complete) == 2 and complete[0].body == complete[1].body:
+        return complete[0]
+    raise _JiraTransportFailure(
+        "invalid_remote_data", outcome_uncertain=True
     )
 
 
@@ -181,9 +261,14 @@ def _read_native_body(
 
     encoding = encodings[0] if encodings else None
     decoder = None
-    deflate_prefix = bytearray()
+    deflate_candidates = None
     if encoding == "gzip":
         decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
+    elif encoding == "deflate":
+        deflate_candidates = (
+            _DeflateCandidate(zlib.MAX_WBITS),
+            _DeflateCandidate(-zlib.MAX_WBITS),
+        )
 
     body = bytearray()
     raw_chunks = iter(response.iter_raw())
@@ -197,21 +282,19 @@ def _read_native_body(
             break
 
         segments = (raw_chunk,)
-        if encoding == "deflate" and decoder is None:
-            needed = 2 - len(deflate_prefix)
-            deflate_prefix.extend(raw_chunk[:needed])
-            if len(deflate_prefix) < 2:
-                continue
-            decoder = zlib.decompressobj(
-                zlib.MAX_WBITS
-                if _is_zlib_wrapped(bytes(deflate_prefix))
-                else -zlib.MAX_WBITS
+        if deflate_candidates is not None:
+            chosen = _feed_deflate_candidates(
+                deflate_candidates,
+                raw_chunk,
+                control=control,
+                cancel_check=cancel_check,
             )
-            remainder = memoryview(raw_chunk)[needed:]
-            segments = (bytes(deflate_prefix),)
-            if remainder:
-                segments += (remainder,)
-            deflate_prefix.clear()
+            if chosen is None:
+                continue
+            decoder = chosen.decoder
+            body = chosen.body
+            deflate_candidates = None
+            segments = (decoder.unconsumed_tail,)
 
         for segment in segments:
             pending = segment
@@ -255,10 +338,10 @@ def _read_native_body(
                     )
                 pending = next_pending
 
-    if encoding == "deflate" and decoder is None:
-        raise _JiraTransportFailure(
-            "invalid_remote_data", outcome_uncertain=True
-        )
+    if deflate_candidates is not None:
+        chosen = _finish_deflate_candidates(deflate_candidates)
+        decoder = chosen.decoder
+        body = chosen.body
     if decoder is not None and not decoder.eof:
         raise _JiraTransportFailure(
             "invalid_remote_data", outcome_uncertain=True

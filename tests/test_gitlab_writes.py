@@ -938,8 +938,54 @@ def test_ambiguous_commit_transport_is_never_retried():
                 actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
             )
     assert route.call_count == 1
-    assert getattr(caught.value, "category", None) == "transient"
-    assert "unknown" not in str(caught.value)
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+    assert "outcome unknown" not in str(caught.value)
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_retryable_commit_response_is_ambiguous_and_never_retried(status):
+    operations = _operations(max_retries=4)
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        route = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(status, text="private uncertain response")
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/safe",
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+    assert "private" not in str(caught.value)
+
+
+def test_ambiguous_commit_body_transport_is_never_retried():
+    class FailingBody(httpx.SyncByteStream):
+        def __iter__(self):
+            raise httpx.ReadTimeout("private body outcome unknown")
+            yield b""  # pragma: no cover - keeps this a generator
+
+    operations = _operations(max_retries=4)
+    with respx.mock:
+        _mock_project()
+        _head_file("x.txt", status=404)
+        route = respx.post(f"{PROJECT_API}/repository/commits").mock(
+            return_value=httpx.Response(201, stream=FailingBody())
+        )
+        with pytest.raises(Exception) as caught:
+            operations.commit_changes(
+                "42",
+                branch="feature/safe",
+                commit_message="Safe",
+                actions=[{"action": "create", "file_path": "x.txt", "content": "x"}],
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+    assert "private" not in str(caught.value)
 
 
 def test_commit_partial_response_reconciles_only_proven_commit_identity():
@@ -1325,7 +1371,7 @@ def test_merge_request_partial_response_reconciles_by_iid_and_ambiguous_transpor
             )
     assert reconciled["iid"] == 7
     assert post.call_count == 2
-    assert getattr(caught.value, "category", None) == "transient"
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
     assert "private" not in str(caught.value)
 
 

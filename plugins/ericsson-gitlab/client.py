@@ -18,12 +18,16 @@ import httpx
 
 if __package__:
     from ._common.client import BoundedClient
-    from ._common.errors import ConnectorError, category_for_status
+    from ._common.errors import (
+        RETRYABLE_STATUSES,
+        ConnectorError,
+        category_for_status,
+    )
     from ._common.transport import HttpxTransport
     from .models import GitLabAuth, GitLabError
 else:
     from _common.client import BoundedClient
-    from _common.errors import ConnectorError, category_for_status
+    from _common.errors import RETRYABLE_STATUSES, ConnectorError, category_for_status
     from _common.transport import HttpxTransport
     from models import GitLabAuth, GitLabError
 
@@ -58,10 +62,22 @@ class _ClientCompatibilityAdapter:
     def close(self) -> None:
         self._bounded.close()
 
-    def stream(self, *args, **kwargs):
+    @contextmanager
+    def stream(self, method: str, *args, **kwargs):
         if self._raw_client is None:
             raise RuntimeError("transport does not expose a streaming client")
-        return self._raw_client.stream(*args, **kwargs)
+        mutating = method.upper() not in {"GET", "HEAD"}
+        try:
+            with self._raw_client.stream(method, *args, **kwargs) as response:
+                if mutating and response.status_code in RETRYABLE_STATUSES:
+                    raise GitLabError("write_ambiguous")
+                yield response
+        except GitLabError:
+            raise
+        except (httpx.TimeoutException, httpx.TransportError):
+            if mutating:
+                raise GitLabError("write_ambiguous") from None
+            raise
 
 
 class GitLabClient:
@@ -143,7 +159,8 @@ class GitLabClient:
         return f"GitLabClient(origin={self.auth.origin!r})"
 
     def close(self) -> None:
-        self._client.close()
+        with _as_gitlab_error():
+            self._client.close()
 
     def operation_deadline(self) -> float:
         return self._client.operation_deadline()

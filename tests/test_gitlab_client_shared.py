@@ -30,6 +30,15 @@ class FakeTransport:
         pass
 
 
+class FailingCloseTransport(FakeTransport):
+    def close(self):
+        raise ConnectorError(
+            "authentication",
+            service="gitlab",
+            detail="private-close-detail",
+        )
+
+
 class FakeClock:
     def __init__(self):
         self.now = 0.0
@@ -88,6 +97,17 @@ def test_shared_error_type_never_escapes_to_the_host():
     assert not isinstance(excinfo.value, ConnectorError)
     assert excinfo.value.category == "authentication"
     assert excinfo.value.remediation
+
+
+def test_shared_error_type_never_escapes_from_close():
+    auth = GitLabAuth(origin="https://gitlab.test", pat="tok", tls_context=None)
+    client = GitLabClient(auth, transport=FailingCloseTransport([]))
+    with pytest.raises(GitLabError) as excinfo:
+        client.close()
+    assert not isinstance(excinfo.value, ConnectorError)
+    assert excinfo.value.category == "authentication"
+    assert excinfo.value.remediation
+    assert "private-close-detail" not in str(excinfo.value)
 
 
 def test_bounded_attributes_survive_for_operations_py():

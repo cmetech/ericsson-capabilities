@@ -890,6 +890,111 @@ class JiraOperations:
             ),
         )
 
+    def list_link_types(self) -> dict[str, Any]:
+        """List every configured Jira issue-link type, bounded to 200 items.
+
+        The type names and both directional phrasings are deployment-specific,
+        so callers must discover them rather than guess before linking issues.
+        A malformed response is refused as remote data rather than exposing a
+        partial or misleading set of link semantics.
+        """
+        payload = self.client.rest_json("GET", "issueLinkType")
+        if not isinstance(payload, Mapping) or not isinstance(
+            payload.get("issueLinkTypes"), list
+        ):
+            raise JiraError("invalid_remote_data")
+
+        normalized: list[dict[str, str]] = []
+        for item in payload["issueLinkTypes"]:
+            if not isinstance(item, Mapping):
+                raise JiraError("invalid_remote_data")
+            identifier = _bounded_string(item.get("id"), 128)
+            name = _bounded_string(item.get("name"), 255)
+            inward = _bounded_string(item.get("inward"), 255)
+            outward = _bounded_string(item.get("outward"), 255)
+            if not identifier or not name or not inward or not outward:
+                raise JiraError("invalid_remote_data")
+            normalized.append(
+                {
+                    "id": self._redact(identifier) or "",
+                    "name": self._redact(name) or "",
+                    "inward": self._redact(inward) or "",
+                    "outward": self._redact(outward) or "",
+                }
+            )
+
+        total = len(normalized)
+        truncated = total > 200
+        return result_envelope(
+            normalized[:200],
+            total=total,
+            truncated=truncated,
+            hint=(
+                "More valid link types exist. This result contains the first 200."
+                if truncated
+                else None
+            ),
+        )
+
+    def link_issues(
+        self,
+        inward: str,
+        outward: str,
+        link_type: str,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Create one directional link between two Jira issues.
+
+        This write is intentionally neither retried nor reconciled after an
+        ambiguous result. An existing identical link makes a later read
+        non-probative: it cannot show whether this invocation created it.
+        """
+        if (
+            type(inward) is not str
+            or _ISSUE_KEY.fullmatch(inward) is None
+            or type(outward) is not str
+            or _ISSUE_KEY.fullmatch(outward) is None
+            or inward == outward
+        ):
+            raise JiraError("invalid_input")
+        if type(link_type) is not str or not link_type.strip() or len(link_type) > 255:
+            raise JiraError("invalid_input")
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise JiraError("invalid_input")
+        if dry_run and confirm:
+            raise JiraError("invalid_input")
+        if not dry_run and not confirm:
+            raise JiraError("confirmation_required")
+
+        execute = require_explicit_intent(
+            dry_run=dry_run,
+            confirm=confirm,
+            action=f"a Jira link from {inward} to {outward}",
+        )
+        result = {
+            "ok": True,
+            "dry_run": not execute,
+            "inward": inward,
+            "outward": outward,
+            "link_type": link_type,
+        }
+        if not execute:
+            return result
+
+        body = {
+            "type": {"name": link_type},
+            "inwardIssue": {"key": inward},
+            "outwardIssue": {"key": outward},
+        }
+        self.client.rest_json_versioned_mutation(
+            "POST",
+            "issueLink",
+            json_body_by_version={"3": body, "2": body},
+        )
+        return result
+
     def search_assignable_users(
         self, project: str, query: str = "", *, max_results: int = 25
     ) -> dict[str, Any]:

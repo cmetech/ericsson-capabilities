@@ -260,6 +260,38 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_list_link_types": {
+        "name": "jira_list_link_types",
+        "description": (
+            "List the issue link types configured on this Jira instance, "
+            "including their inward and outward directional phrasings."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    "jira_link_issues": {
+        "name": "jira_link_issues",
+        "description": (
+            "Link two Jira issues. Direction is not symmetric: for type "
+            "'Blocks', the inward issue is blocked by the outward issue. "
+            "Use jira_list_link_types first. Requires dry_run or confirm."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "inward": {"type": "string", "minLength": 3, "maxLength": 128},
+                "outward": {"type": "string", "minLength": 3, "maxLength": 128},
+                "link_type": {"type": "string", "minLength": 1, "maxLength": 255},
+                "dry_run": {"type": "boolean", "default": False},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["inward", "outward", "link_type"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -323,6 +355,14 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "dry_run",
             "confirm",
         },
+        "jira_list_link_types": set(),
+        "jira_link_issues": {
+            "inward",
+            "outward",
+            "link_type",
+            "dry_run",
+            "confirm",
+        },
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -342,6 +382,8 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_update_fields": operations.update_fields,
             "jira_manage_labels": operations.manage_labels,
             "jira_create_issue": operations.create_issue,
+            "jira_list_link_types": operations.list_link_types,
+            "jira_link_issues": operations.link_issues,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

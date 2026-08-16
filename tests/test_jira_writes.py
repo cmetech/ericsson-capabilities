@@ -1503,3 +1503,335 @@ def test_create_issue_requires_matching_host_admission_before_configuration(monk
     )
     assert accepted == {"success": True, "result": {"ok": True}}
     assert calls == ["jira_create_issue"]
+
+
+class TestLinkTypes:
+    def test_lists_all_valid_link_types_with_bounded_metadata(self):
+        client = FakeClient(
+            [
+                {
+                    "issueLinkTypes": [
+                        {
+                            "id": "10000",
+                            "name": "Blocks",
+                            "inward": "is blocked by",
+                            "outward": "blocks",
+                        },
+                        {
+                            "id": "10001",
+                            "name": "Relates",
+                            "inward": "relates to",
+                            "outward": "relates to",
+                        },
+                    ]
+                }
+            ]
+        )
+
+        result = JiraOperations(client).list_link_types()
+
+        assert client.calls == [("GET", "issueLinkType", {})]
+        assert result["items"] == [
+            {
+                "id": "10000",
+                "name": "Blocks",
+                "inward": "is blocked by",
+                "outward": "blocks",
+            },
+            {
+                "id": "10001",
+                "name": "Relates",
+                "inward": "relates to",
+                "outward": "relates to",
+            },
+        ]
+        assert result["total"] == 2
+        assert result["truncated"] is False
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            [],
+            {},
+            {"issueLinkTypes": {}},
+            {"issueLinkTypes": ["not an object"]},
+            {
+                "issueLinkTypes": [
+                    {
+                        "id": "10000",
+                        "name": "Blocks",
+                        "inward": "is blocked by",
+                        "outward": None,
+                    }
+                ]
+            },
+        ],
+    )
+    def test_malformed_remote_link_types_fail_closed(self, payload):
+        client = FakeClient([payload])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).list_link_types()
+
+        assert caught.value.category == "invalid_remote_data"
+        assert client.calls == [("GET", "issueLinkType", {})]
+
+    def test_redacts_all_remote_link_type_strings_including_identifier(self):
+        client = FakeClient(
+            [
+                {
+                    "issueLinkTypes": [
+                        {
+                            "id": "secret-token-value",
+                            "name": "secret-token-value blocks",
+                            "inward": "is secret-token-value blocked by",
+                            "outward": "secret-token-value blocks",
+                        }
+                    ]
+                }
+            ]
+        )
+
+        result = JiraOperations(client).list_link_types()
+
+        assert result["items"] == [
+            {
+                "id": "<redacted>",
+                "name": "<redacted> blocks",
+                "inward": "is <redacted> blocked by",
+                "outward": "<redacted> blocks",
+            }
+        ]
+        assert "secret-token-value" not in repr(result)
+
+    def test_caps_items_at_200_but_reports_all_normalized_entries(self):
+        link_types = [
+            {
+                "id": str(index),
+                "name": f"Type {index}",
+                "inward": f"inward {index}",
+                "outward": f"outward {index}",
+            }
+            for index in range(201)
+        ]
+        client = FakeClient([{"issueLinkTypes": link_types}])
+
+        result = JiraOperations(client).list_link_types()
+
+        assert len(result["items"]) == 200
+        assert result["total"] == 201
+        assert result["truncated"] is True
+        assert "first 200" in result["hint"]
+
+
+class TestLinkIssues:
+    def test_neither_intent_flag_is_refused_before_a_request(self):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).link_issues("ABC-1", "ABC-2", "Blocks")
+
+        assert caught.value.category == "confirmation_required"
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        ("inward", "outward", "link_type", "dry_run", "confirm"),
+        [
+            (StringSubclass("ABC-1"), "ABC-2", "Blocks", False, True),
+            ("ABC-1", StringSubclass("ABC-2"), "Blocks", False, True),
+            ("ABC-1", "ABC-2", StringSubclass("Blocks"), False, True),
+            ("ABC-1", "ABC-2", "Blocks", 1, False),
+            ("ABC-1", "ABC-2", "Blocks", False, 1),
+            ("ABC-1", "ABC-2", "Blocks", True, True),
+            ("ABC-1", "ABC-1", "Blocks", False, True),
+            ("not a key", "ABC-2", "Blocks", False, True),
+            ("ABC-1", "ABC-2", "   ", False, True),
+            ("ABC-1", "ABC-2", "x" * 256, False, True),
+        ],
+    )
+    def test_invalid_arguments_are_rejected_before_any_request(
+        self, inward, outward, link_type, dry_run, confirm
+    ):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).link_issues(
+                inward,
+                outward,
+                link_type,
+                dry_run=dry_run,
+                confirm=confirm,
+            )
+
+        assert caught.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_dry_run_returns_only_caller_arguments_without_a_request(self):
+        client = FakeClient([])
+
+        result = JiraOperations(client).link_issues(
+            "ABC-1", "ABC-2", "Blocks", dry_run=True
+        )
+
+        assert result == {
+            "ok": True,
+            "dry_run": True,
+            "inward": "ABC-1",
+            "outward": "ABC-2",
+            "link_type": "Blocks",
+        }
+        assert client.calls == []
+
+    def test_confirm_uses_one_version_aware_post_and_returns_only_caller_arguments(self):
+        client = FakeClient([None])
+
+        result = JiraOperations(client).link_issues(
+            "ABC-1", "ABC-2", "Blocks", confirm=True
+        )
+
+        assert client.calls == [
+            (
+                "POST",
+                "issueLink",
+                {
+                    "json_body_by_version": {
+                        "3": {
+                            "type": {"name": "Blocks"},
+                            "inwardIssue": {"key": "ABC-1"},
+                            "outwardIssue": {"key": "ABC-2"},
+                        },
+                        "2": {
+                            "type": {"name": "Blocks"},
+                            "inwardIssue": {"key": "ABC-1"},
+                            "outwardIssue": {"key": "ABC-2"},
+                        },
+                    }
+                },
+            )
+        ]
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "inward": "ABC-1",
+            "outward": "ABC-2",
+            "link_type": "Blocks",
+        }
+
+    def test_ambiguous_link_creation_is_not_reconciled_or_retried(self):
+        client = FakeClient([JiraError("write_ambiguous")])
+
+        with pytest.raises(JiraError) as caught:
+            JiraOperations(client).link_issues(
+                "ABC-1", "ABC-2", "Blocks", confirm=True
+            )
+
+        assert caught.value.category == "write_ambiguous"
+        assert [call[:2] for call in client.calls] == [("POST", "issueLink")]
+
+
+@pytest.mark.parametrize("rest_api_version", ["auto", "2", "3"])
+def test_link_issues_performs_exactly_one_post_at_the_resolved_version(rest_api_version):
+    class LinkTransport:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, path, **kwargs):
+            self.calls.append((method, path, kwargs))
+            if path.endswith("/serverInfo"):
+                return TransportResponse(200, {}, b"{}")
+            return TransportResponse(204, {}, b"")
+
+        def close(self):
+            pass
+
+    auth = JiraAuth(
+        origin="https://jira.example.test",
+        authorization="Bearer secret-token-value",
+        auth_mode="bearer",
+        rest_api_version=rest_api_version,
+        transport="native",
+        curl_executable="/usr/bin/curl",
+        request_timeout_seconds=30,
+        default_max_results=25,
+    )
+    transport = LinkTransport()
+
+    result = JiraOperations(JiraClient(auth, native_transport=transport)).link_issues(
+        "ABC-1", "ABC-2", "Blocks", confirm=True
+    )
+
+    posts = [call for call in transport.calls if call[0] == "POST"]
+    expected_version = "3" if rest_api_version in {"auto", "3"} else "2"
+    assert [call[:2] for call in posts] == [
+        ("POST", f"/rest/api/{expected_version}/issueLink")
+    ]
+    assert posts[0][2]["json_body"] == {
+        "type": {"name": "Blocks"},
+        "inwardIssue": {"key": "ABC-1"},
+        "outwardIssue": {"key": "ABC-2"},
+    }
+    assert result["dry_run"] is False
+
+
+def test_link_issues_has_complete_schema_wiring_and_argument_bound_approval():
+    from jira_test_support import tools
+
+    schema = tools.SCHEMAS["jira_link_issues"]["parameters"]
+    assert schema["required"] == ["inward", "outward", "link_type"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == {
+        "inward", "outward", "link_type", "dry_run", "confirm"
+    }
+    assert tools.SCHEMAS["jira_list_link_types"]["parameters"] == {
+        "type": "object", "properties": {}, "additionalProperties": False
+    }
+
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    hook = context.hooks["pre_tool_call"]
+    first = hook(
+        "jira_link_issues",
+        {"inward": "ABC-1", "outward": "ABC-2", "link_type": "Blocks"},
+    )
+    second = hook(
+        "jira_link_issues",
+        {"inward": "ABC-1", "outward": "XYZ-9", "link_type": "Blocks"},
+    )
+
+    assert "jira_link_issues" in first["message"]
+    assert "ABC-1" in first["message"] and "ABC-2" in first["message"]
+    assert "Blocks" in first["message"]
+    assert first["rule_key"].startswith("jira_link_issues:")
+    assert first["rule_key"] != second["rule_key"]
+
+
+def test_link_issues_requires_matching_host_admission_before_configuration(monkeypatch):
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    calls = []
+    monkeypatch.setattr(
+        plugin.jira_tools,
+        "invoke",
+        lambda name, args, configuration, **options: calls.append(name) or {"ok": True},
+    )
+    handler = context.registrations["jira_link_issues"]["handler"]
+    args = {
+        "inward": "ABC-1",
+        "outward": "ABC-2",
+        "link_type": "Blocks",
+        "confirm": True,
+    }
+
+    refused = json.loads(handler(args))
+    assert refused["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
+
+    accepted = json.loads(
+        handler(args, tool_admission=_admission("jira_link_issues"))
+    )
+    assert accepted == {"success": True, "result": {"ok": True}}
+    assert calls == ["jira_link_issues"]

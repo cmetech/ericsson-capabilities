@@ -19,6 +19,7 @@ _WRITE_TOOLS = frozenset(
         "jira_update_fields",
         "jira_manage_labels",
         "jira_create_issue",
+        "jira_link_issues",
     }
 )
 _INVALID_APPROVAL_ARGS = "<invalid-approval-args>"
@@ -231,6 +232,10 @@ WRITE_APPROVALS = {
         f"Project: {_arg(a, 'project')}\n"
         f"Type: {_arg(a, 'issue_type')}\n"
         f"Summary: {_arg(a, 'summary')}"
+    ),
+    "jira_link_issues": lambda a: (
+        f"Link: {_arg(a, 'inward')} -> {_arg(a, 'outward')}\n"
+        f"Type: {_arg(a, 'link_type')}"
     ),
 }
 

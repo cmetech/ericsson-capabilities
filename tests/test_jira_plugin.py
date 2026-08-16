@@ -44,6 +44,8 @@ def test_descriptor_is_standalone_and_preserves_stable_public_identity():
         "jira_update_fields",
         "jira_manage_labels",
         "jira_create_issue",
+        "jira_list_link_types",
+        "jira_link_issues",
     ]
     assert "requires_env" not in manifest
     assert {field["id"] for field in descriptor["fields"]} >= {
@@ -162,6 +164,8 @@ def test_plugin_registers_stable_toolset_and_resolves_fresh_configuration(monkey
         "jira_update_fields",
         "jira_manage_labels",
         "jira_create_issue",
+        "jira_list_link_types",
+        "jira_link_issues",
     }
     assert {item["toolset"] for item in context.registrations.values()} == {
         "ericsson-jira"

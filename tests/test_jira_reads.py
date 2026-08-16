@@ -256,6 +256,8 @@ def test_tool_schemas_register_exact_bounded_public_surface_without_raw_fields()
         "jira_update_fields",
         "jira_manage_labels",
         "jira_create_issue",
+        "jira_list_link_types",
+        "jira_link_issues",
     }
     search = SCHEMAS["jira_search_issues"]["parameters"]
     assert search["additionalProperties"] is False

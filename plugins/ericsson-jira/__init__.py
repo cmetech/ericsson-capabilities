@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from . import tools as jira_tools
@@ -18,11 +19,94 @@ _WRITE_TOOLS = frozenset(
         "jira_update_fields",
     }
 )
+_INVALID_APPROVAL_ARGS = "<invalid-approval-args>"
+_MAX_APPROVAL_CANONICAL_BYTES = 131_072
+_MAX_APPROVAL_CANONICAL_DEPTH = 64
+_MAX_APPROVAL_CANONICAL_NODES = 12_000
+_MAX_APPROVAL_RENDERED_ARGUMENT = 256
+_MAX_APPROVAL_PREVIEW_STRING = 128
+
+
+class _InvalidApprovalArguments(Exception):
+    """Internal marker for values that cannot safely bind an approval."""
+
+
+def _canonical_approval_args(args) -> str:
+    """Return an exact bounded canonical form, or one invalid-input sentinel.
+
+    Valid tool arguments are JSON-shaped and fit the operation-level limits,
+    so a sorted compact encoding binds every argument byte-for-byte.  This
+    boundary runs before operation validation, however, and must also safely
+    absorb arbitrary Python objects, cycles, and pathological JSON shapes.
+    Those cannot reach a write: they use one deliberately non-specific
+    sentinel rather than serializing or exposing their caller content.
+    """
+
+    nodes = 0
+    active: set[int] = set()
+
+    def normalize(value, depth: int):
+        nonlocal nodes
+        nodes += 1
+        if (
+            nodes > _MAX_APPROVAL_CANONICAL_NODES
+            or depth > _MAX_APPROVAL_CANONICAL_DEPTH
+        ):
+            raise _InvalidApprovalArguments
+        if value is None or type(value) in {bool, int, str}:
+            if type(value) is str and len(value) > _MAX_APPROVAL_CANONICAL_BYTES:
+                raise _InvalidApprovalArguments
+            return value
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise _InvalidApprovalArguments
+            return value
+        if type(value) is dict:
+            identity = id(value)
+            if identity in active:
+                raise _InvalidApprovalArguments
+            active.add(identity)
+            try:
+                normalized = {}
+                for key, nested in value.items():
+                    if type(key) is not str:
+                        raise _InvalidApprovalArguments
+                    if len(key) > _MAX_APPROVAL_CANONICAL_BYTES:
+                        raise _InvalidApprovalArguments
+                    normalized[key] = normalize(nested, depth + 1)
+                return normalized
+            finally:
+                active.remove(identity)
+        if type(value) is list:
+            identity = id(value)
+            if identity in active:
+                raise _InvalidApprovalArguments
+            active.add(identity)
+            try:
+                return [normalize(nested, depth + 1) for nested in value]
+            finally:
+                active.remove(identity)
+        raise _InvalidApprovalArguments
+
+    try:
+        normalized = normalize(args, 0)
+        encoded = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+        if len(encoded.encode("utf-8")) > _MAX_APPROVAL_CANONICAL_BYTES:
+            raise _InvalidApprovalArguments
+        return encoded
+    except (Exception,):
+        return _INVALID_APPROVAL_ARGS
 
 
 def _arg(args: dict, name: str) -> str:
     """Render one argument for an approval prompt, safely and bounded."""
-    value = args.get(name) if isinstance(args, dict) else None
+    value = args.get(name) if type(args) is dict else None
     budget = 8
 
     def bounded(item, depth: int = 0):
@@ -30,24 +114,37 @@ def _arg(args: dict, name: str) -> str:
         budget -= 1
         if budget < 0 or depth > 4:
             return "<truncated>"
-        if item is None or type(item) in {bool, int, float}:
+        if item is None or type(item) in {bool, int}:
             return item
+        if type(item) is float:
+            return item if math.isfinite(item) else "<unsupported>"
         if type(item) is str:
-            return item[:128]
-        if isinstance(item, dict):
+            return (
+                item
+                if len(item) <= _MAX_APPROVAL_PREVIEW_STRING
+                else "<truncated>"
+            )
+        if type(item) is dict:
             normalized = {}
             for index, (key, nested) in enumerate(item.items()):
                 if index >= 8:
                     break
-                normalized[key[:128] if type(key) is str else "<invalid-key>"] = (
-                    bounded(nested, depth + 1)
-                )
+                normalized[
+                    key
+                    if type(key) is str and len(key) <= _MAX_APPROVAL_PREVIEW_STRING
+                    else "<invalid-key>"
+                ] = bounded(nested, depth + 1)
             return normalized
         if type(item) is list:
             return [bounded(nested, depth + 1) for nested in item[:8]]
         return "<unsupported>"
 
-    return json.dumps(bounded(value), ensure_ascii=True)[:512]
+    try:
+        return json.dumps(bounded(value), ensure_ascii=True, allow_nan=False)[
+            :_MAX_APPROVAL_RENDERED_ARGUMENT
+        ]
+    except Exception:
+        return '"<unrepresentable>"'
 
 
 WRITE_APPROVALS = {
@@ -178,16 +275,7 @@ def register(ctx) -> None:
         summarise = WRITE_APPROVALS.get(tool_name)
         if summarise is None:
             return None
-        try:
-            canonical_args = json.dumps(
-                args if isinstance(args, dict) else {},
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-                allow_nan=False,
-            )
-        except (TypeError, ValueError):
-            canonical_args = _arg({"args": args}, "args")
+        canonical_args = _canonical_approval_args(args)
         return {
             "action": "approve",
             "message": (

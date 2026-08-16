@@ -1,6 +1,7 @@
 """Connector-level contract: error shape, envelope shape, approval coverage."""
 
 import json
+import hashlib
 import importlib.util
 import sys
 import uuid
@@ -126,3 +127,73 @@ class TestApprovalCoverage:
         for name, summarise in jira_plugin.WRITE_APPROVALS.items():
             text = summarise({})
             assert isinstance(text, str) and text
+
+    def test_valid_write_arguments_have_stable_distinct_rule_keys_at_bounds(self):
+        plugin = _load_plugin()
+        ctx = FakeCtx()
+        plugin.register(ctx)
+        hook = ctx.hooks["pre_tool_call"]
+        comment = {
+            "key": "ABC-1",
+            "body": "x" * 32_000,
+            "dry_run": True,
+        }
+        update = {
+            "key": "ABC-1",
+            "fields": {"description": "x" * 65_000},
+            "confirm": True,
+        }
+        changed_update = {
+            "key": "ABC-1",
+            "fields": {"description": "x" * 64_999 + "y"},
+            "confirm": True,
+        }
+        unicode_update = {
+            "key": "ABC-1",
+            "fields": {"description": "😀" * 16_000},
+            "confirm": True,
+        }
+
+        comment_first = hook("jira_add_comment", comment)
+        comment_second = hook("jira_add_comment", dict(comment))
+        update_first = hook("jira_update_fields", update)
+        update_second = hook("jira_update_fields", changed_update)
+
+        assert comment_first["rule_key"] == comment_second["rule_key"]
+        assert update_first["rule_key"] != update_second["rule_key"]
+        assert (
+            plugin._canonical_approval_args(unicode_update)
+            != plugin._INVALID_APPROVAL_ARGS
+        )
+        assert comment["body"] not in comment_first["message"]
+        assert update["fields"]["description"] not in update_first["message"]
+
+    def test_invalid_approval_arguments_use_one_safe_deterministic_sentinel(self):
+        plugin = _load_plugin()
+        nested = []
+        for _ in range(1_000):
+            nested = [nested]
+        cyclic = []
+        cyclic.append(cyclic)
+        oversized = "caller-secret-should-not-appear-" + "x" * 200_000
+        invalid = [
+            {"key": "ABC-1", "fields": {"summary": nested}},
+            {"key": "ABC-1", "fields": {"summary": cyclic}},
+            {"key": "ABC-1", "fields": {"summary": oversized}},
+            {"key": "ABC-1", "fields": {"summary": object()}},
+        ]
+
+        canonical = [plugin._canonical_approval_args(value) for value in invalid]
+
+        assert canonical == [plugin._INVALID_APPROVAL_ARGS] * len(invalid)
+        ctx = FakeCtx()
+        plugin.register(ctx)
+        hook = ctx.hooks["pre_tool_call"]
+        expected_rule_key = "jira_update_fields:" + hashlib.sha256(
+            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
+        ).hexdigest()
+        for value in invalid:
+            request = hook("jira_update_fields", value)
+            assert request["rule_key"] == expected_rule_key
+            assert len(request["message"]) <= 600
+            assert "caller-secret-should-not-appear" not in request["message"]

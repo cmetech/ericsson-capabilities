@@ -208,3 +208,107 @@ class TestRaiseOnStatus:
             "GET", "/api/v4/projects", raise_on_status=False
         )
         assert response.status == 302
+
+
+class TestCircuitBreaker:
+    def test_opens_after_threshold_consecutive_failures(self):
+        client, transport, _clock = _client(
+            [Response(500, {}, b"")] * 6, max_retries=0, breaker_threshold=3
+        )
+        for _ in range(3):
+            with pytest.raises(ConnectorError):
+                client.request("GET", "/api/v4/projects")
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/projects")
+        assert excinfo.value.category == "circuit_open"
+        # The fourth call must be refused locally, not sent.
+        assert len(transport.calls) == 3
+
+    def test_success_resets_the_counter(self):
+        client, _transport, _clock = _client(
+            [
+                Response(500, {}, b""),
+                Response(500, {}, b""),
+                Response(200, {}, b"{}"),
+                Response(500, {}, b""),
+                Response(500, {}, b""),
+            ],
+            max_retries=0,
+            breaker_threshold=3,
+        )
+        for _ in range(2):
+            with pytest.raises(ConnectorError):
+                client.request("GET", "/api/v4/projects")
+        client.request("GET", "/api/v4/projects")
+        for _ in range(2):
+            with pytest.raises(ConnectorError):
+                client.request("GET", "/api/v4/projects")
+        # Counter restarted after the success, so still below threshold.
+        assert client._failures["/api/v4/projects"] == 2
+
+    def test_breaker_is_scoped_per_endpoint(self):
+        client, _transport, _clock = _client(
+            [Response(500, {}, b"")] * 4, max_retries=0, breaker_threshold=2
+        )
+        for _ in range(2):
+            with pytest.raises(ConnectorError):
+                client.request("GET", "/api/v4/projects")
+        # A different endpoint must still be reachable.
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/groups")
+        assert excinfo.value.category != "circuit_open"
+
+    def test_query_string_does_not_fragment_the_breaker_key(self):
+        client, _transport, _clock = _client(
+            [Response(500, {}, b"")] * 3, max_retries=0, breaker_threshold=2
+        )
+        for _ in range(2):
+            with pytest.raises(ConnectorError):
+                client.request("GET", "/api/v4/projects?page=1")
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/projects?page=2")
+        assert excinfo.value.category == "circuit_open"
+
+    def test_circuit_open_has_remediation(self):
+        client, _transport, _clock = _client(
+            [Response(500, {}, b"")] * 2, max_retries=0, breaker_threshold=1
+        )
+        with pytest.raises(ConnectorError):
+            client.request("GET", "/api/v4/projects")
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/projects")
+        assert excinfo.value.remediation
+
+    def test_client_errors_never_trip_the_breaker(self):
+        """A 404 answers the request; it is not evidence the service is
+        unwell. Counting them would open the circuit on healthy traffic that
+        merely asks about issues that do not exist."""
+        client, transport, _clock = _client(
+            [Response(404, {}, b"")] * 5, max_retries=0, breaker_threshold=2
+        )
+        for _ in range(5):
+            with pytest.raises(ConnectorError) as excinfo:
+                client.request("GET", "/api/v4/projects/999")
+            assert excinfo.value.category == "not_found"
+        assert len(transport.calls) == 5
+
+    def test_auth_failures_never_trip_the_breaker(self):
+        client, transport, _clock = _client(
+            [Response(401, {}, b"")] * 4, max_retries=0, breaker_threshold=2
+        )
+        for _ in range(4):
+            with pytest.raises(ConnectorError) as excinfo:
+                client.request("GET", "/api/v4/projects")
+            assert excinfo.value.category == "authentication"
+        assert len(transport.calls) == 4
+
+    def test_suppressed_status_errors_still_count_toward_the_breaker(self):
+        """raise_on_status=False must not blind the breaker to 5xx."""
+        client, _transport, _clock = _client(
+            [Response(500, {}, b"")] * 2, max_retries=0, breaker_threshold=2
+        )
+        for _ in range(2):
+            client.request("GET", "/api/v4/projects", raise_on_status=False)
+        with pytest.raises(ConnectorError) as excinfo:
+            client.request("GET", "/api/v4/projects", raise_on_status=False)
+        assert excinfo.value.category == "circuit_open"

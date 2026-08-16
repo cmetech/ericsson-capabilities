@@ -50,6 +50,11 @@ _REMEDIATION = {
         "{service} is rate limiting this client. It will retry automatically; "
         "if it persists, reduce how often this tool is called."
     ),
+    "circuit_open": (
+        "Repeated failures against {service} have tripped this connector's "
+        "circuit breaker, so further calls are being refused locally. Check "
+        "whether {service} is reachable and healthy, then retry."
+    ),
 }
 
 

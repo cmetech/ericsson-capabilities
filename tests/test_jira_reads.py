@@ -249,6 +249,7 @@ def test_tool_schemas_register_exact_bounded_read_surface_without_raw_fields():
         "jira_add_comment",
         "jira_list_fields",
         "jira_get_project",
+        "jira_list_transitions",
     }
     search = SCHEMAS["jira_search_issues"]["parameters"]
     assert search["additionalProperties"] is False

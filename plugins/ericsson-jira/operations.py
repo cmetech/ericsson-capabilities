@@ -333,6 +333,40 @@ class JiraOperations:
             ),
         }
 
+    def list_transitions(self, key: str) -> dict[str, Any]:
+        """List the workflow transitions currently available on an issue.
+
+        Transition IDs are workflow-specific and cannot be guessed, so this
+        is a hard prerequisite for jira_transition_issue.
+        """
+        if not isinstance(key, str) or _ISSUE_KEY.fullmatch(key) is None:
+            raise JiraError("invalid_input")
+        payload = self.client.rest_json("GET", f"issue/{key}/transitions")
+        if not isinstance(payload, Mapping) or not isinstance(
+            payload.get("transitions"), list
+        ):
+            raise JiraError("invalid_remote_data")
+        transitions = []
+        for item in payload["transitions"][:200]:
+            if not isinstance(item, Mapping):
+                continue
+            identifier = _bounded_string(item.get("id"), 128)
+            if not identifier:
+                continue
+            target = item.get("to")
+            transitions.append(
+                {
+                    "id": self._redact(identifier) or "",
+                    "name": self._redact(_bounded_string(item.get("name"), 255))
+                    or "",
+                    "to_status": self._redact(
+                        _name(target) if isinstance(target, Mapping) else None
+                    )
+                    or "",
+                }
+            )
+        return result_envelope(transitions, total=len(transitions))
+
     def _normalize_issue(self, raw: Any) -> dict[str, Any]:
         if not isinstance(raw, dict) or not isinstance(raw.get("fields"), dict):
             raise JiraError("invalid_remote_data")

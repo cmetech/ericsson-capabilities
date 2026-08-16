@@ -115,6 +115,22 @@ SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "jira_list_transitions": {
+        "name": "jira_list_transitions",
+        "description": (
+            "List the workflow transitions currently available on a Jira "
+            "issue. Required before transitioning: transition IDs are "
+            "workflow-specific and cannot be guessed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "minLength": 3, "maxLength": 128}
+            },
+            "required": ["key"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -152,6 +168,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         "jira_add_comment": {"key", "body", "dry_run"},
         "jira_list_fields": {"custom_only", "max_results"},
         "jira_get_project": {"key"},
+        "jira_list_transitions": {"key"},
     }
     if name not in allowed_arguments or not set(args).issubset(allowed_arguments[name]):
         raise JiraError("invalid_input")
@@ -164,6 +181,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             "jira_add_comment": operations.add_comment,
             "jira_list_fields": operations.list_fields,
             "jira_get_project": operations.get_project,
+            "jira_list_transitions": operations.list_transitions,
         }
         handler = handlers.get(name)
         return handler(**dict(args))

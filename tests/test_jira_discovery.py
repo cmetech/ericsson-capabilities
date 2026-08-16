@@ -152,6 +152,7 @@ class TestGetProject:
 
         assert excinfo.value.category == "invalid_remote_data"
 
+
     def test_project_text_is_redacted(self):
         client = FakeClient([{
             "key": "PROJ-secret-token-value",
@@ -193,3 +194,92 @@ class TestGetProject:
             JiraOperations(client).get_project("PROJ")
 
         assert excinfo.value.category == "invalid_remote_data"
+
+
+class TestListTransitions:
+    def test_returns_id_name_and_target_status(self):
+        client = FakeClient([{
+            "transitions": [
+                {"id": "21", "name": "In Progress",
+                 "to": {"name": "In Progress", "id": "3"}},
+                {"id": "31", "name": "Done", "to": {"name": "Done", "id": "6"}},
+            ]
+        }])
+
+        result = JiraOperations(client).list_transitions("ABC-1")
+
+        assert client.calls[0][:2] == ("GET", "issue/ABC-1/transitions")
+        assert result["items"] == [
+            {"id": "21", "name": "In Progress", "to_status": "In Progress"},
+            {"id": "31", "name": "Done", "to_status": "Done"},
+        ]
+        assert result["returned"] == 2
+        assert result["total"] == 2
+        assert result["truncated"] is False
+
+    def test_empty_transitions_is_valid_not_an_error(self):
+        """A closed issue legitimately offers no transitions."""
+        client = FakeClient([{"transitions": []}])
+
+        result = JiraOperations(client).list_transitions("ABC-1")
+
+        assert result["items"] == []
+        assert result["returned"] == 0
+
+    @pytest.mark.parametrize("payload", [{"unexpected": True}, {"transitions": "no"}])
+    def test_malformed_payload_raises(self, payload):
+        client = FakeClient([payload])
+
+        with pytest.raises(JiraError) as excinfo:
+            JiraOperations(client).list_transitions("ABC-1")
+
+        assert excinfo.value.category == "invalid_remote_data"
+
+    @pytest.mark.parametrize(
+        "key",
+        ["not a key", "ABC-0", "1ABC-1", "ABC-000000000000000000000", "A" * 65 + "-1"],
+    )
+    def test_invalid_issue_key_rejected_without_a_request(self, key):
+        client = FakeClient([])
+
+        with pytest.raises(JiraError) as excinfo:
+            JiraOperations(client).list_transitions(key)
+
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_transition_without_an_id_is_skipped(self):
+        client = FakeClient([{
+            "transitions": [{"name": "Broken"}, {"id": "5", "name": "Fine"}]
+        }])
+
+        result = JiraOperations(client).list_transitions("ABC-1")
+
+        assert [transition["id"] for transition in result["items"]] == ["5"]
+
+    def test_transition_strings_including_ids_are_redacted(self):
+        client = FakeClient([{
+            "transitions": [{
+                "id": "id-secret-token-value",
+                "name": "name-secret-token-value",
+                "to": {"name": "target-secret-token-value"},
+            }]
+        }])
+
+        result = JiraOperations(client).list_transitions("ABC-1")
+
+        assert "secret-token-value" not in repr(result)
+
+    def test_transition_results_are_bounded_to_the_first_200_items(self):
+        client = FakeClient([{
+            "transitions": [
+                {"id": str(index), "name": f"Transition {index}"}
+                for index in range(201)
+            ]
+        }])
+
+        result = JiraOperations(client).list_transitions("ABC-1")
+
+        assert result["returned"] == 200
+        assert result["total"] == 200
+        assert result["items"][-1]["id"] == "199"

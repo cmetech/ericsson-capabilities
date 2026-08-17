@@ -55,7 +55,7 @@
       "label": "Deploy source root",
       "type": "string",
       "storage": "setting",
-      "help": "When set, artefact uploads may only read files under this directory. Leave empty to allow any absolute path (the approval prompt still shows the exact file).",
+      "help": "When set, artefact uploads use POSIX descriptor traversal to stay under this directory. On Windows or unsupported platforms this confinement fails closed. Leave empty to allow any absolute path (the approval prompt still shows the exact file).",
       "advanced": true,
       "validation": { "format": "path", "max_length": 4096 }
     },

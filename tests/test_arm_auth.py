@@ -3,6 +3,7 @@
 import ssl
 import subprocess
 import sys
+import shutil
 from pathlib import Path
 
 import pytest
@@ -57,9 +58,12 @@ def _write_certificate(directory: Path, *, days: int) -> tuple[Path, Path]:
     """
     cert = directory / "client.pem"
     key = directory / "client-key.pem"
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is required to generate certificate fixtures")
     subprocess.run(
         [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-keyout", str(key), "-out", str(cert),
             "-days", str(days), "-subj", "/CN=test-endpoint",
         ],

@@ -20,6 +20,10 @@ Which auth header this instance wants is unconfirmed. The token is a JFrog *refe
 
 This connector supersedes three scripts in `oscar_app/oscar/utils`: `bulk_upload_verify.sh` (deploy), `cleanup_artifactory_releases.sh` (delete, AQL listing), and `pull_images_from_artifactory_repo.sh` (download). The first two are ported here; download is deliberately not — see below. Those scripts remain the right tool for bulk operator work; this connector is for an agent that needs to answer questions about artefacts.
 
+## Deploy source confinement
+
+When `deploy_root` is configured, upload source traversal requires POSIX file descriptors so that symlink and rename checks can remain confined to that root. On Windows or another unsupported platform, configured confinement fails closed: the upload is rejected rather than attempting a weaker path check. Leave `deploy_root` empty to retain unconfined absolute-path deployment; its exact source path remains visible in the approval prompt.
+
 ## Deliberately not implemented
 
 | Surface | Why not | What it needs |

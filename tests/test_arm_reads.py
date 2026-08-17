@@ -33,7 +33,7 @@ _ARM_COMMON_MODULES = {
 
 def _detach_arm_standalone_imports() -> None:
     """Keep this standalone-plugin test from contaminating sibling plugins."""
-    for name in ("auth", "client", "models", "operations", "tools"):
+    for name in ("aql", "auth", "client", "models", "operations", "tools"):
         module = sys.modules.get(name)
         if _is_arm_module(module):
             sys.modules.pop(name, None)
@@ -67,11 +67,15 @@ def test_cleanup_removes_arm_owned_generic_common_modules(monkeypatch):
     child.__file__ = str(PLUGIN / "_common" / "envelope.py")
     monkeypatch.setitem(sys.modules, "_common", module)
     monkeypatch.setitem(sys.modules, "_common.envelope", child)
+    aql = types.ModuleType("aql")
+    aql.__file__ = str(PLUGIN / "aql.py")
+    monkeypatch.setitem(sys.modules, "aql", aql)
 
     _detach_arm_standalone_imports()
 
     assert "_common" not in sys.modules
     assert "_common.envelope" not in sys.modules
+    assert "aql" not in sys.modules
 
 
 def test_cleanup_preserves_a_foreign_generic_common_module(monkeypatch):
@@ -82,11 +86,15 @@ def test_cleanup_preserves_a_foreign_generic_common_module(monkeypatch):
     child.__file__ = "/tmp/foreign-plugin/_common/envelope.py"
     monkeypatch.setitem(sys.modules, "_common", module)
     monkeypatch.setitem(sys.modules, "_common.envelope", child)
+    aql = types.ModuleType("aql")
+    aql.__file__ = "/tmp/foreign-plugin/aql.py"
+    monkeypatch.setitem(sys.modules, "aql", aql)
 
     _detach_arm_standalone_imports()
 
     assert sys.modules["_common"] is module
     assert sys.modules["_common.envelope"] is child
+    assert sys.modules["aql"] is aql
 
 
 class FakeClient:

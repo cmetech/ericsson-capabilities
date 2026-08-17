@@ -84,6 +84,18 @@ class TestManifest:
         )
         assert timeout["validation"]["maximum"] == 300
 
+    def test_deploy_root_docs_explain_its_platform_confinement(self):
+        schema = json.loads((PLUGIN / "config.schema.json").read_text())
+        deploy_root = next(
+            field for field in schema["fields"] if field["id"] == "deploy_root"
+        )
+        readme = (PLUGIN / "README.md").read_text()
+
+        for text in (deploy_root["help"], readme):
+            assert "POSIX" in text
+            assert "Windows" in text
+            assert "fails closed" in text
+
     def test_shared_code_is_vendored(self):
         assert (PLUGIN / "_common" / "client.py").is_file(), (
             "run: python scripts/sync_shared.py"

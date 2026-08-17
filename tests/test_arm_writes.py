@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import os
 import sys
+import types
 from pathlib import Path
 
 import httpx
@@ -32,7 +33,7 @@ def _is_arm_module(module: object) -> bool:
 
 def _detach_arm_standalone_imports() -> None:
     """Keep the ARM write test from shadowing sibling standalone plugins."""
-    for name in ("auth", "client", "models", "operations", "tools"):
+    for name in ("aql", "auth", "client", "models", "operations", "tools"):
         module = sys.modules.get(name)
         if _is_arm_module(module):
             sys.modules.pop(name, None)
@@ -47,6 +48,26 @@ def _detach_arm_standalone_imports() -> None:
 
 
 _detach_arm_standalone_imports()
+
+
+def test_cleanup_removes_arm_owned_generic_aql_module(monkeypatch):
+    module = types.ModuleType("aql")
+    module.__file__ = str(PLUGIN / "aql.py")
+    monkeypatch.setitem(sys.modules, "aql", module)
+
+    _detach_arm_standalone_imports()
+
+    assert "aql" not in sys.modules
+
+
+def test_cleanup_preserves_a_foreign_generic_aql_module(monkeypatch):
+    module = types.ModuleType("aql")
+    module.__file__ = "/tmp/foreign-plugin/aql.py"
+    monkeypatch.setitem(sys.modules, "aql", module)
+
+    _detach_arm_standalone_imports()
+
+    assert sys.modules["aql"] is module
 
 
 class FakeClient:

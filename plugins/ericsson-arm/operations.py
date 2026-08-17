@@ -39,6 +39,7 @@ _MAX_PROPERTY_VALUES = 32
 _MAX_PROPERTY_CHARS = 1024
 _CHECKSUM_CHUNK = 1024 * 1024
 _MAX_PATH_DECODE_PASSES = 4
+_ENCODED_PATH_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 
 
 def _bounded_string(value: Any, maximum: int) -> str | None:
@@ -56,16 +57,20 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-def _has_url_delimiter(value: str) -> bool:
-    """Detect raw or repeatedly percent-encoded query/fragment delimiters.
+def _has_unsafe_url_routing(value: str) -> bool:
+    """Detect encoded values that URL parsing could turn into routing syntax.
 
-    The shared transport decodes paths up to this same bound. Rejecting here
-    keeps a delete approval's path from being reinterpreted as a query or
-    fragment when the request URL is built.
+    The shared transport decodes paths up to this same bound. Rejecting query
+    syntax and encoded separators here keeps a delete approval's path from
+    being reinterpreted when the request URL is built.
     """
     current = value
     for _ in range(_MAX_PATH_DECODE_PASSES):
-        if "?" in current or "#" in current:
+        if (
+            "?" in current
+            or "#" in current
+            or _ENCODED_PATH_SEPARATOR.search(current) is not None
+        ):
             return True
         try:
             decoded = unquote_to_bytes(current).decode("utf-8")
@@ -75,7 +80,11 @@ def _has_url_delimiter(value: str) -> bool:
         if decoded == current:
             return False
         current = decoded
-    return "?" in current or "#" in current
+    return (
+        "?" in current
+        or "#" in current
+        or _ENCODED_PATH_SEPARATOR.search(current) is not None
+    )
 
 
 class _BoundedUpload:
@@ -151,7 +160,7 @@ class ArmOperations:
             "\x00" in cleaned
             or "\\" in cleaned
             or ".." in cleaned.split("/")
-            or _has_url_delimiter(cleaned)
+            or _has_unsafe_url_routing(cleaned)
             or any(character.isspace() for character in cleaned)
         ):
             raise ArmError(

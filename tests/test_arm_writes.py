@@ -304,6 +304,94 @@ class TestDelete:
         finally:
             client.close()
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "%2F",
+            "%2f",
+            "%5C",
+            "%5c",
+            "%252F",
+            "%252f",
+            "%25252F",
+            "%2525252F",
+            "%252525252F",
+        ],
+    )
+    def test_encoded_separators_cannot_turn_a_delete_into_a_repository_root_request(self, path):
+        """The transport decodes paths, so encoded separators may not cross
+        the operation boundary even when nested or differently cased."""
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(204)
+
+        auth = ArmAuth(
+            origin="https://artifactory.test",
+            api_root="/artifactory/",
+            auth_header_name="Authorization",
+            auth_header_value="Bearer secret-token-value",
+            token="secret-token-value",
+            tls_context=None,
+            certificate_not_after=None,
+            request_timeout_seconds=60,
+            default_max_results=25,
+            max_deploy_bytes=1024 * 1024,
+            deploy_root=None,
+        )
+        transport = HttpxTransport(
+            base_url=auth.origin,
+            headers={auth.auth_header_name: auth.auth_header_value},
+            path_prefix=auth.api_root,
+            mock_transport=httpx.MockTransport(handler),
+        )
+        client = ArmClient(auth, transport=transport)
+        try:
+            with pytest.raises(ArmError) as excinfo:
+                ArmOperations(client).delete("generic-local", path, confirm=True)
+            assert excinfo.value.category == "invalid_input"
+            assert requests == []
+        finally:
+            client.close()
+
+    def test_delete_keeps_literal_hierarchy_and_encoded_unicode(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(204)
+
+        auth = ArmAuth(
+            origin="https://artifactory.test",
+            api_root="/artifactory/",
+            auth_header_name="Authorization",
+            auth_header_value="Bearer secret-token-value",
+            token="secret-token-value",
+            tls_context=None,
+            certificate_not_after=None,
+            request_timeout_seconds=60,
+            default_max_results=25,
+            max_deploy_bytes=1024 * 1024,
+            deploy_root=None,
+        )
+        transport = HttpxTransport(
+            base_url=auth.origin,
+            headers={auth.auth_header_name: auth.auth_header_value},
+            path_prefix=auth.api_root,
+            mock_transport=httpx.MockTransport(handler),
+        )
+        client = ArmClient(auth, transport=transport)
+        try:
+            result = ArmOperations(client).delete(
+                "generic-local", "Infra/r%C3%A9leases/oscar.tar.gz", confirm=True
+            )
+            assert result["deleted"] is True
+            assert len(requests) == 1
+            assert requests[0].url.path == "/artifactory/generic-local/Infra/réleases/oscar.tar.gz"
+        finally:
+            client.close()
+
 
 class TestChecksumDeploy:
     def test_checksum_deploy_sends_no_body_and_all_three_checksums(self, artifact):

@@ -453,11 +453,56 @@ class TestUpdateMergeRequest:
         )
         assert client.calls[0][2]["title"] == "Draft: Fix thing"
 
+    @pytest.mark.parametrize(
+        ("draft", "supplied_title", "expected_title"),
+        [
+            (False, "Draft: WIP: Draft: Fix thing", "Fix thing"),
+            (True, "WIP: Draft: WIP: Fix thing", "Draft: Fix thing"),
+        ],
+    )
+    def test_draft_toggle_strips_every_stacked_marker_and_verifies_the_result(
+        self, draft, supplied_title, expected_title
+    ):
+        client = FakeClient(
+            [{"iid": 42, "title": expected_title, "state": "opened"}]
+        )
+        result = _ops(client).update_merge_request(
+            "g/p", 42, title=supplied_title, draft=draft, confirm=True
+        )
+        assert client.calls == [
+            (
+                "PUT",
+                "/api/v4/projects/7/merge_requests/42",
+                {"title": expected_title},
+            )
+        ]
+        assert result["requested"] == {"title": expected_title}
+
     def test_draft_without_a_title_is_rejected_without_a_hidden_read(self):
         client = FakeClient()
         with pytest.raises(GitLabError) as excinfo:
             _ops(client).update_merge_request(
                 "g/p", 42, draft=True, confirm=True
+            )
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_draft_transformed_title_may_be_exactly_1024_characters(self):
+        expected_title = "Draft: " + "x" * 1017
+        client = FakeClient(
+            [{"iid": 42, "title": expected_title, "state": "opened"}]
+        )
+        result = _ops(client).update_merge_request(
+            "g/p", 42, title="x" * 1017, draft=True, confirm=True
+        )
+        assert client.calls[0][2]["title"] == expected_title
+        assert len(result["requested"]["title"]) == 1024
+
+    def test_draft_transformed_title_over_1024_is_rejected_without_a_request(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, title="x" * 1018, draft=True, confirm=True
             )
         assert excinfo.value.category == "invalid_input"
         assert client.calls == []
@@ -522,6 +567,17 @@ class TestUpdateMergeRequest:
     )
     def test_malformed_success_evidence_is_write_ambiguous(self, payload):
         client = FakeClient([payload])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, title="New", confirm=True
+            )
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client.calls) == 1
+
+    def test_unknown_bounded_remote_state_is_write_ambiguous(self):
+        client = FakeClient(
+            [{"iid": 42, "title": "New", "state": "reviewing"}]
+        )
         with pytest.raises(GitLabError) as excinfo:
             _ops(client).update_merge_request(
                 "g/p", 42, title="New", confirm=True

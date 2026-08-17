@@ -63,6 +63,12 @@ def _client(script, api_base="https://wiki.test/rest/api"):
 
 
 class TestClient:
+    def test_constructor_translates_shared_configuration_error(self):
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceClient(_auth(), transport=FakeTransport([]), max_retries=-1)
+        assert excinfo.value.category == "invalid_configuration"
+        assert not isinstance(excinfo.value, ConnectorError)
+
     def test_decodes_json(self):
         client, _clock = _client([Response(200, {}, b'{"id":"1"}')])
         assert client.get_json("/rest/api/content/1") == {"id": "1"}

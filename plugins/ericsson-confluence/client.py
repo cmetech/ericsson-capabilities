@@ -69,16 +69,17 @@ class ConfluenceClient:
                 connect_timeout_seconds=5.0,
             )
         self._transport = transport
-        self._client = BoundedClient(
-            transport,
-            service="confluence",
-            max_retries=max_retries,
-            total_timeout_seconds=float(authentication.request_timeout_seconds),
-            request_timeout_seconds=float(authentication.request_timeout_seconds),
-            cancel_check=cancel_check,
-            clock=clock,
-            sleep=sleep,
-        )
+        with _as_confluence_error():
+            self._client = BoundedClient(
+                transport,
+                service="confluence",
+                max_retries=max_retries,
+                total_timeout_seconds=float(authentication.request_timeout_seconds),
+                request_timeout_seconds=float(authentication.request_timeout_seconds),
+                cancel_check=cancel_check,
+                clock=clock,
+                sleep=sleep,
+            )
 
     def __repr__(self) -> str:
         return f"ConfluenceClient(origin={self.auth.origin!r})"

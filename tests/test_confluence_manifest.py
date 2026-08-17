@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import subprocess
 import sys
 import types
 import uuid
@@ -218,6 +219,110 @@ class _ToolContext:
 
     def register_tool(self, *, name, handler, **_kwargs):
         self.tools[name] = handler
+
+
+class _RegistrationContext(_ToolContext):
+    def __init__(self):
+        super().__init__()
+        self.skills = []
+
+    def register_skill(self, name, path, description):
+        self.skills.append((name, Path(path), description))
+
+
+def test_normal_package_import_registers_confluence_tools_and_skill():
+    module_name, plugin = _load_plugin_package()
+    try:
+        ctx = _RegistrationContext()
+        plugin.register(ctx)
+
+        assert set(ctx.tools) == set(_load_tools_module().SCHEMAS)
+        assert ctx.skills == [
+            (
+                "page-research",
+                PLUGIN / "skills" / "page-research" / "SKILL.md",
+                "Research bounded Confluence page evidence.",
+            )
+        ]
+    finally:
+        _unload_package(module_name)
+
+
+def test_direct_top_level_import_registers_confluence_tools():
+    source = '''
+import importlib.util
+from pathlib import Path
+
+plugin_path = Path("plugins/ericsson-confluence/__init__.py")
+spec = importlib.util.spec_from_file_location("direct_confluence_plugin", plugin_path)
+plugin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(plugin)
+
+class Context:
+    def register_hook(self, *args): pass
+    def register_tool(self, **kwargs): self.tools[kwargs["name"]] = kwargs
+    def register_skill(self, *args): pass
+    def configuration(self): return object()
+    def __init__(self): self.tools = {}
+
+ctx = Context()
+plugin.register(ctx)
+assert len(ctx.tools) == 9
+assert "confluence_get_page" in ctx.tools
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_direct_import_ignores_conflicting_generic_tool_and_model_modules(monkeypatch):
+    foreign_tools = types.ModuleType("tools")
+    foreign_tools.SCHEMAS = {"foreign_tool": {}}
+    foreign_tools.check_available = lambda _configuration: True
+    foreign_tools.invoke = lambda *_args: {"foreign": True}
+    foreign_models = types.ModuleType("models")
+
+    class ForeignError(Exception):
+        category = "foreign"
+        remediation = None
+
+    foreign_models.ConfluenceError = ForeignError
+    foreign_models.SAFE_ERROR_MESSAGES = {"foreign": "foreign"}
+    foreign_models.safe_remediation = lambda _value: None
+    monkeypatch.setitem(sys.modules, "tools", foreign_tools)
+    monkeypatch.setitem(sys.modules, "models", foreign_models)
+
+    plugin = _load_plugin_module()
+    ctx = _RegistrationContext()
+    plugin.register(ctx)
+
+    assert set(ctx.tools) == set(_load_tools_module().SCHEMAS)
+    direct_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name.startswith("_ericsson_confluence_direct_")
+    }
+    direct_models = next(
+        module for name, module in direct_modules.items() if name.endswith(".models")
+    )
+    direct_tools = next(
+        module for name, module in direct_modules.items() if name.endswith(".tools")
+    )
+
+    def raise_confluence_error(*_args):
+        raise direct_models.ConfluenceError("not_found")
+
+    monkeypatch.setattr(direct_tools, "invoke", raise_confluence_error)
+    response = json.loads(
+        ctx.tools["confluence_get_page"]({"content_id": "12345"})
+    )
+    assert response["error"]["category"] == "not_found"
+    assert sys.modules["tools"] is foreign_tools
+    assert sys.modules["models"] is foreign_models
 
 
 def test_create_handler_requires_an_exact_host_admission(monkeypatch):

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.machinery
 import json
 from pathlib import Path
+import sys
+import types
 
 _WRITE_TOOLS = frozenset({
     "confluence_create_page", "confluence_update_page", "confluence_add_comment",
@@ -13,6 +17,46 @@ _WRITE_TOOLS = frozenset({
 _PLUGIN_SKILLS = (
     ("page-research", "Research bounded Confluence page evidence."),
 )
+
+
+def _own_package_loaded() -> bool:
+    """Whether this module is running from its real package namespace."""
+    package = sys.modules.get(__package__) if __package__ else None
+    paths = getattr(package, "__path__", ())
+    root = Path(__file__).resolve().parent
+    try:
+        return any(Path(path).resolve() == root for path in paths)
+    except (OSError, TypeError):
+        return False
+
+
+def _direct_connector_modules():
+    """Load this connector's modules without using generic top-level names."""
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    index = 0
+    while True:
+        package_name = f"_ericsson_confluence_direct_{digest}_{index}"
+        package = sys.modules.get(package_name)
+        if package is None:
+            package = types.ModuleType(package_name)
+            package.__file__ = str(root / "__init__.py")
+            package.__package__ = package_name
+            package.__path__ = [str(root)]
+            package.__spec__ = importlib.machinery.ModuleSpec(
+                package_name, loader=None, is_package=True
+            )
+            sys.modules[package_name] = package
+            break
+        try:
+            if any(Path(path).resolve() == root for path in package.__path__):
+                break
+        except (AttributeError, OSError, TypeError):
+            pass
+        index += 1
+    models = importlib.import_module(f"{package_name}.models")
+    tools = importlib.import_module(f"{package_name}.tools")
+    return tools, models
 
 
 def _arg(args: dict, name: str) -> str:
@@ -93,12 +137,14 @@ def register(ctx: object) -> None:
     if not hasattr(ctx, "register_tool"):
         return
 
-    if __package__:
+    if _own_package_loaded():
         from . import tools as confluence_tools
         from .models import ConfluenceError, SAFE_ERROR_MESSAGES, safe_remediation
     else:
-        import tools as confluence_tools
-        from models import ConfluenceError, SAFE_ERROR_MESSAGES, safe_remediation
+        confluence_tools, confluence_models = _direct_connector_modules()
+        ConfluenceError = confluence_models.ConfluenceError
+        SAFE_ERROR_MESSAGES = confluence_models.SAFE_ERROR_MESSAGES
+        safe_remediation = confluence_models.safe_remediation
 
     def json_error(category: str, remediation: object = None) -> str:
         error = {"category": category, "message": SAFE_ERROR_MESSAGES[category]}

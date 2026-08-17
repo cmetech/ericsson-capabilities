@@ -318,10 +318,10 @@ class TestDeploySource:
         client = FakeClient(raw_results=[Response(404, {}, b""), _deployed(sums)], deploy_root=str(root), max_deploy_bytes=64)
         original_checksums = ArmOperations._file_checksums
 
-        def replace_path_then_hash(handle):
+        def replace_path_then_hash(handle, maximum_bytes):
             source.unlink()
             source.symlink_to(outside)
-            return original_checksums(handle)
+            return original_checksums(handle, maximum_bytes)
 
         monkeypatch.setattr(ArmOperations, "_file_checksums", staticmethod(replace_path_then_hash))
         ArmOperations(client).deploy(
@@ -352,6 +352,86 @@ class TestDeploySource:
             )
         assert excinfo.value.category == "invalid_input"
         assert client.calls == []
+
+    def test_ancestor_symlink_replacement_is_rejected_before_any_upload(
+        self, monkeypatch, tmp_path
+    ):
+        root = tmp_path / "allowed"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        source = nested / "archive.tgz"
+        source.write_bytes(b"inside-root")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "archive.tgz").write_bytes(b"outside-root")
+        replacement = root / "nested-original"
+        client = FakeClient(deploy_root=str(root))
+        original_open = os.open
+
+        def replace_ancestor(path, flags, *args, **kwargs):
+            if path == "nested":
+                os.replace(nested, replacement)
+                nested.symlink_to(outside, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(arm_operations.os, "open", replace_ancestor)
+        monkeypatch.setattr(ArmOperations, "_supports_secure_open", staticmethod(lambda: True))
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).deploy(
+                "generic-local", "Infra/a.tgz", str(source), confirm=True
+            )
+        assert excinfo.value.category in {"invalid_input", "permission"}
+        assert client.calls == []
+
+    def test_growth_after_fstat_hits_the_byte_cap_before_any_request(
+        self, monkeypatch, tmp_path
+    ):
+        source = tmp_path / "archive.tgz"
+        source.write_bytes(b"small")
+        client = FakeClient(max_deploy_bytes=8)
+        original_fstat = os.fstat
+        appended = False
+
+        def append_after_fstat(fd):
+            nonlocal appended
+            result = original_fstat(fd)
+            if not appended:
+                appended = True
+                with source.open("ab") as handle:
+                    handle.write(b"growth-beyond-limit")
+            return result
+
+        monkeypatch.setattr(arm_operations.os, "fstat", append_after_fstat)
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).deploy(
+                "generic-local", "Infra/a.tgz", str(source), confirm=True
+            )
+        assert excinfo.value.category == "capacity"
+        assert client.calls == []
+
+    def test_growth_after_hash_is_not_read_or_uploaded(self, tmp_path):
+        source = tmp_path / "archive.tgz"
+        original = b"hashed-bytes"
+        source.write_bytes(original)
+        sums = {
+            "md5": hashlib.md5(original, usedforsecurity=False).hexdigest(),
+            "sha1": hashlib.sha1(original, usedforsecurity=False).hexdigest(),
+            "sha256": hashlib.sha256(original).hexdigest(),
+        }
+        client = FakeClient(raw_results=[Response(404, {}, b""), _deployed(sums)])
+        original_probe = client.checksum_probe
+
+        def append_after_hash(*args, **kwargs):
+            with source.open("ab") as handle:
+                handle.write(b"must-not-be-uploaded")
+            return original_probe(*args, **kwargs)
+
+        client.checksum_probe = append_after_hash
+        result = ArmOperations(client).deploy(
+            "generic-local", "Infra/a.tgz", str(source), confirm=True
+        )
+        assert result["size"] == len(original)
+        assert client.calls[1]["body"] == original
 
     def test_download_uri_redacts_a_token_split_at_the_output_bound(self, artifact):
         source, sums = artifact

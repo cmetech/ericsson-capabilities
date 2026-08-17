@@ -172,6 +172,31 @@ class TestClient:
         assert excinfo.value.category == "write_ambiguous"
         assert len(client._transport.calls) == 1
 
+    def test_checksum_probe_cancelled_after_response_is_ambiguous(self):
+        cancelled = False
+        transport = FakeTransport([Response(404, {}, b"")])
+        original_request = transport.request
+
+        def cancel_after_response(*args, **kwargs):
+            nonlocal cancelled
+            response = original_request(*args, **kwargs)
+            cancelled = True
+            return response
+
+        transport.request = cancel_after_response
+        clock = FakeClock()
+        client = ArmClient(
+            _auth(),
+            transport=transport,
+            cancel_check=lambda: cancelled,
+            clock=clock,
+            sleep=clock.sleep,
+        )
+        with pytest.raises(ArmError) as excinfo:
+            client.checksum_probe("/artifactory/generic/a.tgz")
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(transport.calls) == 1
+
     def test_shared_error_type_never_escapes(self):
         client, _clock = _client([Response(401, {}, b"")])
         with pytest.raises(ArmError) as excinfo:

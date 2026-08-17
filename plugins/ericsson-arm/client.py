@@ -239,6 +239,10 @@ class ArmClient:
             raise ArmError(category, remediation=exc.remediation) from None
         except Exception:
             raise ArmError("write_ambiguous") from None
+        try:
+            control.remaining(outcome_uncertain=True)
+        except ConnectorError:
+            raise ArmError("write_ambiguous") from None
         if _is_access_challenge(response):
             raise ArmError("edge_authentication", remediation=_ACCESS_REMEDIATION)
         return response

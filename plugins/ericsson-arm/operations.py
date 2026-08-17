@@ -54,6 +54,28 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
+class _BoundedUpload:
+    """Read no more than the already-hashed bytes from one file descriptor."""
+
+    def __init__(self, handle: BinaryIO, size: int) -> None:
+        self._handle = handle
+        self._remaining = size
+
+    def read(self, size: int = -1) -> bytes:
+        if self._remaining == 0:
+            return b""
+        wanted = self._remaining if size is None or size < 0 else min(size, self._remaining)
+        block = self._handle.read(wanted)
+        if not block:
+            raise ArmError("invalid_input")
+        self._remaining -= len(block)
+        return block
+
+    def __iter__(self):
+        while self._remaining:
+            yield self.read(min(_CHECKSUM_CHUNK, self._remaining))
+
+
 class ArmOperations:
     def __init__(self, client, *, max_pages: int = 1) -> None:
         if type(max_pages) is not int or not 1 <= max_pages <= 10:
@@ -331,6 +353,50 @@ class ArmOperations:
             "count": len(properties),
         }
 
+    @staticmethod
+    def _supports_secure_open() -> bool:
+        return (
+            os.open in os.supports_dir_fd
+            and hasattr(os, "O_DIRECTORY")
+            and hasattr(os, "O_NOFOLLOW")
+        )
+
+    @staticmethod
+    def _open_from_anchor(real: str, root: str) -> int:
+        """Traverse from filesystem root with no-follow directory descriptors."""
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        current = os.open("/", directory_flags)
+        try:
+            root_parts = [] if root == "/" else os.path.relpath(root, "/").split(os.sep)
+            for component in root_parts:
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+                os.close(current)
+                current = next_fd
+
+            relative = os.path.relpath(real, root)
+            parts = relative.split(os.sep)
+            if not parts or parts == ["."] or any(part in {"", ".", ".."} for part in parts):
+                raise OSError("source is not below its open anchor")
+            for component in parts[:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+                os.close(current)
+                current = next_fd
+            return os.open(
+                parts[-1],
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+        finally:
+            os.close(current)
+
+    @staticmethod
+    def _open_path_fallback(real: str) -> int:
+        """Fallback retains final-component no-follow where dir_fd is absent."""
+        return os.open(
+            real,
+            os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+
     def _open_source(self, source_file: Any) -> tuple[BinaryIO, str, int]:
         """Open one validated regular file descriptor for hashing and upload."""
         if not isinstance(source_file, str) or not source_file:
@@ -372,9 +438,11 @@ class ArmOperations:
 
         fd = None
         try:
-            fd = os.open(
-                real,
-                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+            anchor = root_real if root else "/"
+            fd = (
+                self._open_from_anchor(real, anchor)
+                if self._supports_secure_open()
+                else self._open_path_fallback(real)
             )
             opened = os.fstat(fd)
             if (
@@ -404,17 +472,21 @@ class ArmOperations:
         return handle, real, size
 
     @staticmethod
-    def _file_checksums(handle: BinaryIO) -> dict[str, str]:
+    def _file_checksums(handle: BinaryIO, maximum_bytes: int) -> tuple[dict[str, str], int]:
         """Compute Artifactory's three checksums in a single file pass."""
         digests = {
             "md5": hashlib.md5(usedforsecurity=False),
             "sha1": hashlib.sha1(usedforsecurity=False),
             "sha256": hashlib.sha256(),
         }
+        size = 0
         for block in iter(lambda: handle.read(_CHECKSUM_CHUNK), b""):
+            size += len(block)
+            if size > maximum_bytes:
+                raise ArmError("capacity")
             for digest in digests.values():
                 digest.update(block)
-        return {name: digest.hexdigest() for name, digest in digests.items()}
+        return {name: digest.hexdigest() for name, digest in digests.items()}, size
 
     def _verify_deploy(self, response, checksums: dict[str, str]) -> Mapping[str, Any]:
         """Verify that Artifactory's deploy response names this exact file."""
@@ -457,7 +529,9 @@ class ArmOperations:
         path = self._path(path)
         handle, real_path, size = self._open_source(source_file)
         try:
-            checksums = self._file_checksums(handle)
+            checksums, size = self._file_checksums(
+                handle, getattr(self.client.auth, "max_deploy_bytes", 0)
+            )
             try:
                 execute = require_explicit_intent(
                     dry_run=dry_run,
@@ -507,7 +581,10 @@ class ArmOperations:
 
             handle.seek(0)
             response = self.client.send(
-                "PUT", target, extra_headers=checksum_headers, content=handle
+                "PUT",
+                target,
+                extra_headers=checksum_headers,
+                content=_BoundedUpload(handle, size),
             )
             payload = self._verify_deploy(response, checksums)
             return {

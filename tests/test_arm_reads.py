@@ -11,6 +11,10 @@ sys.path.insert(0, str(PLUGIN))
 from models import ArmError  # noqa: E402
 from operations import ArmOperations  # noqa: E402
 
+_ARM_COMMON_MODULES = tuple(
+    name for name in sys.modules if name == "_common" or name.startswith("_common.")
+)
+
 
 def _detach_arm_standalone_imports() -> None:
     """Keep this standalone-plugin test from contaminating sibling plugins."""
@@ -19,11 +23,22 @@ def _detach_arm_standalone_imports() -> None:
         module_file = getattr(module, "__file__", None)
         if module_file is not None and Path(module_file).parent == PLUGIN:
             sys.modules.pop(name, None)
+    for name in tuple(sys.modules):
+        if name == "_common" or name.startswith("_common."):
+            sys.modules.pop(name, None)
     while str(PLUGIN) in sys.path:
         sys.path.remove(str(PLUGIN))
 
 
 _detach_arm_standalone_imports()
+
+
+def test_cross_order_cleanup_removes_arm_common_modules():
+    """A later standalone connector must not resolve ARM's generic _common."""
+    assert "_common" in _ARM_COMMON_MODULES
+    assert not any(
+        name == "_common" or name.startswith("_common.") for name in sys.modules
+    )
 
 
 class FakeClient:
@@ -150,6 +165,32 @@ class TestListRepositories:
         )]
         result = ArmOperations(FakeClient([payload])).list_repositories()
         assert "secret-token-value" not in repr(result)
+
+    def test_one_character_token_is_redacted_from_remote_output(self):
+        """Configured tokens are valid at one character and must not echo."""
+        client = FakeClient([[
+            dict(REPOSITORIES[0], description="beforeQafter")
+        ]])
+        client.auth.token = "Q"
+        client.auth.auth_header_value = "Bearer Q"
+
+        result = ArmOperations(client).list_repositories()
+
+        assert "Q" not in result["items"][0]["description"]
+
+    def test_redaction_happens_before_field_bounding(self):
+        """A secret crossing a field cap must not leave its prefix behind."""
+        client = FakeClient([[
+            dict(REPOSITORIES[0], description=("a" * 510) + "WXYZtail")
+        ]])
+        client.auth.token = "WXYZ"
+        client.auth.auth_header_value = "Bearer WXYZ"
+
+        result = ArmOperations(client).list_repositories()
+        description = result["items"][0]["description"]
+
+        assert "WX" not in description
+        assert len(description) <= 512
 
 
 class TestArtifactInfo:

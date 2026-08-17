@@ -57,13 +57,16 @@ class ArmOperations:
             getattr(auth, "auth_header_value", ""),
             getattr(auth, "token", ""),
         ):
-            if isinstance(secret, str) and len(secret) >= 4:
+            if isinstance(secret, str) and secret:
                 value = value.replace(secret, "<redacted>")
         return value
 
     def _remote_string(self, value: Any, maximum: int) -> str | None:
         """Bound and redact one string copied from an Artifactory response."""
-        return self._redact(_bounded_string(value, maximum))
+        return _bounded_string(
+            self._redact(value) if isinstance(value, str) else None,
+            maximum,
+        )
 
     @staticmethod
     def _repo(value: Any) -> str:

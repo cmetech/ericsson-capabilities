@@ -25,6 +25,9 @@ def _detach_arm_standalone_imports() -> None:
         module_file = getattr(module, "__file__", None)
         if module_file is not None and Path(module_file).parent == PLUGIN:
             sys.modules.pop(name, None)
+    for name in tuple(sys.modules):
+        if name == "_common" or name.startswith("_common."):
+            sys.modules.pop(name, None)
     while str(PLUGIN) in sys.path:
         sys.path.remove(str(PLUGIN))
 

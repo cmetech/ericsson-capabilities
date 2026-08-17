@@ -21,6 +21,9 @@ for _module_name in ("auth", "client", "models"):
     _module_file = getattr(_module, "__file__", None)
     if _module_file is not None and Path(_module_file).parent == PLUGIN:
         sys.modules.pop(_module_name, None)
+for _module_name in tuple(sys.modules):
+    if _module_name == "_common" or _module_name.startswith("_common."):
+        sys.modules.pop(_module_name, None)
 while str(PLUGIN) in sys.path:
     sys.path.remove(str(PLUGIN))
 

@@ -135,6 +135,12 @@ class TestWriteEscaping:
         assert "//attacker.example" not in out
         assert "click" in out
 
+    def test_backslash_protocol_relative_href_is_dropped_to_text(self):
+        out = markdown_to_storage("[click](/\\attacker.example)")
+        assert "<a href=\"/\\attacker.example\">" not in out
+        assert "/\\attacker.example" not in out
+        assert "click" in out
+
 
 class TestRoundTrip:
     def test_markdown_survives_a_round_trip(self):

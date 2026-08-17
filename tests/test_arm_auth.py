@@ -4,6 +4,7 @@ import ssl
 import subprocess
 import sys
 import shutil
+import types
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,7 @@ def _is_arm_module(module: object) -> bool:
 
 def _detach_arm_standalone_imports() -> None:
     """Keep this standalone-plugin test from contaminating sibling plugins."""
-    for name in ("auth", "client", "models"):
+    for name in ("aql", "auth", "client", "models", "operations", "tools"):
         module = sys.modules.get(name)
         if _is_arm_module(module):
             sys.modules.pop(name, None)
@@ -48,6 +49,19 @@ def _detach_arm_standalone_imports() -> None:
 
 
 _detach_arm_standalone_imports()
+
+
+def test_cleanup_removes_arm_owned_lazy_tool_dependencies(monkeypatch):
+    """``tools`` imports these generic names lazily through ARM itself."""
+    for name in ("aql", "operations", "tools"):
+        module = types.ModuleType(name)
+        module.__file__ = str(PLUGIN / f"{name}.py")
+        monkeypatch.setitem(sys.modules, name, module)
+
+    _detach_arm_standalone_imports()
+
+    for name in ("aql", "operations", "tools"):
+        assert name not in sys.modules
 
 
 def _write_certificate(directory: Path, *, days: int) -> tuple[Path, Path]:

@@ -19,6 +19,7 @@ EXPAND_PAGE = "body.storage,version,space,ancestors,metadata.labels,history.last
 EXPAND_LIST = "version,space,ancestors"
 
 _CONTENT_ID = re.compile(r"^[0-9]{1,19}$")
+_SPACE_TYPES = {"global", "personal"}
 _MAX_BODY_CHARS = 100_000
 _MAX_CQL_CHARS = 4096
 
@@ -157,6 +158,57 @@ class ConfluenceOperations:
                 "More content matches this CQL. Raise max_results or narrow "
                 "the query." if truncated else None
             ),
+            untrusted=True,
+        )
+
+    def list_spaces(
+        self, *, space_type: str | None = None, max_results: int = 25
+    ) -> dict[str, Any]:
+        """List spaces the token can see."""
+        if space_type is not None and (
+            not isinstance(space_type, str) or space_type not in _SPACE_TYPES
+        ):
+            raise ConfluenceError("invalid_input")
+        if type(max_results) is not int or not 1 <= max_results <= 100:
+            raise ConfluenceError("invalid_input")
+        params: dict[str, Any] = {}
+        if space_type is not None:
+            params["type"] = space_type
+        rows, total, truncated = self._paged(
+            f"{self.base}/space", params, max_results
+        )
+        spaces = [
+            {
+                "key": self._redact(_bounded_string(row.get("key"), 255)) or "",
+                "name": self._redact(_bounded_string(row.get("name"), 512)) or "",
+                "type": _bounded_string(row.get("type"), 64) or "",
+            }
+            for row in rows
+        ]
+        return result_envelope(
+            spaces,
+            total=total,
+            truncated=truncated,
+            hint="More spaces exist. Raise max_results." if truncated else None,
+        )
+
+    def list_children(
+        self, content_id: str, *, max_results: int = 25
+    ) -> dict[str, Any]:
+        """List one page's direct child pages."""
+        content_id = self._content_id(content_id)
+        if type(max_results) is not int or not 1 <= max_results <= 100:
+            raise ConfluenceError("invalid_input")
+        rows, total, truncated = self._paged(
+            f"{self.base}/content/{content_id}/child/page",
+            {"expand": EXPAND_LIST},
+            max_results,
+        )
+        return result_envelope(
+            [self._content_summary(row) for row in rows],
+            total=total,
+            truncated=truncated,
+            hint="More child pages exist. Raise max_results." if truncated else None,
             untrusted=True,
         )
 

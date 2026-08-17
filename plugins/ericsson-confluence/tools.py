@@ -65,6 +65,22 @@ SCHEMAS = {
         },
         ["cql"],
     ),
+    "confluence_list_spaces": _schema(
+        "confluence_list_spaces",
+        "List Confluence spaces visible to the configured token.",
+        {
+            "space_type": {"type": "string", "enum": ["global", "personal"]},
+            "max_results": _LIMIT,
+        },
+        [],
+    ),
+    "confluence_list_children": _schema(
+        "confluence_list_children",
+        "List the direct child pages of one Confluence page, for walking a "
+        "documentation tree.",
+        {"content_id": _CONTENT_ID_SCHEMA, "max_results": _LIMIT},
+        ["content_id"],
+    ),
 }
 
 
@@ -109,5 +125,14 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
     if name == "confluence_search":
         return operations.search(
             values["cql"], max_results=values.get("max_results", 25)
+        )
+    if name == "confluence_list_spaces":
+        return operations.list_spaces(
+            space_type=values.get("space_type"),
+            max_results=values.get("max_results", 25),
+        )
+    if name == "confluence_list_children":
+        return operations.list_children(
+            values["content_id"], max_results=values.get("max_results", 25)
         )
     raise ConfluenceError("invalid_input")

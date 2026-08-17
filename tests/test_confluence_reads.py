@@ -242,3 +242,57 @@ class TestSearch:
         with pytest.raises(ConfluenceError) as excinfo:
             ConfluenceOperations(FakeClient([{"start": 0}])).search("x")
         assert excinfo.value.category == "invalid_remote_data"
+
+
+class TestListSpaces:
+    def test_lists_key_and_name(self):
+        client = FakeClient([{
+            "results": [
+                {"key": "OPS", "name": "Operations", "type": "global"},
+                {"key": "~alice", "name": "Alice", "type": "personal"},
+            ],
+            "start": 0, "limit": 25, "size": 2,
+        }])
+        result = ConfluenceOperations(client).list_spaces()
+        assert client.calls[0][1] == "/rest/api/space"
+        assert [s["key"] for s in result["items"]] == ["OPS", "~alice"]
+
+    def test_type_filter_is_forwarded(self):
+        client = FakeClient([{"results": [], "start": 0, "limit": 25, "size": 0}])
+        ConfluenceOperations(client).list_spaces(space_type="global")
+        assert client.calls[0][2]["type"] == "global"
+
+    def test_invalid_type_rejected_without_a_request(self):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError):
+            ConfluenceOperations(client).list_spaces(space_type="nonsense")
+        assert client.calls == []
+
+    def test_empty_space_list_is_valid(self):
+        client = FakeClient([{"results": [], "start": 0, "limit": 25, "size": 0}])
+        result = ConfluenceOperations(client).list_spaces()
+        assert result["items"] == [] and result["returned"] == 0
+
+
+class TestListChildren:
+    def test_lists_child_pages(self):
+        client = FakeClient([{
+            "results": [{"id": "9", "title": "Child", "type": "page"}],
+            "start": 0, "limit": 25, "size": 1,
+        }])
+        result = ConfluenceOperations(client).list_children("12345")
+        assert client.calls[0][1] == "/rest/api/content/12345/child/page"
+        assert result["items"][0]["id"] == "9"
+
+    def test_invalid_parent_id_rejected(self):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError):
+            ConfluenceOperations(client).list_children("not-an-id")
+        assert client.calls == []
+
+    def test_children_carry_the_untrusted_warning(self):
+        client = FakeClient([{
+            "results": [{"id": "9", "title": "Child", "type": "page"}],
+            "start": 0, "limit": 25, "size": 1,
+        }])
+        assert ConfluenceOperations(client).list_children("1")["content_warning"]

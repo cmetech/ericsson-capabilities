@@ -429,8 +429,12 @@ class ConfluenceOperations:
         if current_version is None:
             raise ConfluenceError("invalid_remote_data")
         if title is None:
-            next_title = _bounded_string(current.get("title"), _MAX_TITLE_CHARS)
-            if not next_title:
+            next_title = current.get("title")
+            if (
+                not isinstance(next_title, str)
+                or not next_title.strip()
+                or len(next_title) > _MAX_TITLE_CHARS
+            ):
                 raise ConfluenceError("invalid_remote_data")
         else:
             next_title = title

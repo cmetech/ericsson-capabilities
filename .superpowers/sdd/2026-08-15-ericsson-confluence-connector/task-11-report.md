@@ -95,3 +95,38 @@ git diff --check: passed
 
 The existing exact-tool admission regression remains part of the full
 Confluence suite and passed.
+
+## Review fix round 2 — preserved title semantics
+
+### RED
+
+Extended the body-only preserved-title regression with whitespace-only and
+256-character current titles.  The focused run failed only for those two new
+cases:
+
+```text
+. .venv/bin/activate && pytest tests/test_confluence_writes.py -q -k \
+  missing_or_malformed_current_title
+2 failed, 2 passed
+```
+
+Whitespace was PUT unchanged, while the overlength title was silently
+truncated to 255 characters before PUT.
+
+### GREEN
+
+The preserved remote title now uses the caller-title semantic constraints
+(string, nonblank, length at most 255), but reports violations as
+`invalid_remote_data`.  All invalid preserved-title cases leave only the GET
+in the fake-client call log; no PUT is attempted.
+
+```text
+focused preserved-title regression: 4 passed
+tests/test_confluence_writes.py: 29 passed
+tests/test_confluence*.py: 157 passed
+8-tool schema/manifest parity: OK 8 tools
+git diff --check: passed
+```
+
+The full Confluence suite includes the established exact-tool admission test,
+which also passed.

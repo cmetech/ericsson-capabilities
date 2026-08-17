@@ -188,6 +188,8 @@ class TestUpdatePage:
     @pytest.mark.parametrize("current", [
         {key: value for key, value in CURRENT.items() if key != "title"},
         {**CURRENT, "title": 3},
+        {**CURRENT, "title": "   "},
+        {**CURRENT, "title": "T" * 256},
     ])
     def test_missing_or_malformed_current_title_rejects_body_only_change_without_put(
         self, current

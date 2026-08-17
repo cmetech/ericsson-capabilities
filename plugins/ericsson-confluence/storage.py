@@ -372,3 +372,157 @@ def storage_to_markdown(storage_html: str, attachment_dir: str = "") -> str:
 if __name__ == "__main__":
     import sys
     print(storage_to_markdown(sys.stdin.read(), attachment_dir=""))
+
+
+# ── Markdown -> storage format ───────────────────────────────────────────────
+#
+# Deliberately small: headings, paragraphs, lists, fenced code and inline
+# links. Everything else degrades to escaped text, which is the safe
+# direction. Every text node passes through html.escape, so markup a caller
+# writes becomes visible characters rather than page structure -- a model
+# cannot inject <ac:structured-macro> into the wiki through this path.
+
+from html import escape as _escape
+
+_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+# Matched against the RAW line: group 1 is the indent, and discarding it
+# before matching is exactly how nesting gets lost.
+_MD_LIST = re.compile(r"^([ \t]*)([-*]|\d+[.)])\s+(.*)$")
+_MD_FENCE = re.compile(r"^```([A-Za-z0-9_+-]*)\s*$")
+_MD_LINK = re.compile(r"\[([^\]]{1,512})\]\(([^)\s]{1,2048})\)")
+_SAFE_LINK_SCHEME = re.compile(r"^(?:https?://|/)", re.IGNORECASE)
+
+
+def _inline(text: str) -> str:
+    """Escape one line, then re-introduce only links we consider safe."""
+    escaped = _escape(text, quote=True)
+
+    def _link(match: "re.Match[str]") -> str:
+        # The label and href were escaped with the rest of the line, so
+        # unescape only for the scheme check and re-emit escaped.
+        label, href = match.group(1), match.group(2)
+        raw_href = href.replace("&amp;", "&")
+        if not _SAFE_LINK_SCHEME.match(raw_href):
+            # javascript:, data:, and anything else become plain text.
+            return label
+        return f'<a href="{href}">{label}</a>'
+
+    return _MD_LINK.sub(_link, escaped)
+
+
+def _cdata(text: str) -> str:
+    """Wrap text in CDATA, splitting any literal ']]>' that would close it."""
+    return "<![CDATA[" + text.replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
+
+def markdown_to_storage(markdown: str) -> str:
+    """Convert a bounded Markdown subset to Confluence storage format."""
+    if not isinstance(markdown, str) or not markdown:
+        return ""
+    out: list[str] = []
+    lines = markdown.replace("\r\n", "\n").split("\n")
+    index = 0
+
+    list_stack: list[str] = []    # 'ul' | 'ol' per open level, outermost first
+    indent_stack: list[int] = []  # indent column that opened each level
+    li_open = False               # the innermost <li> is still unclosed
+
+    def _close_li() -> None:
+        nonlocal li_open
+        if li_open:
+            out.append("</li>")
+            li_open = False
+
+    def _pop_level() -> None:
+        """Close the innermost list. Its parent's <li> is then unclosed."""
+        nonlocal li_open
+        _close_li()
+        out.append(f"</{list_stack.pop()}>")
+        indent_stack.pop()
+        # A nested list lives inside its parent's <li>, so that <li> is
+        # still open once the nested list closes.
+        li_open = bool(list_stack)
+
+    def _close_list(to_indent: int | None = None) -> None:
+        """Close levels deeper than to_indent; None closes all of them."""
+        while indent_stack and (to_indent is None or indent_stack[-1] > to_indent):
+            _pop_level()
+        if to_indent is None:
+            _close_li()
+
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+
+        fence = _MD_FENCE.match(stripped)
+        if fence:
+            _close_list()
+            language = fence.group(1)
+            body: list[str] = []
+            index += 1
+            while index < len(lines) and not _MD_FENCE.match(lines[index].strip()):
+                body.append(lines[index])
+                index += 1
+            index += 1  # consume the closing fence
+            parameter = (
+                f'<ac:parameter ac:name="language">{_escape(language)}'
+                f"</ac:parameter>"
+                if language
+                else ""
+            )
+            out.append(
+                '<ac:structured-macro ac:name="code">'
+                f"{parameter}"
+                f"<ac:plain-text-body>{_cdata(chr(10).join(body))}"
+                "</ac:plain-text-body></ac:structured-macro>"
+            )
+            continue
+
+        if not stripped:
+            _close_list()
+            index += 1
+            continue
+
+        heading = _MD_HEADING.match(stripped)
+        if heading:
+            _close_list()
+            level = len(heading.group(1))
+            out.append(f"<h{level}>{_inline(heading.group(2))}</h{level}>")
+            index += 1
+            continue
+
+        # Matched against `line`, not `stripped`: the indent is the nesting.
+        listed = _MD_LIST.match(line)
+        if listed:
+            indent = len(listed.group(1).expandtabs(2))
+            kind = "ul" if listed.group(2) in ("-", "*") else "ol"
+            content = listed.group(3)
+
+            if not indent_stack or indent > indent_stack[-1]:
+                # Open a level. When nesting, the parent <li> stays open so
+                # the new list is emitted inside it, as XHTML requires.
+                out.append(f"<{kind}>")
+                list_stack.append(kind)
+                indent_stack.append(indent)
+                li_open = False
+            else:
+                _close_list(indent)
+                _close_li()
+                if list_stack and list_stack[-1] != kind:
+                    # Marker type changed at this level: swap the container.
+                    out.append(f"</{list_stack.pop()}>")
+                    indent_stack.pop()
+                    out.append(f"<{kind}>")
+                    list_stack.append(kind)
+                    indent_stack.append(indent)
+            out.append(f"<li>{_inline(content)}")
+            li_open = True
+            index += 1
+            continue
+
+        _close_list()
+        out.append(f"<p>{_inline(stripped)}</p>")
+        index += 1
+
+    _close_list()
+    return "".join(out)

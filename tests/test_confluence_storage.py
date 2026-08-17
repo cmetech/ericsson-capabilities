@@ -10,7 +10,145 @@ from pathlib import Path
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-confluence"
 sys.path.insert(0, str(PLUGIN))
 
-from storage import storage_to_markdown  # noqa: E402
+from storage import markdown_to_storage, storage_to_markdown  # noqa: E402
+
+
+class TestMarkdownToStorage:
+    def test_paragraphs(self):
+        assert markdown_to_storage("hello") == "<p>hello</p>"
+
+    def test_blank_line_separates_paragraphs(self):
+        out = markdown_to_storage("one\n\ntwo")
+        assert out == "<p>one</p><p>two</p>"
+
+    def test_headings(self):
+        assert "<h2>Title</h2>" in markdown_to_storage("## Title")
+
+    def test_bullet_list(self):
+        out = markdown_to_storage("- a\n- b")
+        assert "<ul>" in out and "<li>a</li>" in out and "<li>b</li>" in out
+
+    def test_numbered_list(self):
+        out = markdown_to_storage("1. a\n2. b")
+        assert "<ol>" in out and "<li>a</li>" in out
+
+
+class TestNestedLists:
+    def test_nested_list_is_emitted_inside_the_parent_li(self):
+        """XHTML nests a child list inside its parent <li>, so the parent's
+        </li> must come after the nested </ul>."""
+        out = markdown_to_storage("- outer\n  - inner")
+        assert out == "<ul><li>outer<ul><li>inner</li></ul></li></ul>"
+
+    def test_four_space_indentation_also_nests(self):
+        out = markdown_to_storage("- outer\n    - inner")
+        assert out == "<ul><li>outer<ul><li>inner</li></ul></li></ul>"
+
+    def test_tab_indentation_also_nests(self):
+        out = markdown_to_storage("- outer\n\t- inner")
+        assert "<ul><li>outer<ul><li>inner</li>" in out
+
+    def test_three_levels(self):
+        out = markdown_to_storage("- a\n  - b\n    - c")
+        assert out == (
+            "<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li></ul>"
+        )
+
+    def test_dedent_returns_to_the_outer_level(self):
+        out = markdown_to_storage("- a\n  - b\n- c")
+        assert out == "<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul>"
+
+    def test_mixed_bullet_and_numbered_nesting(self):
+        out = markdown_to_storage("- outer\n  1. one\n  2. two")
+        assert "<ul><li>outer<ol><li>one</li><li>two</li></ol></li></ul>" == out
+
+    def test_marker_change_at_the_same_level_swaps_the_container(self):
+        out = markdown_to_storage("- a\n1. b")
+        assert "</ul>" in out and "<ol>" in out
+
+    def test_all_levels_close_before_a_following_paragraph(self):
+        out = markdown_to_storage("- a\n  - b\n\nafter")
+        assert out.endswith("<p>after</p>")
+        assert out.count("<ul>") == out.count("</ul>")
+        assert out.count("<li>") == out.count("</li>")
+
+    def test_tags_are_balanced_for_ragged_indentation(self):
+        """Half-indented and over-indented lines are lenient, but must never
+        leave an unclosed tag in the page."""
+        out = markdown_to_storage("- a\n   - b\n  - c\n- d")
+        assert out.count("<ul>") == out.count("</ul>")
+        assert out.count("<ol>") == out.count("</ol>")
+        assert out.count("<li>") == out.count("</li>")
+
+    def test_deeply_nested_input_stays_balanced(self):
+        source = "\n".join("  " * depth + "- item" for depth in range(12))
+        out = markdown_to_storage(source)
+        assert out.count("<ul>") == out.count("</ul>")
+        assert out.count("<li>") == out.count("</li>")
+
+    def test_fenced_code_becomes_a_code_macro(self):
+        out = markdown_to_storage("```python\nprint(1)\n```")
+        assert 'ac:name="code"' in out
+        assert "CDATA[print(1)]" in out
+
+    def test_inline_link(self):
+        out = markdown_to_storage("see [docs](https://x.test)")
+        assert '<a href="https://x.test">docs</a>' in out
+
+    def test_link_with_hostile_href_is_dropped_to_text(self):
+        """A javascript: URL must never become a live link."""
+        out = markdown_to_storage("[click](javascript:alert(1))")
+        assert "javascript:" not in out
+        assert "click" in out
+
+
+class TestWriteEscaping:
+    def test_raw_macro_markup_is_escaped_not_interpreted(self):
+        """The security property: a model must not be able to inject a
+        Confluence macro by writing one into the body text."""
+        out = markdown_to_storage('<ac:structured-macro ac:name="html"/>')
+        assert "<ac:structured-macro" not in out
+        assert "&lt;ac:structured-macro" in out
+
+    def test_html_tags_are_escaped(self):
+        out = markdown_to_storage("<script>alert(1)</script>")
+        assert "<script>" not in out
+        assert "&lt;script&gt;" in out
+
+    def test_ampersands_are_escaped(self):
+        assert "&amp;" in markdown_to_storage("a & b")
+
+    def test_code_block_content_is_cdata_safe(self):
+        """A ]]> inside code would otherwise terminate the CDATA section
+        early and break the page."""
+        out = markdown_to_storage("```\na ]]> b\n```")
+        assert "]]]]><![CDATA[>" in out
+
+    def test_link_text_is_escaped(self):
+        out = markdown_to_storage("[<b>x</b>](https://x.test)")
+        assert "<b>" not in out
+        assert "&lt;b&gt;" in out
+
+
+class TestRoundTrip:
+    def test_markdown_survives_a_round_trip(self):
+        source = "## Heading\n\nsome text\n\n- one\n- two"
+        rendered = storage_to_markdown(markdown_to_storage(source))
+        assert "Heading" in rendered
+        assert "some text" in rendered
+        assert "- one" in rendered
+
+    def test_nesting_survives_a_round_trip(self):
+        """The read side has always preserved nesting. A write side that
+        flattened it would silently lose a level on every edit — read a
+        nested list, write it back, and the structure is gone."""
+        rendered = storage_to_markdown(markdown_to_storage("- outer\n  - inner"))
+        assert "- outer" in rendered
+        assert "  - inner" in rendered
+
+    def test_escaped_markup_survives_as_visible_text(self):
+        rendered = storage_to_markdown(markdown_to_storage("<b>literal</b>"))
+        assert "<b>literal</b>" in rendered
 
 
 class TestBlockStructure:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import hashlib
 import json
 import sys
 import uuid
@@ -1141,8 +1140,71 @@ def test_transition_approval_is_argument_scoped_and_names_the_transition():
     assert "jira_transition_issue" in first["message"]
     assert "ABC-1" in first["message"] and "21" in first["message"]
     assert "XYZ-9" in second["message"] and "31" in second["message"]
-    assert first["rule_key"].startswith("jira_transition_issue:")
+    assert first["rule_key"] == (
+        "jira_transition_issue:"
+        "97e0097498537be79ae88f53ef668fe39ba6c6071f0eaf9b97d8612e49a81f20"
+    )
     assert first["rule_key"] != second["rule_key"]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        (
+            "jira_transition_issue",
+            {
+                "key": "ABC-1",
+                "transition_id": "21",
+                "expected_status": "\ud800",
+                "confirm": True,
+            },
+        ),
+        (
+            "jira_update_fields",
+            {
+                "key": "ABC-1",
+                "fields": {"summary": object()},
+                "confirm": True,
+            },
+        ),
+    ],
+)
+def test_uncanonicalizable_write_arguments_are_blocked_before_admission_or_config(
+    monkeypatch, tool_name, args
+):
+    plugin = _load_plugin()
+    context = Context()
+    plugin.register(context)
+    calls = []
+    monkeypatch.setattr(
+        plugin.jira_tools,
+        "invoke",
+        lambda *call_args, **call_kwargs: calls.append(
+            (call_args, call_kwargs)
+        ),
+    )
+
+    refusal = context.hooks["pre_tool_call"](tool_name, args)
+    result = json.loads(
+        context.registrations[tool_name]["handler"](
+            args,
+            tool_admission=_admission(tool_name),
+        )
+    )
+
+    assert refusal == {
+        "action": "block",
+        "message": "Jira write arguments cannot be safely approved",
+    }
+    assert result == {
+        "success": False,
+        "error": {
+            "category": "invalid_input",
+            "message": "Jira request input is invalid",
+        },
+    }
+    assert context.configuration_calls == 0
+    assert calls == []
 
 
 def test_update_fields_schema_exposes_only_the_bounded_write_arguments():
@@ -1210,20 +1272,21 @@ def test_update_fields_approval_is_bounded_and_argument_scoped():
     assert first["rule_key"] != second["rule_key"]
 
 
-def test_update_fields_approval_handles_invalid_caller_values_without_echoing_them():
+def test_update_fields_approval_refuses_invalid_caller_values_without_echoing_them():
     plugin = _load_plugin()
     context = Context()
     plugin.register(context)
     hook = context.hooks["pre_tool_call"]
 
-    request = hook(
+    refusal = hook(
         "jira_update_fields",
         {"key": "ABC-1", "fields": {"summary": object()}},
     )
 
-    assert request["action"] == "approve"
-    assert "<unsupported>" in request["message"]
-    assert len(request["message"]) <= 600
+    assert refusal == {
+        "action": "block",
+        "message": "Jira write arguments cannot be safely approved",
+    }
 
 
 def test_manage_labels_has_complete_schema_wiring_and_bound_approval_digest():
@@ -1271,9 +1334,9 @@ def test_manage_labels_has_complete_schema_wiring_and_bound_approval_digest():
     assert "add" in first["message"]
     assert first["rule_key"].startswith("jira_manage_labels:")
     assert first["rule_key"] != second["rule_key"]
-    assert first["rule_key"] != "jira_manage_labels:" + hashlib.sha256(
-        plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
-    ).hexdigest()
+    assert plugin._approval_rule_digest(
+        {"key": "ABC-1", "operation": "add", "labels": labels, "confirm": True}
+    ) is not None
 
 
 def test_manage_labels_requires_matching_host_admission_before_configuration(
@@ -1506,9 +1569,6 @@ def test_create_issue_has_complete_schema_wiring_and_bound_approval_digest():
     }
     request = hook("jira_create_issue", args)
 
-    invalid_digest = hashlib.sha256(
-        plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
-    ).hexdigest()
     assert request["action"] == "approve"
     assert "jira_create_issue" in request["message"]
     assert '"PROJ"' in request["message"]
@@ -1516,7 +1576,7 @@ def test_create_issue_has_complete_schema_wiring_and_bound_approval_digest():
     assert '"Broken"' in request["message"]
     assert args["description"] not in request["message"]
     assert len(request["message"]) <= 600
-    assert request["rule_key"] != "jira_create_issue:" + invalid_digest
+    assert plugin._approval_rule_digest(args) is not None
 
 
 def test_create_issue_requires_matching_host_admission_before_configuration(monkeypatch):

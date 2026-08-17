@@ -22,7 +22,7 @@ _WRITE_TOOLS = frozenset(
         "jira_link_issues",
     }
 )
-_INVALID_APPROVAL_ARGS = "<invalid-approval-args>"
+_INVALID_APPROVAL_MESSAGE = "Jira write arguments cannot be safely approved"
 # A valid 32,000-character comment can contain control characters, each of
 # which encodes as six JSON bytes.  256 KiB covers that 192,000-byte worst
 # case plus the bounded argument envelope while remaining a firm hook limit.
@@ -37,14 +37,15 @@ class _InvalidApprovalArguments(Exception):
     """Internal marker for values that cannot safely bind an approval."""
 
 
-def _approval_rule_digest(args) -> str:
+def _approval_rule_digest(args) -> str | None:
     """Hash exact JSON arguments under a running byte budget.
 
     This hook runs before operation validation. Exact ``dict``/``list`` JSON
-    containers are the only shapes that a write may subsequently execute;
-    anything else, including a cycle or over-budget structure, is assigned a
-    single sentinel digest. Valid values are emitted in sorted-key JSON form
-    directly into the digest, so the full canonical object is never built.
+    containers are the only shapes that a write may subsequently execute.
+    Invalid, cyclic, unencodable, or over-budget arguments return ``None`` so
+    they cannot create an approval or reusable rule. Valid values are emitted
+    in sorted-key JSON form directly into the digest, so the full canonical
+    object is never built.
     """
 
     digest = hashlib.sha256()
@@ -165,7 +166,7 @@ def _approval_rule_digest(args) -> str:
         encode(args, 0)
         return digest.hexdigest()
     except Exception:
-        return hashlib.sha256(_INVALID_APPROVAL_ARGS.encode("utf-8")).hexdigest()
+        return None
 
 
 def _arg(args: dict, name: str) -> str:
@@ -279,6 +280,16 @@ def register(ctx) -> None:
 
     def handler(name):
         def invoke(args: dict, **_kwargs) -> str:
+            if name in _WRITE_TOOLS and _approval_rule_digest(args) is None:
+                return _json(
+                    {
+                        "success": False,
+                        "error": {
+                            "category": "invalid_input",
+                            "message": SAFE_ERROR_MESSAGES["invalid_input"],
+                        },
+                    }
+                )
             if name in _WRITE_TOOLS and not _has_write_admission(
                 _kwargs.get("tool_admission"), name
             ):
@@ -353,6 +364,11 @@ def register(ctx) -> None:
         if summarise is None:
             return None
         argument_digest = _approval_rule_digest(args)
+        if argument_digest is None:
+            return {
+                "action": "block",
+                "message": _INVALID_APPROVAL_MESSAGE,
+            }
         return {
             "action": "approve",
             "message": (

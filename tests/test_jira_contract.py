@@ -1,7 +1,6 @@
 """Connector-level contract: error shape, envelope shape, approval coverage."""
 
 import json
-import hashlib
 from collections import UserDict
 import importlib.util
 import sys
@@ -172,20 +171,16 @@ class TestApprovalCoverage:
 
         assert comment_first["rule_key"] == comment_second["rule_key"]
         assert update_first["rule_key"] != update_second["rule_key"]
-        invalid_digest = hashlib.sha256(
-            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
-        ).hexdigest()
-        assert plugin._approval_rule_digest(unicode_update) != invalid_digest
+        assert plugin._approval_rule_digest(unicode_update) is not None
         control_first = hook("jira_add_comment", control_comment)
         control_second = hook("jira_add_comment", dict(control_comment))
         changed_control = hook("jira_add_comment", changed_control_comment)
         assert control_first["rule_key"] == control_second["rule_key"]
         assert control_first["rule_key"] != changed_control["rule_key"]
-        assert control_first["rule_key"] != "jira_add_comment:" + invalid_digest
         assert comment["body"] not in comment_first["message"]
         assert update["fields"]["description"] not in update_first["message"]
 
-    def test_invalid_approval_arguments_use_one_safe_deterministic_sentinel(self):
+    def test_invalid_approval_arguments_are_blocked_without_a_reusable_rule(self):
         plugin = _load_plugin()
         nested = []
         for _ in range(1_000):
@@ -210,23 +205,31 @@ class TestApprovalCoverage:
                 "key": "ABC-1",
                 "fields": {"priority": UserDict({"id": "3"})},
             },
+            {
+                "key": "ABC-1",
+                "transition_id": "21",
+                "expected_status": "\ud800",
+            },
         ]
 
-        invalid_digest = hashlib.sha256(
-            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
-        ).hexdigest()
         canonical = [plugin._approval_rule_digest(value) for value in invalid]
 
-        assert canonical == [invalid_digest] * len(invalid)
+        assert canonical == [None] * len(invalid)
         ctx = FakeCtx()
         plugin.register(ctx)
         hook = ctx.hooks["pre_tool_call"]
-        expected_rule_key = "jira_update_fields:" + invalid_digest
-        for value in invalid:
-            request = hook("jira_update_fields", value)
-            assert request["rule_key"] == expected_rule_key
-            assert len(request["message"]) <= 600
-            assert "caller-secret-should-not-appear" not in request["message"]
+        for index, value in enumerate(invalid):
+            tool_name = (
+                "jira_transition_issue"
+                if index == len(invalid) - 1
+                else "jira_update_fields"
+            )
+            refusal = hook(tool_name, value)
+            assert refusal == {
+                "action": "block",
+                "message": "Jira write arguments cannot be safely approved",
+            }
+            assert "caller-secret-should-not-appear" not in refusal["message"]
 
     def test_approval_digest_stops_before_full_multi_value_serialization(
         self, monkeypatch
@@ -245,7 +248,5 @@ class TestApprovalCoverage:
 
         digest = plugin._approval_rule_digest(oversized)
 
-        assert digest == hashlib.sha256(
-            plugin._INVALID_APPROVAL_ARGS.encode("utf-8")
-        ).hexdigest()
+        assert digest is None
         assert serialized_types == []

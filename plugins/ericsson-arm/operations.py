@@ -15,6 +15,7 @@ import os
 import re
 import stat
 from typing import Any, BinaryIO, Mapping
+from urllib.parse import unquote_to_bytes
 
 if __package__:
     from ._common.envelope import result_envelope
@@ -37,6 +38,7 @@ _MAX_PROPERTY_KEYS = 64
 _MAX_PROPERTY_VALUES = 32
 _MAX_PROPERTY_CHARS = 1024
 _CHECKSUM_CHUNK = 1024 * 1024
+_MAX_PATH_DECODE_PASSES = 4
 
 
 def _bounded_string(value: Any, maximum: int) -> str | None:
@@ -52,6 +54,28 @@ def _as_int(value: Any) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _has_url_delimiter(value: str) -> bool:
+    """Detect raw or repeatedly percent-encoded query/fragment delimiters.
+
+    The shared transport decodes paths up to this same bound. Rejecting here
+    keeps a delete approval's path from being reinterpreted as a query or
+    fragment when the request URL is built.
+    """
+    current = value
+    for _ in range(_MAX_PATH_DECODE_PASSES):
+        if "?" in current or "#" in current:
+            return True
+        try:
+            decoded = unquote_to_bytes(current).decode("utf-8")
+        except UnicodeDecodeError:
+            # The transport rejects invalid URL encoding before any request.
+            return False
+        if decoded == current:
+            return False
+        current = decoded
+    return "?" in current or "#" in current
 
 
 class _BoundedUpload:
@@ -127,6 +151,7 @@ class ArmOperations:
             "\x00" in cleaned
             or "\\" in cleaned
             or ".." in cleaned.split("/")
+            or _has_url_delimiter(cleaned)
             or any(character.isspace() for character in cleaned)
         ):
             raise ArmError(

@@ -18,15 +18,27 @@ from auth import (  # noqa: E402
 from models import ArmError  # noqa: E402
 
 
+def _is_arm_module(module: object) -> bool:
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, (str, Path)):
+        return False
+    try:
+        return Path(module_file).resolve().is_relative_to(PLUGIN.resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _detach_arm_standalone_imports() -> None:
     """Keep this standalone-plugin test from contaminating sibling plugins."""
     for name in ("auth", "client", "models"):
         module = sys.modules.get(name)
-        module_file = getattr(module, "__file__", None)
-        if module_file is not None and Path(module_file).parent == PLUGIN:
+        if _is_arm_module(module):
             sys.modules.pop(name, None)
     for name in tuple(sys.modules):
-        if name == "_common" or name.startswith("_common."):
+        if (
+            (name == "_common" or name.startswith("_common."))
+            and _is_arm_module(sys.modules[name])
+        ):
             sys.modules.pop(name, None)
     while str(PLUGIN) in sys.path:
         sys.path.remove(str(PLUGIN))

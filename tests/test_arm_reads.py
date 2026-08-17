@@ -1,6 +1,7 @@
 """Bounded Artifactory reads."""
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -11,20 +12,35 @@ sys.path.insert(0, str(PLUGIN))
 from models import ArmError  # noqa: E402
 from operations import ArmOperations  # noqa: E402
 
-_ARM_COMMON_MODULES = tuple(
-    name for name in sys.modules if name == "_common" or name.startswith("_common.")
-)
+def _is_arm_module(module: object) -> bool:
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, (str, Path)):
+        return False
+    try:
+        return Path(module_file).resolve().is_relative_to(PLUGIN.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+_ARM_COMMON_MODULES = {
+    name: module
+    for name, module in sys.modules.items()
+    if (name == "_common" or name.startswith("_common."))
+    and _is_arm_module(module)
+}
 
 
 def _detach_arm_standalone_imports() -> None:
     """Keep this standalone-plugin test from contaminating sibling plugins."""
     for name in ("auth", "client", "models", "operations", "tools"):
         module = sys.modules.get(name)
-        module_file = getattr(module, "__file__", None)
-        if module_file is not None and Path(module_file).parent == PLUGIN:
+        if _is_arm_module(module):
             sys.modules.pop(name, None)
     for name in tuple(sys.modules):
-        if name == "_common" or name.startswith("_common."):
+        if (
+            (name == "_common" or name.startswith("_common."))
+            and _is_arm_module(sys.modules[name])
+        ):
             sys.modules.pop(name, None)
     while str(PLUGIN) in sys.path:
         sys.path.remove(str(PLUGIN))
@@ -36,9 +52,40 @@ _detach_arm_standalone_imports()
 def test_cross_order_cleanup_removes_arm_common_modules():
     """A later standalone connector must not resolve ARM's generic _common."""
     assert "_common" in _ARM_COMMON_MODULES
-    assert not any(
-        name == "_common" or name.startswith("_common.") for name in sys.modules
+    assert all(
+        sys.modules.get(name) is not module
+        for name, module in _ARM_COMMON_MODULES.items()
     )
+
+
+def test_cleanup_removes_arm_owned_generic_common_modules(monkeypatch):
+    """Only ARM's own generic imports are safe for this test to evict."""
+    module = types.ModuleType("_common")
+    module.__file__ = str(PLUGIN / "_common" / "__init__.py")
+    child = types.ModuleType("_common.envelope")
+    child.__file__ = str(PLUGIN / "_common" / "envelope.py")
+    monkeypatch.setitem(sys.modules, "_common", module)
+    monkeypatch.setitem(sys.modules, "_common.envelope", child)
+
+    _detach_arm_standalone_imports()
+
+    assert "_common" not in sys.modules
+    assert "_common.envelope" not in sys.modules
+
+
+def test_cleanup_preserves_a_foreign_generic_common_module(monkeypatch):
+    """An earlier connector's module cache is not owned by ARM's test."""
+    module = types.ModuleType("_common")
+    module.__file__ = "/tmp/foreign-plugin/_common/__init__.py"
+    child = types.ModuleType("_common.envelope")
+    child.__file__ = "/tmp/foreign-plugin/_common/envelope.py"
+    monkeypatch.setitem(sys.modules, "_common", module)
+    monkeypatch.setitem(sys.modules, "_common.envelope", child)
+
+    _detach_arm_standalone_imports()
+
+    assert sys.modules["_common"] is module
+    assert sys.modules["_common.envelope"] is child
 
 
 class FakeClient:

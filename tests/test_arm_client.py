@@ -13,16 +13,29 @@ from _common.transport import Response  # noqa: E402
 from client import ArmClient  # noqa: E402
 from models import ArmAuth, ArmError  # noqa: E402
 
+
+def _is_arm_module(module: object) -> bool:
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, (str, Path)):
+        return False
+    try:
+        return Path(module_file).resolve().is_relative_to(PLUGIN.resolve())
+    except (OSError, ValueError):
+        return False
+
+
 # The repository's standalone plugins intentionally share top-level module
 # names. Keep the imported ARM classes, but do not make later connector tests
 # resolve their own ``auth``, ``client``, or ``models`` imports to this plugin.
 for _module_name in ("auth", "client", "models"):
     _module = sys.modules.get(_module_name)
-    _module_file = getattr(_module, "__file__", None)
-    if _module_file is not None and Path(_module_file).parent == PLUGIN:
+    if _is_arm_module(_module):
         sys.modules.pop(_module_name, None)
 for _module_name in tuple(sys.modules):
-    if _module_name == "_common" or _module_name.startswith("_common."):
+    if (
+        (_module_name == "_common" or _module_name.startswith("_common."))
+        and _is_arm_module(sys.modules[_module_name])
+    ):
         sys.modules.pop(_module_name, None)
 while str(PLUGIN) in sys.path:
     sys.path.remove(str(PLUGIN))

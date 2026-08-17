@@ -83,6 +83,18 @@ SCHEMAS = {
         },
         ["repo", "path"],
     ),
+    "arm_search_artifacts": _schema(
+        "arm_search_artifacts",
+        "Search Artifactory with AQL, for example "
+        "'items.find({\"repo\":\"generic-local\",\"path\":{\"$match\":"
+        "\"Infra/images*\"}})'. Do not add .limit() — use max_results. "
+        "Required permission fields are added automatically.",
+        {
+            "query": {"type": "string", "minLength": 1, "maxLength": 8192},
+            "max_results": _LIMIT,
+        },
+        ["query"],
+    ),
 }
 
 
@@ -131,6 +143,10 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         if name == "arm_get_properties":
             return operations.get_properties(
                 values["repo"], values["path"], keys=values.get("keys")
+            )
+        if name == "arm_search_artifacts":
+            return operations.search_artifacts(
+                values["query"], max_results=values.get("max_results", 25)
             )
         raise ArmError("invalid_input")
     finally:

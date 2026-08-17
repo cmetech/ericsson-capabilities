@@ -78,6 +78,10 @@ _SAFE_REMEDIATIONS = frozenset({
         "Artifactory returned HTML where JSON was expected, which normally means "
         "an authentication interstitial answered instead of the API."
     ),
+    (
+        "Do not put .limit() in the query; AQL accepts only one and the "
+        "connector supplies it. Use max_results instead."
+    ),
 })
 _CERTIFICATE_EXPIRY_TEMPLATE = (
     "The client certificate expired on {expired_on}. Renew it and update "

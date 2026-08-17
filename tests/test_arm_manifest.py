@@ -97,6 +97,24 @@ class TestErrors:
             "authentication", remediation="Update the Artifactory token."
         ).remediation == "Update the Artifactory token."
 
+    def test_aql_limit_remediation_accepts_only_the_connector_owned_literal(self):
+        """Query text must never ride along in an input-validation error."""
+        models = _load_models_module()
+        remediation = (
+            "Do not put .limit() in the query; AQL accepts only one and "
+            "the connector supplies it. Use max_results instead."
+        )
+
+        assert models.ArmError(
+            "invalid_input", remediation=remediation
+        ).remediation == remediation
+        for unsafe in (
+            remediation + " query=items.find({\"repo\":\"secret\"})",
+            remediation.replace("max_results", "max-results"),
+            "Do not put .limit() in the query; token=remote-secret",
+        ):
+            assert models.ArmError("invalid_input", remediation=unsafe).remediation is None
+
     def test_client_static_remediations_preserve_only_exact_owned_literals(self):
         models = _load_models_module()
         access_guidance = (

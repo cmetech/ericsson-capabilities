@@ -353,6 +353,77 @@ PROPERTIES = {
 }
 
 
+AQL_RESPONSE = {
+    "results": [
+        {"repo": "generic-local", "path": "Infra/images/release-26.2.6",
+         "name": "oscar.tar.gz", "size": "5242880",
+         "created": "2026-07-01T10:00:00.000Z"},
+        {"repo": "generic-local", "path": "Infra/images/release-26.2.6",
+         "name": "oscar.manifest", "size": "512",
+         "created": "2026-07-01T10:01:00.000Z"},
+    ],
+    "range": {"start_pos": 0, "end_pos": 2, "total": 2},
+}
+
+
+class TestSearchArtifacts:
+    def test_posts_prepared_aql_as_text(self):
+        client = FakeClient([AQL_RESPONSE])
+        ArmOperations(client).search_artifacts(
+            'items.find({"repo":"generic-local"})', max_results=25
+        )
+        method, path, body = client.calls[0]
+        assert (method, path) == ("POST", "/artifactory/api/search/aql")
+        assert body.endswith(".limit(25)")
+        assert ".include(" in body
+
+    def test_returns_bounded_rows_with_a_full_path(self):
+        result = ArmOperations(FakeClient([AQL_RESPONSE])).search_artifacts(
+            'items.find({"repo":"generic-local"})'
+        )
+        first = result["items"][0]
+        assert first["name"] == "oscar.tar.gz"
+        assert first["full_path"] == (
+            "generic-local/Infra/images/release-26.2.6/oscar.tar.gz"
+        )
+        assert first["size"] == 5242880
+
+    def test_total_is_omitted_because_aql_reports_the_limited_set(self):
+        """range.total counts the returned rows, not the matching ones.
+        Reporting it as total would be a wrong number, and the envelope's
+        contract is that a wrong number is worse than none."""
+        result = ArmOperations(FakeClient([AQL_RESPONSE])).search_artifacts(
+            'items.find({"repo":"generic-local"})'
+        )
+        assert "total" not in result
+
+    def test_a_full_page_is_reported_as_truncated(self):
+        rows = [dict(AQL_RESPONSE["results"][0], name=f"f{i}.tgz") for i in range(10)]
+        result = ArmOperations(FakeClient([{"results": rows}])).search_artifacts(
+            'items.find({"repo":"x"})', max_results=10
+        )
+        assert result["truncated"] is True and result["hint"]
+
+    def test_a_short_page_is_not_truncated(self):
+        result = ArmOperations(FakeClient([AQL_RESPONSE])).search_artifacts(
+            'items.find({"repo":"x"})', max_results=25
+        )
+        assert result["truncated"] is False
+
+    def test_missing_results_key_raises(self):
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(FakeClient([{"range": {}}])).search_artifacts(
+                'items.find({"repo":"x"})'
+            )
+        assert excinfo.value.category == "invalid_remote_data"
+
+    def test_an_invalid_query_is_rejected_without_a_request(self):
+        client = FakeClient()
+        with pytest.raises(ArmError):
+            ArmOperations(client).search_artifacts("DROP TABLE artifacts")
+        assert client.calls == []
+
+
 class TestGetProperties:
     def test_returns_every_property_with_values_as_lists(self):
         """Artifactory properties are multi-valued. Flattening the single

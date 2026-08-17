@@ -14,9 +14,11 @@ from typing import Any, Mapping
 
 if __package__:
     from ._common.envelope import result_envelope
+    from .aql import prepare as prepare_aql
     from .models import ArmError
 else:
     from _common.envelope import result_envelope
+    from aql import prepare as prepare_aql
     from models import ArmError
 
 
@@ -203,6 +205,55 @@ class ArmOperations:
             "children": children,
             "children_truncated": children_truncated,
         }
+
+    def search_artifacts(
+        self, query: str, *, max_results: int = 25
+    ) -> dict[str, Any]:
+        """Search artefacts with bounded Artifactory Query Language."""
+        max_results = self._bounded_max(max_results, 100)
+        prepared = prepare_aql(query, max_results=max_results)
+
+        payload = self._mapping(
+            self.client.post_text(f"{self.base}/api/search/aql", prepared)
+        )
+        results = payload.get("results")
+        if not isinstance(results, list):
+            raise ArmError("invalid_remote_data")
+
+        rows = [row for row in results if isinstance(row, Mapping)]
+        items = []
+        for row in rows[:max_results]:
+            repo = row.get("repo")
+            path = row.get("path")
+            name = row.get("name")
+            joined = "/".join(
+                part
+                for part in (repo, path, name)
+                if isinstance(part, str) and part and part != "."
+            )
+            items.append({
+                "repo": self._remote_string(repo, 128) or "",
+                "path": self._remote_string(path, _MAX_PATH_CHARS) or "",
+                "name": self._remote_string(name, 512) or "",
+                "full_path": self._remote_string(joined, 2048) or "",
+                "size": _as_int(row.get("size")),
+                "created": self._remote_string(row.get("created"), 64),
+                "modified": self._remote_string(row.get("modified"), 64),
+            })
+
+        # AQL's range.total counts the rows this response carried, not the
+        # rows that matched, so it is deliberately not reported as `total`.
+        # A full page is the only truncation signal available.
+        truncated = len(rows) >= max_results
+        return result_envelope(
+            items,
+            truncated=truncated,
+            hint=(
+                "The result set filled max_results, so more artefacts may "
+                "match. Raise max_results or narrow the query."
+                if truncated else None
+            ),
+        )
 
     def get_properties(
         self, repo: str, path: str, *, keys: list[str] | None = None

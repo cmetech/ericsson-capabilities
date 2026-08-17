@@ -20,6 +20,9 @@ provides_tools:
   - gitlab_list_pipelines
   - gitlab_inspect_ci
   - gitlab_job_log
+  - gitlab_retry_job
+  - gitlab_play_job
+  - gitlab_retry_pipeline
   - gitlab_create_branch
   - gitlab_commit_changes
   - gitlab_create_merge_request

@@ -71,6 +71,17 @@ _SHA = re.compile(r"^[0-9a-f]{7,40}$")
 _MR_DRAFT_PREFIX = re.compile(r"^(?:draft:|\[draft\]|\(draft\)|wip:)", re.I)
 _MR_STATE_EVENTS = frozenset({"close", "reopen"})
 _MR_RESPONSE_STATES = frozenset({"opened", "closed", "merged", "locked"})
+_CI_STARTED_STATUSES = frozenset(
+    {
+        "created",
+        "waiting_for_resource",
+        "preparing",
+        "waiting_for_callback",
+        "pending",
+        "running",
+        "scheduled",
+    }
+)
 
 
 class _YamlCapacityError(Exception):
@@ -424,6 +435,174 @@ class GitLabOperations:
                     "to remain within max_bytes."
                 )
         return result
+
+    def _ci_action(
+        self,
+        project: str | int,
+        identifier: int,
+        endpoint: str,
+        label: str,
+        *,
+        dry_run: bool,
+        confirm: bool,
+    ) -> tuple[dict[str, Any], int, int | None, Any]:
+        """Validate, gate, and dispatch one non-retried CI mutation."""
+        if type(identifier) is not int or identifier < 1:
+            raise GitLabError("invalid_input")
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"{label} {identifier}",
+            )
+        except ConnectorError as exc:
+            raise GitLabError(exc.category) from None
+
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        project_id = resolved.get("id")
+        project_path = resolved.get("path", resolved.get("path_with_namespace"))
+        if (
+            type(project_id) is not int
+            or project_id < 1
+            or not isinstance(project_path, str)
+        ):
+            raise GitLabError("invalid_remote_data")
+        base = {
+            "ok": True,
+            "dry_run": not execute,
+            "project": project_path,
+        }
+        if not execute:
+            return base, project_id, None, None
+
+        status, payload = self._write_json(
+            "POST",
+            f"/api/v4/projects/{project_id}/{endpoint}",
+            {},
+            deadline=deadline,
+        )
+        if status >= 400:
+            raise self.client._error_for_status(status)
+        return base, project_id, status, payload
+
+    @staticmethod
+    def _ci_started_status(payload: Mapping[str, Any]) -> str:
+        """Require exact bounded evidence that a CI action started work."""
+        status = payload.get("status")
+        if (
+            type(status) is not str
+            or status not in _CI_STARTED_STATUSES
+            or status != status.strip()
+            or len(status) > 64
+            or "\x00" in status
+        ):
+            raise GitLabError("invalid_remote_data")
+        return status
+
+    def retry_job(
+        self,
+        project: str | int,
+        job_id: int,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Retry one CI job, returning GitLab's distinct new job identity."""
+        base, _project_id, status, payload = self._ci_action(
+            project,
+            job_id,
+            f"jobs/{job_id}/retry",
+            "CI job",
+            dry_run=dry_run,
+            confirm=confirm,
+        )
+        base["job_id"] = job_id
+        if status is None:
+            return base
+
+        def finish_retry_job():
+            if status != 201 or not isinstance(payload, Mapping):
+                raise GitLabError("invalid_remote_data")
+            new_job_id = payload.get("id")
+            if (
+                type(new_job_id) is not int
+                or new_job_id < 1
+                or new_job_id == job_id
+            ):
+                raise GitLabError("invalid_remote_data")
+            return {
+                **base,
+                "new_job_id": new_job_id,
+                "status": self._ci_started_status(payload),
+            }
+
+        return self._usable_write_result(finish_retry_job)
+
+    def play_job(
+        self,
+        project: str | int,
+        job_id: int,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Start one manual CI job without changing its identity."""
+        base, _project_id, status, payload = self._ci_action(
+            project,
+            job_id,
+            f"jobs/{job_id}/play",
+            "manual CI job",
+            dry_run=dry_run,
+            confirm=confirm,
+        )
+        base["job_id"] = job_id
+        if status is None:
+            return base
+
+        def finish_play_job():
+            if status != 200 or not isinstance(payload, Mapping):
+                raise GitLabError("invalid_remote_data")
+            if type(payload.get("id")) is not int or payload["id"] != job_id:
+                raise GitLabError("invalid_remote_data")
+            return {**base, "status": self._ci_started_status(payload)}
+
+        return self._usable_write_result(finish_play_job)
+
+    def retry_pipeline(
+        self,
+        project: str | int,
+        pipeline_id: int,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Retry failed or canceled jobs in one existing CI pipeline."""
+        base, project_id, status, payload = self._ci_action(
+            project,
+            pipeline_id,
+            f"pipelines/{pipeline_id}/retry",
+            "pipeline",
+            dry_run=dry_run,
+            confirm=confirm,
+        )
+        base["pipeline_id"] = pipeline_id
+        if status is None:
+            return base
+
+        def finish_retry_pipeline():
+            if status != 200 or not isinstance(payload, Mapping):
+                raise GitLabError("invalid_remote_data")
+            if (
+                type(payload.get("id")) is not int
+                or payload["id"] != pipeline_id
+                or type(payload.get("project_id")) is not int
+                or payload["project_id"] != project_id
+            ):
+                raise GitLabError("invalid_remote_data")
+            return {**base, "status": self._ci_started_status(payload)}
+
+        return self._usable_write_result(finish_retry_pipeline)
 
     def _parse_project_reference(self, reference: str | int) -> dict[str, Any]:
         if isinstance(reference, int) and not isinstance(reference, bool):

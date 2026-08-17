@@ -42,6 +42,9 @@ EXPECTED_TOOLS = {
     "gitlab_approve_merge_request",
     "gitlab_merge_merge_request",
     "gitlab_update_merge_request",
+    "gitlab_retry_job",
+    "gitlab_play_job",
+    "gitlab_retry_pipeline",
 }
 
 
@@ -111,7 +114,7 @@ def test_descriptor_is_standalone_static_and_declares_exact_current_tools():
     assert manifest["name"] == "ericsson-gitlab"
     assert manifest["kind"] == "standalone"
     assert manifest["config_schema"] == "config.schema.json"
-    assert len(EXPECTED_TOOLS) == 25
+    assert len(EXPECTED_TOOLS) == 28
     assert set(manifest["provides_tools"]) == EXPECTED_TOOLS
     assert {field["id"] for field in descriptor["fields"]} == {
         "origin",
@@ -170,6 +173,9 @@ def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
             "gitlab_approve_merge_request",
             "gitlab_merge_merge_request",
             "gitlab_update_merge_request",
+            "gitlab_retry_job",
+            "gitlab_play_job",
+            "gitlab_retry_pipeline",
         }:
             kwargs["tool_admission"] = types.SimpleNamespace(
                 approved=True,

@@ -21,6 +21,9 @@ _WRITE_TOOLS = frozenset(
         "gitlab_approve_merge_request",
         "gitlab_merge_merge_request",
         "gitlab_update_merge_request",
+        "gitlab_retry_job",
+        "gitlab_play_job",
+        "gitlab_retry_pipeline",
     }
 )
 
@@ -80,6 +83,16 @@ WRITE_APPROVALS = {
         f"Description: {_arg(a, 'description')}\n"
         f"State: {_arg(a, 'state_event')}\n"
         f"+labels: {_arg(a, 'add_labels')}  -labels: {_arg(a, 'remove_labels')}"
+    ),
+    "gitlab_retry_job": lambda a: (
+        f"Project: {_arg(a, 'project')}\nRetry job: {_arg(a, 'job_id')}"
+    ),
+    "gitlab_play_job": lambda a: (
+        f"Project: {_arg(a, 'project')}\nPlay manual job: {_arg(a, 'job_id')}"
+    ),
+    "gitlab_retry_pipeline": lambda a: (
+        f"Project: {_arg(a, 'project')}\n"
+        f"Retry pipeline: {_arg(a, 'pipeline_id')}"
     ),
 }
 _PLUGIN_SKILLS = (

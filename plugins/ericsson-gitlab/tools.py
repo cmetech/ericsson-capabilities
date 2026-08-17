@@ -295,6 +295,42 @@ SCHEMAS = {
         },
         ["project", "job_id"],
     ),
+    "gitlab_retry_job": _schema(
+        "gitlab_retry_job",
+        "Retry one failed GitLab CI job. Read gitlab_job_log first because "
+        "retrying without diagnosing usually reproduces the failure. "
+        "Requires dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "job_id": {"type": "integer", "minimum": 1},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "job_id"],
+    ),
+    "gitlab_play_job": _schema(
+        "gitlab_play_job",
+        "Start one manual GitLab CI job. Requires dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "job_id": {"type": "integer", "minimum": 1},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "job_id"],
+    ),
+    "gitlab_retry_pipeline": _schema(
+        "gitlab_retry_pipeline",
+        "Retry failed or canceled jobs in one GitLab pipeline. Requires "
+        "dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "pipeline_id": {"type": "integer", "minimum": 1},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "pipeline_id"],
+    ),
     "gitlab_create_branch": _schema(
         "gitlab_create_branch",
         "Create or reuse one bounded ticket branch after host approval.",
@@ -623,6 +659,27 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 values["project"],
                 values["job_id"],
                 max_bytes=values.get("max_bytes", 20000),
+            )
+        if name == "gitlab_retry_job":
+            return operations.retry_job(
+                values["project"],
+                values["job_id"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "gitlab_play_job":
+            return operations.play_job(
+                values["project"],
+                values["job_id"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "gitlab_retry_pipeline":
+            return operations.retry_pipeline(
+                values["project"],
+                values["pipeline_id"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
             )
         if name == "gitlab_create_branch":
             return operations.create_branch(

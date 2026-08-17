@@ -840,11 +840,28 @@ class FakeClient:
     def request_json(
         self, method, path, *, params=None, json_body=None, deadline=None
     ):
+        raise AssertionError("CI writes must use the one-attempt write path")
+
+    def request_json_response(
+        self,
+        method,
+        path,
+        *,
+        params=None,
+        json_body=None,
+        deadline=None,
+        raise_on_status=True,
+    ):
         self.calls.append((method, path, json_body))
         result = self.json_results.pop(0)
         if isinstance(result, Exception):
             raise result
-        return result
+        if isinstance(result, tuple):
+            return result
+        return 200, result, {}
+
+    def _error_for_status(self, status):
+        return GitLabError("invalid_remote_data")
 
     def request_raw(self, method, path, *, params=None, deadline=None):
         self.calls.append((method, path, params))
@@ -856,7 +873,7 @@ class FakeClient:
 
 def _project_resolved(ops):
     """GitLabOperations resolves a project before most calls; short-circuit."""
-    ops.resolve_project = lambda project: {"id": 7, "path": "g/p"}
+    ops.resolve_project = lambda project, deadline=None: {"id": 7, "path": "g/p"}
     return ops
 
 
@@ -930,3 +947,282 @@ class TestJobLog:
         with pytest.raises(GitLabError):
             ops.job_log("g/p", 0)
         assert client.calls == []
+
+
+class TestRetryJob:
+    def test_neither_flag_is_refused_without_a_request(self):
+        client = FakeClient()
+        ops = _project_resolved(GitLabOperations(client))
+        with pytest.raises(GitLabError) as excinfo:
+            ops.retry_job("g/p", 42)
+        assert excinfo.value.category == "confirmation_required"
+        assert client.calls == []
+
+    def test_confirm_retries_once_and_returns_the_new_job_identity(self):
+        client = FakeClient(
+            json_results=[(201, {"id": 99, "status": "pending"}, {})]
+        )
+        ops = _project_resolved(GitLabOperations(client))
+        result = ops.retry_job("g/p", 42, confirm=True)
+        assert client.calls == [
+            ("POST", "/api/v4/projects/7/jobs/42/retry", {})
+        ]
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "project": "g/p",
+            "job_id": 42,
+            "new_job_id": 99,
+            "status": "pending",
+        }
+
+    def test_dry_run_previews_without_dispatch(self):
+        client = FakeClient()
+        ops = _project_resolved(GitLabOperations(client))
+        assert ops.retry_job("g/p", 42, dry_run=True) == {
+            "ok": True,
+            "dry_run": True,
+            "project": "g/p",
+            "job_id": 42,
+        }
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            (200, {"id": 99, "status": "pending"}, {}),
+            (201, {"id": 42, "status": "pending"}, {}),
+            (201, {"id": True, "status": "pending"}, {}),
+            (201, {"id": 99, "status": "failed"}, {}),
+            (201, {"id": 99, "status": "pending "}, {}),
+            (201, {"id": 99, "status": "unknown"}, {}),
+            (201, ["not", "a", "job"], {}),
+        ],
+    )
+    def test_unusable_success_evidence_is_ambiguous_after_one_attempt(
+        self, response
+    ):
+        client = FakeClient(json_results=[response])
+        ops = _project_resolved(GitLabOperations(client))
+        with pytest.raises(GitLabError) as excinfo:
+            ops.retry_job("g/p", 42, confirm=True)
+        assert excinfo.value.category == "write_ambiguous"
+        assert client.calls == [
+            ("POST", "/api/v4/projects/7/jobs/42/retry", {})
+        ]
+
+
+class TestPlayJob:
+    def test_confirm_plays_the_same_manual_job(self):
+        client = FakeClient(
+            json_results=[(200, {"id": 42, "status": "pending"}, {})]
+        )
+        ops = _project_resolved(GitLabOperations(client))
+        result = ops.play_job("g/p", 42, confirm=True)
+        assert client.calls == [("POST", "/api/v4/projects/7/jobs/42/play", {})]
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "project": "g/p",
+            "job_id": 42,
+            "status": "pending",
+        }
+
+    def test_neither_flag_is_refused_without_a_request(self):
+        client = FakeClient()
+        ops = _project_resolved(GitLabOperations(client))
+        with pytest.raises(GitLabError) as excinfo:
+            ops.play_job("g/p", 42)
+        assert excinfo.value.category == "confirmation_required"
+        assert client.calls == []
+
+    def test_dry_run_previews_without_dispatch(self):
+        client = FakeClient()
+        ops = _project_resolved(GitLabOperations(client))
+        assert ops.play_job("g/p", 42, dry_run=True)["dry_run"] is True
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            (201, {"id": 42, "status": "pending"}, {}),
+            (200, {"id": 43, "status": "pending"}, {}),
+            (200, {"id": 42, "status": "manual"}, {}),
+            (200, {"id": 42, "status": 1}, {}),
+            (200, None, {}),
+        ],
+    )
+    def test_unusable_success_evidence_is_ambiguous_after_one_attempt(
+        self, response
+    ):
+        client = FakeClient(json_results=[response])
+        ops = _project_resolved(GitLabOperations(client))
+        with pytest.raises(GitLabError) as excinfo:
+            ops.play_job("g/p", 42, confirm=True)
+        assert excinfo.value.category == "write_ambiguous"
+        assert client.calls == [("POST", "/api/v4/projects/7/jobs/42/play", {})]
+
+
+class TestRetryPipeline:
+    def test_confirm_retries_the_same_pipeline(self):
+        client = FakeClient(
+            json_results=[
+                (
+                    200,
+                    {"id": 500, "project_id": 7, "status": "pending"},
+                    {},
+                )
+            ]
+        )
+        ops = _project_resolved(GitLabOperations(client))
+        result = ops.retry_pipeline("g/p", 500, confirm=True)
+        assert client.calls == [
+            ("POST", "/api/v4/projects/7/pipelines/500/retry", {})
+        ]
+        assert result == {
+            "ok": True,
+            "dry_run": False,
+            "project": "g/p",
+            "pipeline_id": 500,
+            "status": "pending",
+        }
+
+    def test_bad_pipeline_id_is_rejected_without_a_request(self):
+        client = FakeClient()
+        ops = _project_resolved(GitLabOperations(client))
+        with pytest.raises(GitLabError) as excinfo:
+            ops.retry_pipeline("g/p", -1, confirm=True)
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_dry_run_previews_without_dispatch(self):
+        client = FakeClient()
+        ops = _project_resolved(GitLabOperations(client))
+        assert ops.retry_pipeline("g/p", 500, dry_run=True)["dry_run"] is True
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            (201, {"id": 500, "project_id": 7, "status": "pending"}, {}),
+            (200, {"id": 501, "project_id": 7, "status": "pending"}, {}),
+            (200, {"id": 500, "project_id": 8, "status": "pending"}, {}),
+            (200, {"id": 500, "project_id": 7, "status": "success"}, {}),
+            (200, {"id": 500, "project_id": 7, "status": "pending\x00"}, {}),
+            (200, {}, {}),
+        ],
+    )
+    def test_unusable_success_evidence_is_ambiguous_after_one_attempt(
+        self, response
+    ):
+        client = FakeClient(json_results=[response])
+        ops = _project_resolved(GitLabOperations(client))
+        with pytest.raises(GitLabError) as excinfo:
+            ops.retry_pipeline("g/p", 500, confirm=True)
+        assert excinfo.value.category == "write_ambiguous"
+        assert client.calls == [
+            ("POST", "/api/v4/projects/7/pipelines/500/retry", {})
+        ]
+
+
+@pytest.mark.parametrize(
+    ("method_name", "identifier", "endpoint", "http_status"),
+    [
+        ("retry_job", 42, "jobs/42/retry", 201),
+        ("play_job", 42, "jobs/42/play", 200),
+        ("retry_pipeline", 500, "pipelines/500/retry", 200),
+    ],
+)
+def test_ci_write_unusable_real_http_success_is_ambiguous_without_retry(
+    method_name, identifier, endpoint, http_status
+):
+    operations = _operations(max_retries=4)
+    with respx.mock:
+        _mock_project()
+        route = respx.post(f"{PROJECT_API}/{endpoint}").mock(
+            return_value=httpx.Response(
+                http_status,
+                json={"id": identifier, "status": "unknown"},
+            )
+        )
+        with pytest.raises(GitLabError) as excinfo:
+            getattr(operations, method_name)("42", identifier, confirm=True)
+    assert excinfo.value.category == "write_ambiguous"
+    assert route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("method_name", "identifier", "endpoint"),
+    [
+        ("retry_job", 42, "jobs/42/retry"),
+        ("play_job", 42, "jobs/42/play"),
+        ("retry_pipeline", 500, "pipelines/500/retry"),
+    ],
+)
+def test_ci_write_real_transport_uncertainty_is_ambiguous_without_retry(
+    method_name, identifier, endpoint
+):
+    operations = _operations(max_retries=4)
+    with respx.mock:
+        _mock_project()
+        route = respx.post(f"{PROJECT_API}/{endpoint}").mock(
+            side_effect=httpx.ReadTimeout("private outcome unknown")
+        )
+        with pytest.raises(GitLabError) as excinfo:
+            getattr(operations, method_name)("42", identifier, confirm=True)
+    assert excinfo.value.category == "write_ambiguous"
+    assert "private" not in str(excinfo.value)
+    assert route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "method_name", "expected_call"),
+    [
+        (
+            "gitlab_retry_job",
+            {"project": "g/p", "job_id": 42, "confirm": True},
+            "retry_job",
+            ("g/p", 42, False, True),
+        ),
+        (
+            "gitlab_play_job",
+            {"project": "g/p", "job_id": 43, "dry_run": True},
+            "play_job",
+            ("g/p", 43, True, False),
+        ),
+        (
+            "gitlab_retry_pipeline",
+            {"project": "g/p", "pipeline_id": 500, "confirm": True},
+            "retry_pipeline",
+            ("g/p", 500, False, True),
+        ),
+    ],
+)
+def test_ci_write_invoke_forwards_only_the_declared_arguments(
+    monkeypatch, tool_name, arguments, method_name, expected_call
+):
+    _auth, _client, _models, _operations_module, tools = _modules()
+    calls = []
+
+    class Client:
+        def close(self):
+            calls.append(("close",))
+
+    class Operations:
+        client = Client()
+
+    operations = Operations()
+
+    def method(project, identifier, *, dry_run=False, confirm=False):
+        calls.append((project, identifier, dry_run, confirm))
+        return {"tool": tool_name}
+
+    setattr(operations, method_name, method)
+    monkeypatch.setattr(
+        tools,
+        "operations_from_configuration",
+        lambda configuration, **options: operations,
+    )
+
+    assert tools.invoke(tool_name, arguments, object()) == {"tool": tool_name}
+    assert calls == [expected_call, ("close",)]

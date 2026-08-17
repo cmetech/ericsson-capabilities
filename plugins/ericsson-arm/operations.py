@@ -603,3 +603,78 @@ class ArmOperations:
             }
         finally:
             handle.close()
+
+    def delete(
+        self,
+        repo: str,
+        path: str,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Delete one Artifactory path with a read-only preview option.
+
+        A folder is deleted recursively by Artifactory in this one request;
+        this connector must never turn one approval into a per-child loop.
+        """
+        repo = self._repo(repo)
+        # Empty paths name the repository root and are never deletable.
+        path = self._path(path)
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"deletion of {repo}/{path}",
+            )
+        except ConnectorError as exc:
+            raise ArmError(exc.category) from None
+
+        if not execute:
+            try:
+                preview = self.artifact_info(repo, path, max_children=_MAX_CHILDREN)
+            except ArmError as exc:
+                if exc.category != "not_found":
+                    raise
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "repo": repo,
+                    "path": path,
+                    "exists": False,
+                    "deleted": False,
+                }
+            return {
+                "ok": True,
+                "dry_run": True,
+                "repo": repo,
+                "path": path,
+                "exists": True,
+                "deleted": False,
+                "kind": preview["kind"],
+                "size": preview["size"],
+                "child_count": len(preview["children"]),
+                "child_count_truncated": preview["children_truncated"],
+            }
+
+        response = self.client.send(
+            "DELETE", f"{self.base}/{repo}/{path}", classify=False
+        )
+        if response.status == 404:
+            return {
+                "ok": True,
+                "dry_run": False,
+                "repo": repo,
+                "path": path,
+                "deleted": True,
+                "already_absent": True,
+            }
+        if not 200 <= response.status < 300:
+            self.client._classify(response)
+        return {
+            "ok": True,
+            "dry_run": False,
+            "repo": repo,
+            "path": path,
+            "deleted": True,
+            "already_absent": False,
+        }

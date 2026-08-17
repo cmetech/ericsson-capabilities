@@ -5,23 +5,28 @@ from __future__ import annotations
 import hashlib
 import json
 
-_WRITE_TOOLS = frozenset({"arm_deploy"})
+_WRITE_TOOLS = frozenset({"arm_deploy", "arm_delete"})
 _APPROVAL_STRING_LIMITS = {"repo": 128, "path": 1024, "source_file": 4096}
+_APPROVAL_REQUIRED_STRINGS = {
+    "arm_deploy": frozenset({"repo", "path", "source_file"}),
+    "arm_delete": frozenset({"repo", "path"}),
+}
 
 
-def _approval_rule_digest(args: object) -> str | None:
-    """Bind approval to one bounded, schema-shaped deploy request."""
-    if type(args) is not dict:
+def _approval_rule_digest(tool_name: object, args: object) -> str | None:
+    """Bind write approval to one bounded, schema-shaped tool request."""
+    required_strings = _APPROVAL_REQUIRED_STRINGS.get(tool_name)
+    if type(args) is not dict or required_strings is None:
         return None
-    allowed = set(_APPROVAL_STRING_LIMITS) | {"dry_run", "confirm"}
+    allowed = set(required_strings) | {"dry_run", "confirm"}
     if (
-        not {"repo", "path", "source_file"}.issubset(args)
+        not required_strings.issubset(args)
         or not set(args).issubset(allowed)
         or any(
             type(args.get(name)) is not str
             or not args[name]
-            or len(args[name]) > maximum
-            for name, maximum in _APPROVAL_STRING_LIMITS.items()
+            or len(args[name]) > _APPROVAL_STRING_LIMITS[name]
+            for name in required_strings
         )
         or any(type(args[name]) is not bool for name in ("dry_run", "confirm") if name in args)
     ):
@@ -47,6 +52,12 @@ WRITE_APPROVALS = {
         f"Upload file: {_arg(a, 'source_file')}\n"
         f"To repository: {_arg(a, 'repo')}\n"
         f"At path: {_arg(a, 'path')}"
+    ),
+    "arm_delete": lambda a: (
+        f"Delete from repository: {_arg(a, 'repo')}\n"
+        f"Path: {_arg(a, 'path')}\n"
+        f"A folder path removes everything beneath it, and Artifactory "
+        f"deletion is not recoverable unless trash is enabled."
     ),
 }
 
@@ -97,15 +108,15 @@ def register(ctx: object) -> None:
         summarise = WRITE_APPROVALS.get(tool_name)
         if summarise is None:
             return None
-        argument_digest = _approval_rule_digest(args)
+        argument_digest = _approval_rule_digest(tool_name, args)
         if argument_digest is None:
             return {
                 "action": "block",
-                "message": "ARM deploy arguments cannot be safely approved",
+                "message": "ARM write arguments cannot be safely approved",
             }
         return {
             "action": "approve",
-            "message": f"Approve Ericsson Artifactory deploy: {tool_name}\n{summarise(args)}",
+            "message": f"Approve Ericsson Artifactory write: {tool_name}\n{summarise(args)}",
             "rule_key": f"{tool_name}:{argument_digest}",
         }
 

@@ -112,6 +112,25 @@ SCHEMAS = {
         },
         ["repo", "path", "source_file"],
     ),
+    "arm_delete": _schema(
+        "arm_delete",
+        "Delete one Artifactory path. A folder path removes the whole "
+        "subtree in one atomic call. Run with dry_run first to see what "
+        "would be removed. Requires dry_run or confirm.",
+        {
+            "repo": _REPO,
+            "path": {
+                "type": "string", "minLength": 1, "maxLength": 1024,
+                "description": (
+                    "Path inside the repository. A folder path deletes it and "
+                    "everything under it."
+                ),
+            },
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["repo", "path"],
+    ),
 }
 
 
@@ -170,6 +189,13 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 values["repo"],
                 values["path"],
                 values["source_file"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "arm_delete":
+            return operations.delete(
+                values["repo"],
+                values["path"],
                 dry_run=values.get("dry_run", False),
                 confirm=values.get("confirm", False),
             )

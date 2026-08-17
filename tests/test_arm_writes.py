@@ -82,6 +82,19 @@ class FakeClient:
             "PUT", path, extra_headers=extra_headers, deadline=deadline, classify=False
         )
 
+    def get_json(self, path, *, params=None):
+        self.calls.append(("GET", path, params))
+        result = self.json_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    @staticmethod
+    def _classify(response):
+        if response.status == 403:
+            raise ArmError("permission")
+        raise ArmError("transient")
+
 
 @pytest.fixture
 def artifact(tmp_path):
@@ -126,6 +139,127 @@ class TestDeployIntent:
         assert result["dry_run"] is True
         assert result["checksums"]["sha256"] == sums["sha256"]
         assert result["deduplicated"] is None
+        assert client.calls == []
+
+
+FOLDER_TO_DELETE = {
+    "repo": "generic-local",
+    "path": "/Infra/images/release-26.2.5",
+    "children": [
+        {"uri": "/oscar.tar.gz", "folder": False},
+        {"uri": "/oscar.manifest", "folder": False},
+    ],
+}
+
+FILE_TO_DELETE = {
+    "repo": "generic-local",
+    "path": "/Infra/images/oscar.tar.gz",
+    "size": "5242880",
+    "checksums": {"md5": "m" * 32, "sha1": "s" * 40, "sha256": "x" * 64},
+}
+
+
+class TestDelete:
+    def test_neither_flag_is_refused_without_a_request(self):
+        client = FakeClient()
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).delete("generic-local", "Infra/images/a.tgz")
+        assert excinfo.value.category == "confirmation_required"
+        assert client.calls == []
+
+    def test_dry_run_reads_but_does_not_delete(self):
+        """Previewing what is about to be destroyed is the point of the
+        preview, so this dry run costs one GET on purpose."""
+        client = FakeClient(json_results=[FOLDER_TO_DELETE])
+        result = ArmOperations(client).delete(
+            "generic-local", "Infra/images/release-26.2.5", dry_run=True
+        )
+        # get_json records a tuple, send records a dict -- so checking the
+        # recorded types is what proves no DELETE was issued, not just that
+        # the first call happened to be a GET.
+        assert len(client.calls) == 1
+        assert isinstance(client.calls[0], tuple)
+        assert client.calls[0][0] == "GET"
+        assert result["dry_run"] is True
+        assert result["kind"] == "folder"
+        assert result["child_count"] == 2
+
+    def test_dry_run_on_a_file_reports_its_size(self):
+        client = FakeClient(json_results=[FILE_TO_DELETE])
+        result = ArmOperations(client).delete(
+            "generic-local", "Infra/images/oscar.tar.gz", dry_run=True
+        )
+        assert result["kind"] == "file"
+        assert result["size"] == 5242880
+
+    def test_dry_run_on_an_absent_path_says_so(self):
+        client = FakeClient(json_results=[ArmError("not_found")])
+        result = ArmOperations(client).delete(
+            "generic-local", "Infra/gone", dry_run=True
+        )
+        assert result["dry_run"] is True
+        assert result["exists"] is False
+
+    def test_confirm_issues_one_delete(self):
+        client = FakeClient(raw_results=[Response(204, {}, b"")])
+        result = ArmOperations(client).delete(
+            "generic-local", "Infra/images/release-26.2.5", confirm=True
+        )
+        assert len(client.calls) == 1
+        call = client.calls[0]
+        assert call["method"] == "DELETE"
+        assert call["path"] == "/artifactory/generic-local/Infra/images/release-26.2.5"
+        assert result["deleted"] is True
+
+    def test_a_folder_delete_is_one_call_not_a_loop(self):
+        """Artifactory recurses server-side. One approval must not authorise
+        N hidden deletions."""
+        client = FakeClient(raw_results=[Response(204, {}, b"")])
+        ArmOperations(client).delete(
+            "generic-local", "Infra/images", confirm=True
+        )
+        assert len(client.calls) == 1
+
+    @pytest.mark.parametrize("status", [200, 204])
+    def test_success_statuses_are_accepted(self, status):
+        client = FakeClient(raw_results=[Response(status, {}, b"")])
+        assert ArmOperations(client).delete(
+            "generic-local", "Infra/a.tgz", confirm=True
+        )["deleted"] is True
+
+    def test_404_is_success_and_flagged_as_already_absent(self):
+        """Deleting something already gone is the desired end state, not a
+        failure. Ported from cleanup_artifactory_releases.sh:340."""
+        client = FakeClient(raw_results=[Response(404, {}, b"")])
+        result = ArmOperations(client).delete(
+            "generic-local", "Infra/a.tgz", confirm=True
+        )
+        assert result["deleted"] is True
+        assert result["already_absent"] is True
+
+    def test_a_permission_failure_is_classified(self):
+        client = FakeClient(raw_results=[Response(403, {}, b"")])
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).delete(
+                "generic-local", "Infra/a.tgz", confirm=True
+            )
+        assert excinfo.value.category == "permission"
+
+    def test_deleting_a_whole_repository_root_is_refused(self):
+        """An empty path would DELETE the repository root. There is no
+        agent workflow that wants that, and the blast radius is total."""
+        client = FakeClient()
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).delete("generic-local", "", confirm=True)
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_traversal_in_the_path_is_refused(self):
+        client = FakeClient()
+        with pytest.raises(ArmError):
+            ArmOperations(client).delete(
+                "generic-local", "Infra/../../other", confirm=True
+            )
         assert client.calls == []
 
 
@@ -541,5 +675,53 @@ class TestDeployToolWiring:
         )
         assert first["action"] == second["action"] == "approve"
         assert first["message"].splitlines()[1] == 'Upload file: "/tmp/a.tgz"'
+        assert first["rule_key"] != second["rule_key"]
+        assert context.hook("arm_artifact_info", {}) is None
+
+
+class TestDeleteToolWiring:
+    def test_schema_invoke_and_approval_are_bound_to_the_delete_path(self, monkeypatch):
+        schema = arm_tools.SCHEMAS["arm_delete"]["parameters"]
+        assert schema["required"] == ["repo", "path"]
+        assert schema["properties"]["path"]["minLength"] == 1
+        assert not {"approved", "tool_admission"} & set(schema["properties"])
+
+        calls = []
+
+        class Operations:
+            class Client:
+                def close(self):
+                    pass
+
+            client = Client()
+
+            def delete(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return {"ok": True}
+
+        monkeypatch.setattr(arm_tools, "operations_from_configuration", lambda *_a, **_k: Operations())
+        assert arm_tools.invoke(
+            "arm_delete",
+            {"repo": "generic-local", "path": "Infra/a.tgz", "confirm": True},
+            object(),
+        ) == {"ok": True}
+        assert calls == [
+            (("generic-local", "Infra/a.tgz"), {"dry_run": False, "confirm": True})
+        ]
+
+        plugin = _load_plugin()
+        context = _HookContext()
+        plugin.register(context)
+        first = context.hook(
+            "arm_delete",
+            {"repo": "generic-local", "path": "Infra/a.tgz", "confirm": True},
+        )
+        second = context.hook(
+            "arm_delete",
+            {"repo": "generic-local", "path": "Infra/b.tgz", "confirm": True},
+        )
+        assert first["action"] == second["action"] == "approve"
+        assert first["message"].splitlines()[1] == 'Delete from repository: "generic-local"'
+        assert "not recoverable" in first["message"]
         assert first["rule_key"] != second["rule_key"]
         assert context.hook("arm_artifact_info", {}) is None

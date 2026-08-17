@@ -1,0 +1,116 @@
+"""Tool schemas and safe invocation adapters for bounded Artifactory access."""
+
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+if __package__:
+    from .auth import authentication_from_configuration
+    from .client import ArmClient
+    from .models import ArmError
+    from .operations import ArmOperations
+else:
+    from auth import authentication_from_configuration
+    from client import ArmClient
+    from models import ArmError
+    from operations import ArmOperations
+
+
+_REPO = {
+    "type": "string", "minLength": 1, "maxLength": 128,
+    "description": "Artifactory repository key, for example 'generic-local'.",
+}
+_PATH = {
+    "type": "string", "maxLength": 1024,
+    "description": "Path inside the repository, with no '..' segments.",
+}
+_LIMIT = {"type": "integer", "minimum": 1, "maximum": 100}
+
+
+def _schema(name: str, description: str, properties: dict, required: list[str]):
+    return {
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        },
+    }
+
+
+SCHEMAS = {
+    "arm_list_repositories": _schema(
+        "arm_list_repositories",
+        "List visible Artifactory repositories, optionally filtered by "
+        "repository type (local, remote, virtual) or package type (generic, "
+        "docker, maven).",
+        {
+            "repository_type": {"type": "string", "maxLength": 64},
+            "package_type": {"type": "string", "maxLength": 64},
+            "max_results": _LIMIT,
+        },
+        [],
+    ),
+    "arm_artifact_info": _schema(
+        "arm_artifact_info",
+        "Fetch metadata for one Artifactory path. A file returns size, "
+        "checksums and download URI; a folder returns its children. Use this "
+        "rather than downloading: the sha256 is what identifies a build "
+        "artefact, and it costs no bytes.",
+        {
+            "repo": _REPO,
+            "path": _PATH,
+            "max_children": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+        ["repo", "path"],
+    ),
+}
+
+
+def check_available(configuration=None) -> bool:
+    if configuration is None:
+        return False
+    try:
+        authentication_from_configuration(configuration)
+        return True
+    except ArmError:
+        return False
+
+
+def operations_from_configuration(configuration, **client_options) -> ArmOperations:
+    authentication = authentication_from_configuration(configuration)
+    return ArmOperations(ArmClient(authentication, **client_options))
+
+
+def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
+    if name not in SCHEMAS or not isinstance(args, Mapping):
+        raise ArmError("invalid_input")
+    parameters = SCHEMAS[name]["parameters"]
+    allowed = set(parameters["properties"])
+    required = set(parameters.get("required", ()))
+    if (
+        any(not isinstance(key, str) for key in args)
+        or not required.issubset(args)
+        or not set(args).issubset(allowed)
+    ):
+        raise ArmError("invalid_input")
+    operations = operations_from_configuration(configuration, **client_options)
+    values = dict(args)
+    try:
+        if name == "arm_list_repositories":
+            return operations.list_repositories(
+                repository_type=values.get("repository_type"),
+                package_type=values.get("package_type"),
+                max_results=values.get("max_results", 25),
+            )
+        if name == "arm_artifact_info":
+            return operations.artifact_info(
+                values["repo"],
+                values["path"],
+                max_children=values.get("max_children", 100),
+            )
+        raise ArmError("invalid_input")
+    finally:
+        operations.client.close()

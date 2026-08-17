@@ -19,6 +19,7 @@ provides_tools:
   - gitlab_read_merge_request
   - gitlab_list_pipelines
   - gitlab_inspect_ci
+  - gitlab_job_log
   - gitlab_create_branch
   - gitlab_commit_changes
   - gitlab_create_merge_request

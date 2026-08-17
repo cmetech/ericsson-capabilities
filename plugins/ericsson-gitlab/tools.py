@@ -284,6 +284,17 @@ SCHEMAS = {
         },
         ["project"],
     ),
+    "gitlab_job_log": _schema(
+        "gitlab_job_log",
+        "Read one GitLab CI job's log. Returns the tail by default, because "
+        "a failing job's cause is normally at the end.",
+        {
+            "project": _PROJECT,
+            "job_id": {"type": "integer", "minimum": 1},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 200000},
+        },
+        ["project", "job_id"],
+    ),
     "gitlab_create_branch": _schema(
         "gitlab_create_branch",
         "Create or reuse one bounded ticket branch after host approval.",
@@ -483,6 +494,12 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 max_include_bytes=values.get("max_include_bytes", 128 * 1024),
                 max_groups=values.get("max_groups", 10),
                 max_variables=values.get("max_variables", 500),
+            )
+        if name == "gitlab_job_log":
+            return operations.job_log(
+                values["project"],
+                values["job_id"],
+                max_bytes=values.get("max_bytes", 20000),
             )
         if name == "gitlab_create_branch":
             return operations.create_branch(

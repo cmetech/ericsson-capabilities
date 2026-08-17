@@ -210,6 +210,25 @@ class GitLabClient:
         )
         return value
 
+    def request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        deadline: float | None = None,
+    ):
+        """Fetch a non-JSON body (job traces, raw file contents).
+
+        Still bounded by the transport's max_response_bytes, so a runaway
+        job log cannot exhaust memory.
+        """
+        return _call_as_gitlab_error(
+            lambda: self._client.request(
+                method, path, params=params, json_body=None, deadline=deadline
+            )
+        )
+
     def _request(self, method, path, *, params, json_body, deadline):
         _status, value, headers = self.request_json_response(
             method,

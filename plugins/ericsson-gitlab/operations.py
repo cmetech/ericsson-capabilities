@@ -16,9 +16,11 @@ import httpx
 
 if __package__:
     from .client import GitLabClient
+    from ._common.envelope import UNTRUSTED_CONTENT_WARNING
     from .models import GitLabError, PageResult
 else:  # Standalone source tests import modules directly from the plugin root.
     from client import GitLabClient
+    from _common.envelope import UNTRUSTED_CONTENT_WARNING
     from models import GitLabError, PageResult
 
 
@@ -50,6 +52,7 @@ _MAX_CI_VARIABLES = 2000
 _MAX_CI_YAML_NODES = 4096
 _MAX_CI_YAML_DEPTH = 64
 _MAX_CI_YAML_ALIASES = 128
+_MAX_LOG_BYTES = 200_000
 _MAX_WRITE_ACTIONS = 100
 _MAX_WRITE_BYTES = 512 * 1024
 _MAX_COMMIT_MESSAGE = 4096
@@ -326,6 +329,54 @@ class GitLabOperations:
     ) -> None:
         self.client = client
         self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def _redact_text(self, value: str) -> str:
+        """Strip the configured PAT out of remote text before returning it."""
+        secret = getattr(self.client.auth, "pat", "")
+        if isinstance(secret, str) and len(secret) >= 4:
+            value = value.replace(secret, "<redacted>")
+        return value
+
+    def job_log(
+        self, project: str | int, job_id: int, *, max_bytes: int = 20_000
+    ) -> dict[str, Any]:
+        """Fetch one job's trace, biased to the tail.
+
+        A failing job's cause is at the end of its log, so truncation keeps
+        the tail and discards the head -- the opposite of the usual choice,
+        and the reason this does not reuse the generic list envelope.
+        """
+        if type(job_id) is not int or job_id < 1:
+            raise GitLabError("invalid_input")
+        if type(max_bytes) is not int or not 1 <= max_bytes <= _MAX_LOG_BYTES:
+            raise GitLabError("invalid_input")
+        resolved = self.resolve_project(project)
+        response = self.client.request_raw(
+            "GET", f"/api/v4/projects/{resolved['id']}/jobs/{job_id}/trace"
+        )
+        raw = response.body
+        total = len(raw)
+        truncated = total > max_bytes
+        tail = raw[-max_bytes:] if truncated else raw
+        text = self._redact_text(tail.decode("utf-8", errors="replace"))
+        encoded = text.encode("utf-8")
+        if len(encoded) > max_bytes:
+            text = encoded[-max_bytes:].decode("utf-8", errors="ignore")
+        result: dict[str, Any] = {
+            "job_id": job_id,
+            "log": text,
+            "truncated": truncated,
+            "total_bytes": total,
+            "returned_bytes": len(text.encode("utf-8")),
+            "content_warning": UNTRUSTED_CONTENT_WARNING,
+        }
+        if truncated:
+            result["hint"] = (
+                "Only the last portion of the log is shown, because a failing "
+                "job's cause is normally at the end. Raise max_bytes to see "
+                "more."
+            )
+        return result
 
     def _parse_project_reference(self, reference: str | int) -> dict[str, Any]:
         if isinstance(reference, int) and not isinstance(reference, bool):

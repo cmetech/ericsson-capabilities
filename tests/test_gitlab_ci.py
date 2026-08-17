@@ -14,6 +14,14 @@ import respx
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "ericsson-gitlab"
+if str(PLUGIN) not in sys.path:
+    sys.path.insert(0, str(PLUGIN))
+
+from _common.transport import Response  # noqa: E402
+from models import GitLabError  # noqa: E402
+from operations import GitLabOperations  # noqa: E402
+
+
 FIXTURES = REPO / "tests" / "fixtures" / "gitlab" / "ci"
 ORIGIN = "https://gitlab.example.test"
 PROJECT_API = f"{ORIGIN}/api/v4/projects/42"
@@ -802,3 +810,121 @@ def test_ci_schema_and_operation_bounds_reject_invalid_inputs_before_transport()
         with pytest.raises(models.GitLabError) as caught:
             operations.inspect_ci("42", **options)
         assert caught.value.category == "invalid_input"
+
+
+class FakeClient:
+    """Stands in for GitLabClient, recording calls."""
+
+    def __init__(self, json_results=None, raw_results=None):
+        self.json_results = list(json_results or [])
+        self.raw_results = list(raw_results or [])
+        self.calls = []
+        self.max_pages = 10
+
+        class _Auth:
+            origin = "https://gitlab.test"
+            pat = "secret-pat-value"
+
+        self.auth = _Auth()
+
+    def operation_deadline(self):
+        return 0.0
+
+    def get_json(self, path, *, params=None, deadline=None):
+        self.calls.append(("GET", path, params))
+        result = self.json_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def request_json(
+        self, method, path, *, params=None, json_body=None, deadline=None
+    ):
+        self.calls.append((method, path, json_body))
+        result = self.json_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def request_raw(self, method, path, *, params=None, deadline=None):
+        self.calls.append((method, path, params))
+        result = self.raw_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _project_resolved(ops):
+    """GitLabOperations resolves a project before most calls; short-circuit."""
+    ops.resolve_project = lambda project: {"id": 7, "path": "g/p"}
+    return ops
+
+
+class TestJobLog:
+    def test_fetches_the_trace_endpoint(self):
+        client = FakeClient(raw_results=[Response(200, {}, b"build ok")])
+        ops = _project_resolved(GitLabOperations(client))
+        result = ops.job_log("g/p", 42)
+        assert client.calls[0][:2] == ("GET", "/api/v4/projects/7/jobs/42/trace")
+        assert result["log"] == "build ok"
+        assert result["truncated"] is False
+
+    def test_long_log_is_tail_biased(self):
+        """Failures are at the end of a job log. Returning the head answers
+        nothing and costs the same context."""
+        body = ("head\n" + "x" * 50_000 + "\nTHE ACTUAL ERROR").encode()
+        client = FakeClient(raw_results=[Response(200, {}, body)])
+        ops = _project_resolved(GitLabOperations(client))
+        result = ops.job_log("g/p", 42, max_bytes=1000)
+        assert result["truncated"] is True
+        assert "THE ACTUAL ERROR" in result["log"]
+        assert "head" not in result["log"]
+        assert result["hint"]
+
+    def test_reports_original_size(self):
+        client = FakeClient(raw_results=[Response(200, {}, b"y" * 5000)])
+        ops = _project_resolved(GitLabOperations(client))
+        result = ops.job_log("g/p", 42, max_bytes=100)
+        assert result["total_bytes"] == 5000
+        assert result["returned_bytes"] == len(result["log"].encode())
+
+    def test_empty_log_is_not_an_error(self):
+        """A queued job legitimately has no trace yet."""
+        client = FakeClient(raw_results=[Response(200, {}, b"")])
+        ops = _project_resolved(GitLabOperations(client))
+        assert ops.job_log("g/p", 42)["log"] == ""
+
+    def test_undecodable_bytes_do_not_raise(self):
+        """CI logs carry ANSI and occasionally invalid UTF-8; a decode error
+        must not lose the whole log."""
+        client = FakeClient(raw_results=[Response(200, {}, b"ok \xff\xfe bad")])
+        ops = _project_resolved(GitLabOperations(client))
+        assert "ok" in ops.job_log("g/p", 42)["log"]
+
+    def test_log_carries_the_untrusted_content_warning(self):
+        """Job logs contain arbitrary text from the build, including anything
+        a branch author chose to echo."""
+        client = FakeClient(raw_results=[Response(200, {}, b"log")])
+        ops = _project_resolved(GitLabOperations(client))
+        assert ops.job_log("g/p", 42)["content_warning"]
+
+    def test_pat_is_redacted_from_the_log(self):
+        client = FakeClient(
+            raw_results=[Response(200, {}, b"token=secret-pat-value")]
+        )
+        ops = _project_resolved(GitLabOperations(client))
+        assert "secret-pat-value" not in ops.job_log("g/p", 42)["log"]
+
+    def test_returned_log_stays_byte_capped_after_redaction(self):
+        client = FakeClient(raw_results=[Response(200, {}, b"abcd")])
+        client.auth.pat = "abcd"
+        ops = _project_resolved(GitLabOperations(client))
+        result = ops.job_log("g/p", 42, max_bytes=4)
+        assert result["returned_bytes"] <= 4
+
+    def test_bad_job_id_rejected_without_a_request(self):
+        client = FakeClient()
+        ops = _project_resolved(GitLabOperations(client))
+        with pytest.raises(GitLabError):
+            ops.job_log("g/p", 0)
+        assert client.calls == []

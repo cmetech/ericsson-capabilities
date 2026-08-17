@@ -410,6 +410,14 @@ class TestSearchArtifacts:
         )
         assert result["truncated"] is False
 
+    def test_a_full_raw_page_is_truncated_even_with_a_malformed_row(self):
+        rows = [dict(AQL_RESPONSE["results"][0], name=f"f{i}.tgz") for i in range(9)]
+        result = ArmOperations(FakeClient([{"results": [*rows, "malformed"]}])).search_artifacts(
+            'items.find({"repo":"x"})', max_results=10
+        )
+        assert result["returned"] == 9
+        assert result["truncated"] is True and result["hint"]
+
     def test_missing_results_key_raises(self):
         with pytest.raises(ArmError) as excinfo:
             ArmOperations(FakeClient([{"range": {}}])).search_artifacts(

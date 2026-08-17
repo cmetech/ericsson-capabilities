@@ -244,7 +244,7 @@ class ArmOperations:
         # AQL's range.total counts the rows this response carried, not the
         # rows that matched, so it is deliberately not reported as `total`.
         # A full page is the only truncation signal available.
-        truncated = len(rows) >= max_results
+        truncated = len(results) >= max_results
         return result_envelope(
             items,
             truncated=truncated,

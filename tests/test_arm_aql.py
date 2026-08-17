@@ -83,6 +83,22 @@ class TestLimit:
         with pytest.raises(ArmError):
             prepare('items.find({"repo":"x"}) . limit ( 5000 )', max_results=25)
 
+    def test_literal_limit_text_in_a_predicate_is_not_a_modifier(self):
+        query = 'items.find({"name":{"$match":"literal .limit("}})'
+        prepared = prepare(query, max_results=10)
+        assert prepared == query + (
+            '.include("repo","path","name","size","created","modified")'
+            ".limit(10)"
+        )
+
+    def test_escaped_quote_and_backslash_do_not_end_a_predicate_string(self):
+        query = (
+            r'items.find({"name":{"$match":"escaped \" quote and \\ '
+            r'literal .limit("}})'
+        )
+        prepared = prepare(query, max_results=10)
+        assert prepared.endswith(".limit(10)")
+
 
 class TestIncludeInjection:
     def test_a_default_include_is_added_when_absent(self):
@@ -121,6 +137,22 @@ class TestIncludeInjection:
             'items.find({"repo":"x"}).include("repo")', max_results=10
         )
         assert prepared.count('"repo"') == 2, "repo appears in find and include only"
+
+    def test_literal_include_text_in_a_predicate_does_not_block_injection(self):
+        query = 'items.find({"name":{"$match":"literal .include(bar)"}})'
+        prepared = prepare(query, max_results=10)
+        assert prepared == query + (
+            '.include("repo","path","name","size","created","modified")'
+            ".limit(10)"
+        )
+
+
+class TestMaxResults:
+    @pytest.mark.parametrize("max_results", [0, True, 101])
+    def test_invalid_max_results_is_rejected(self, max_results):
+        with pytest.raises(ArmError) as excinfo:
+            prepare('items.find({"repo":"x"})', max_results=max_results)
+        assert excinfo.value.category == "invalid_input"
 
 
 class TestSortAndOffsetSurvive:

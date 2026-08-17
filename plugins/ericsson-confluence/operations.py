@@ -428,12 +428,20 @@ class ConfluenceOperations:
         current_version = self._version(current)
         if current_version is None:
             raise ConfluenceError("invalid_remote_data")
-        next_title = title if title is not None else (
-            _bounded_string(current.get("title"), _MAX_TITLE_CHARS) or ""
-        )
-        next_storage = (
-            new_storage if new_storage is not None else self._storage_value(current)
-        )
+        if title is None:
+            next_title = _bounded_string(current.get("title"), _MAX_TITLE_CHARS)
+            if not next_title:
+                raise ConfluenceError("invalid_remote_data")
+        else:
+            next_title = title
+        if new_storage is None:
+            body = current.get("body")
+            storage = body.get("storage") if isinstance(body, Mapping) else None
+            next_storage = storage.get("value") if isinstance(storage, Mapping) else None
+            if not isinstance(next_storage, str):
+                raise ConfluenceError("invalid_remote_data")
+        else:
+            next_storage = new_storage
 
         if not execute:
             return {
@@ -458,10 +466,13 @@ class ConfluenceOperations:
                 "PUT", f"{self.base}/content/{content_id}", json_body=payload
             )
         )
+        response_version = self._version(response)
+        if response_version is None:
+            raise ConfluenceError("invalid_remote_data")
         return {
             "ok": True,
             "dry_run": False,
             "id": content_id,
-            "version": self._version(response) or current_version + 1,
+            "version": response_version,
             "title": next_title,
         }

@@ -185,6 +185,21 @@ class TestUpdatePage:
         )
         assert client.calls[1][2]["title"] == "Runbook"
 
+    @pytest.mark.parametrize("current", [
+        {key: value for key, value in CURRENT.items() if key != "title"},
+        {**CURRENT, "title": 3},
+    ])
+    def test_missing_or_malformed_current_title_rejects_body_only_change_without_put(
+        self, current
+    ):
+        client = FakeClient([current])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).update_page(
+                "12345", markdown="New body", confirm=True
+            )
+        assert excinfo.value.category == "invalid_remote_data"
+        assert [call[0] for call in client.calls] == ["GET"]
+
     def test_body_is_carried_over_when_only_title_changes(self):
         client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])
         ConfluenceOperations(client).update_page(
@@ -192,6 +207,19 @@ class TestUpdatePage:
         )
         assert client.calls[1][2]["body"]["storage"]["value"] == "<p>Old</p>"
         assert client.calls[1][2]["title"] == "Renamed"
+
+    @pytest.mark.parametrize("body", [{}, {"storage": {}}, {"storage": {"value": 3}}])
+    def test_missing_or_malformed_current_body_rejects_title_only_change_without_put(
+        self, body
+    ):
+        current = {**CURRENT, "body": body}
+        client = FakeClient([current])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).update_page(
+                "12345", title="Renamed", confirm=True
+            )
+        assert excinfo.value.category == "invalid_remote_data"
+        assert [call[0] for call in client.calls] == ["GET"]
 
     def test_markdown_structure_is_converted(self):
         client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])
@@ -225,6 +253,15 @@ class TestUpdatePage:
                 "12345", markdown="New", confirm=True
             )
         assert excinfo.value.category == "invalid_remote_data"
+
+    def test_missing_response_version_raises(self):
+        client = FakeClient([CURRENT, {"id": "12345"}])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).update_page(
+                "12345", markdown="New", confirm=True
+            )
+        assert excinfo.value.category == "invalid_remote_data"
+        assert [call[0] for call in client.calls] == ["GET", "PUT"]
 
     def test_macro_markup_is_escaped(self):
         client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])

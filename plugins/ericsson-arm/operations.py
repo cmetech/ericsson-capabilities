@@ -194,7 +194,11 @@ class ArmOperations:
         package_type: str | None = None,
         max_results: int = 25,
     ) -> dict[str, Any]:
-        """Enumerate visible repositories, optionally filtered."""
+        """Enumerate visible repositories, optionally filtered.
+
+        Invariant: every remote string flows through ``self._redact`` via
+        ``self._remote_string`` before bounding or returning it.
+        """
         max_results = self._bounded_max(max_results, 100)
         params: dict[str, Any] = {}
         for name, value in (("type", repository_type),
@@ -276,7 +280,11 @@ class ArmOperations:
     def search_artifacts(
         self, query: str, *, max_results: int = 25
     ) -> dict[str, Any]:
-        """Search artefacts with bounded Artifactory Query Language."""
+        """Search artefacts with bounded Artifactory Query Language.
+
+        Invariant: every remote string flows through ``self._redact`` via
+        ``self._remote_string`` before bounding or returning it.
+        """
         max_results = self._bounded_max(max_results, 100)
         prepared = prepare_aql(query, max_results=max_results)
 
@@ -333,6 +341,9 @@ class ArmOperations:
 
         Read-only by design. Properties drive promotion gates, so a write
         here could promote an artefact that has not passed them.
+
+        Invariant: every remote property string flows through ``self._redact``
+        via ``self._remote_string`` before bounding or returning it.
         """
         repo = self._repo(repo)
         path = self._path(path)

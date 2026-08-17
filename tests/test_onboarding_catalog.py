@@ -283,9 +283,23 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         EMPTY_IMPLEMENTATION,
     ),
     "confluence-tools": (
-        "planned-not-implemented",
-        False,
-        EMPTY_IMPLEMENTATION | {"plugins": ["plugins/ericsson-confluence"]},
+        "available",
+        True,
+        EMPTY_IMPLEMENTATION
+        | {
+            "plugins": ["plugins/ericsson-confluence"],
+            "tools": [
+                "confluence_get_page",
+                "confluence_get_page_body",
+                "confluence_search",
+                "confluence_list_spaces",
+                "confluence_list_children",
+                "confluence_list_comments",
+                "confluence_create_page",
+                "confluence_update_page",
+                "confluence_add_comment",
+            ],
+        },
     ),
     "artifactory-arm-tools": (
         "planned-not-implemented",
@@ -622,7 +636,6 @@ def test_real_catalog_maturity_is_honest() -> None:
         "third-party-support-lcm-tracker",
         "re-identification",
         "windows-laptop-diagnostic",
-        "confluence-tools",
         "artifactory-arm-tools",
     }
     assert {
@@ -762,7 +775,7 @@ def test_scaffold_entries_make_no_runnable_claims() -> None:
     repo = Path(__file__).resolve().parents[1]
     entries = {entry["id"]: entry for entry in load_entries(repo)}
 
-    for entry_id in ("confluence-tools", "artifactory-arm-tools"):
+    for entry_id in ("artifactory-arm-tools",):
         entry = entries[entry_id]
         assert entry["maturity"] == "planned-not-implemented"
         assert entry["recommendation_eligible"] is False

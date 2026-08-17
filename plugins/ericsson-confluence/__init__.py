@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import importlib.machinery
 import json
 from pathlib import Path
@@ -30,8 +29,8 @@ def _own_package_loaded() -> bool:
         return False
 
 
-def _direct_connector_modules():
-    """Load this connector's modules without using generic top-level names."""
+def _direct_package_name() -> str:
+    """Create a collision-isolated package for a direct file import."""
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
     index = 0
@@ -54,9 +53,20 @@ def _direct_connector_modules():
         except (AttributeError, OSError, TypeError):
             pass
         index += 1
-    models = importlib.import_module(f"{package_name}.models")
-    tools = importlib.import_module(f"{package_name}.tools")
-    return tools, models
+    return package_name
+
+
+# Hermes normally imports this file as a package, but the plugin loader and
+# repository tests also support a direct file import. Give that case its own
+# package namespace before using qualified local imports. This keeps generic
+# ``tools``/``models`` modules out of the resolution path while leaving the
+# registration loop structurally visible to the onboarding contract scanner.
+if not _own_package_loaded():
+    __package__ = _direct_package_name()
+    __spec__ = sys.modules[__package__].__spec__
+
+from . import tools as confluence_tools
+from .models import ConfluenceError, SAFE_ERROR_MESSAGES, safe_remediation
 
 
 def _arg(args: dict, name: str) -> str:
@@ -136,15 +146,6 @@ def register(ctx: object) -> None:
     # register the read tools below.
     if not hasattr(ctx, "register_tool"):
         return
-
-    if _own_package_loaded():
-        from . import tools as confluence_tools
-        from .models import ConfluenceError, SAFE_ERROR_MESSAGES, safe_remediation
-    else:
-        confluence_tools, confluence_models = _direct_connector_modules()
-        ConfluenceError = confluence_models.ConfluenceError
-        SAFE_ERROR_MESSAGES = confluence_models.SAFE_ERROR_MESSAGES
-        safe_remediation = confluence_models.safe_remediation
 
     def json_error(category: str, remediation: object = None) -> str:
         error = {"category": category, "message": SAFE_ERROR_MESSAGES[category]}

@@ -191,6 +191,30 @@ class TestSearch:
         assert result["returned"] == 30
         assert client.calls[1][2]["start"] == 25
 
+    def test_empty_page_stops_without_repeating_request(self):
+        first = {"results": [{"id": str(i), "title": f"P{i}", "type": "page"}
+                             for i in range(25)],
+                 "start": 0, "limit": 25, "size": 25, "totalSize": 50}
+        empty = {"results": [], "start": 25, "limit": 25, "size": 0, "totalSize": 50}
+        client = FakeClient([first, empty])
+        result = ConfluenceOperations(client).search("x", max_results=100)
+        assert result["returned"] == 25
+        assert result["truncated"] is True
+        assert [call[2]["start"] for call in client.calls] == [0, 25]
+
+    def test_unknown_total_full_pages_stop_at_max_pages(self):
+        page = {"results": [{"id": str(i), "title": f"P{i}", "type": "page"}
+                            for i in range(100)],
+                "start": 0, "limit": 100, "size": 100}
+        client = FakeClient([page, dict(page)])
+        rows, total, truncated = ConfluenceOperations(client, max_pages=2)._paged(
+            "/rest/api/content/search", {}, 250
+        )
+        assert len(rows) == 200
+        assert total is None
+        assert truncated is True
+        assert [call[2]["start"] for call in client.calls] == [0, 100]
+
     def test_stops_at_max_results_and_reports_truncation(self):
         page = {"results": [{"id": str(i), "title": f"P{i}", "type": "page"}
                             for i in range(25)],

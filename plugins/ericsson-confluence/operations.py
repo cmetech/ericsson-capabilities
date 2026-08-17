@@ -96,20 +96,35 @@ class ConfluenceOperations:
         total: int | None = None
         start = 0
         page_size = min(max_results, 100)
+        pages_fetched = 0
+        last_results: list[Any] = []
         for _ in range(self.max_pages):
+            pages_fetched += 1
             payload = self._mapping(self.client.get_json(path, params={**params, "start": start, "limit": page_size}))
             results = payload.get("results")
             if not isinstance(results, list):
                 raise ConfluenceError("invalid_remote_data")
+            last_results = results
             if type(payload.get("totalSize")) is int:
                 total = payload["totalSize"]
             rows.extend(row for row in results if isinstance(row, Mapping))
+            if not results:
+                break
             if len(rows) >= max_results or (
                 len(results) < page_size and (total is None or total <= len(rows))
             ):
                 break
             start += len(results)
-        truncated = len(rows) > max_results or (total is not None and total > len(rows))
+        reached_page_cap = (
+            pages_fetched == self.max_pages
+            and len(rows) < max_results
+            and len(last_results) >= page_size
+        )
+        truncated = (
+            len(rows) > max_results
+            or (total is not None and total > len(rows))
+            or reached_page_cap
+        )
         return rows[:max_results], total, truncated
 
     def search(self, cql: str, *, max_results: int = 25) -> dict[str, Any]:

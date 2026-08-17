@@ -1629,11 +1629,15 @@ def test_registered_write_hook_requests_host_approval_and_delivers_reserved_admi
     plugin.register(context)
     assert "pre_tool_call" in context.hooks
     for name in WRITE_TOOLS:
-        assert context.hooks["pre_tool_call"](name, {}) == {
-            "action": "approve",
-            "message": "Approve Ericsson GitLab mutation",
-            "rule_key": name,
-        }
+        approval = context.hooks["pre_tool_call"](name, {})
+        assert approval["action"] == "approve"
+        assert name in approval["message"]
+        assert "Project: null" in approval["message"]
+        assert approval["rule_key"] != name
+        assert approval["rule_key"].startswith(f"{name}:")
+        assert context.hooks["pre_tool_call"](name, {})["rule_key"] == approval[
+            "rule_key"
+        ]
     assert context.hooks["pre_tool_call"]("gitlab_read_file", {}) is None
 
     calls = []

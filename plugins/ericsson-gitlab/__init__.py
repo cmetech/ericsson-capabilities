@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -16,6 +17,27 @@ _WRITE_TOOLS = frozenset(
         "gitlab_create_merge_request",
     }
 )
+
+
+def _arg(args: dict, name: str) -> str:
+    """Render one argument for an approval prompt, safely and bounded."""
+    value = args.get(name) if isinstance(args, dict) else None
+    return json.dumps(value, ensure_ascii=True)[:512]
+
+
+WRITE_APPROVALS = {
+    "gitlab_create_branch": lambda a: (
+        f"Project: {_arg(a, 'project')}\nTicket: {_arg(a, 'ticket_key')}"
+    ),
+    "gitlab_commit_changes": lambda a: (
+        f"Project: {_arg(a, 'project')}\nBranch: {_arg(a, 'branch')}\n"
+        f"Message: {_arg(a, 'commit_message')}"
+    ),
+    "gitlab_create_merge_request": lambda a: (
+        f"Project: {_arg(a, 'project')}\n"
+        f"Source: {_arg(a, 'source_branch')} -> {_arg(a, 'target_branch')}"
+    ),
+}
 _PLUGIN_SKILLS = (
     (
         "repository-research",
@@ -140,12 +162,28 @@ def register(ctx) -> None:
         return invoke
 
     def require_write_approval(tool_name: str, args: dict, **kwargs):
-        if tool_name not in _WRITE_TOOLS:
+        summarise = WRITE_APPROVALS.get(tool_name)
+        if summarise is None:
             return None
+        canonical_args = json.dumps(
+            args if isinstance(args, dict) else {},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         return {
             "action": "approve",
-            "message": "Approve Ericsson GitLab mutation",
-            "rule_key": tool_name,
+            "message": (
+                f"Approve Ericsson GitLab change: {tool_name}\n"
+                f"{summarise(args if isinstance(args, dict) else {})}"
+            ),
+            # Argument-derived, NOT the bare tool name. See
+            # tools/approval.py:3366 -- a tool-name rule_key means one
+            # "always" blankets every future call of that tool.
+            "rule_key": (
+                f"{tool_name}:"
+                f"{hashlib.sha256(canonical_args.encode('utf-8')).hexdigest()}"
+            ),
         }
 
     ctx.register_hook("pre_tool_call", require_write_approval)

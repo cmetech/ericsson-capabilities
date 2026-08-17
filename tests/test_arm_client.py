@@ -15,9 +15,14 @@ from models import ArmAuth, ArmError  # noqa: E402
 
 # The repository's standalone plugins intentionally share top-level module
 # names. Keep the imported ARM classes, but do not make later connector tests
-# resolve their own ``client`` or ``models`` imports to this plugin.
-sys.modules.pop("client", None)
-sys.modules.pop("models", None)
+# resolve their own ``auth``, ``client``, or ``models`` imports to this plugin.
+for _module_name in ("auth", "client", "models"):
+    _module = sys.modules.get(_module_name)
+    _module_file = getattr(_module, "__file__", None)
+    if _module_file is not None and Path(_module_file).parent == PLUGIN:
+        sys.modules.pop(_module_name, None)
+while str(PLUGIN) in sys.path:
+    sys.path.remove(str(PLUGIN))
 
 ACCESS_REDIRECT = Response(
     302,

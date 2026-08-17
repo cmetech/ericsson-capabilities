@@ -18,6 +18,20 @@ from auth import (  # noqa: E402
 from models import ArmError  # noqa: E402
 
 
+def _detach_arm_standalone_imports() -> None:
+    """Keep this standalone-plugin test from contaminating sibling plugins."""
+    for name in ("auth", "client", "models"):
+        module = sys.modules.get(name)
+        module_file = getattr(module, "__file__", None)
+        if module_file is not None and Path(module_file).parent == PLUGIN:
+            sys.modules.pop(name, None)
+    while str(PLUGIN) in sys.path:
+        sys.path.remove(str(PLUGIN))
+
+
+_detach_arm_standalone_imports()
+
+
 def _write_certificate(directory: Path, *, days: int) -> tuple[Path, Path]:
     """Generate a throwaway self-signed cert/key pair with openssl.
 

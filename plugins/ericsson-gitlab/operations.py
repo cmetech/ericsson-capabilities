@@ -1821,7 +1821,10 @@ class GitLabOperations:
             f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/merge",
             body,
             deadline=deadline,
+            passthrough_error_statuses=frozenset({400, 405, 409}),
         )
+        if status in {405, 409}:
+            raise GitLabError("conflict")
         if status >= 400:
             raise self.client._error_for_status(status)
 
@@ -1836,6 +1839,13 @@ class GitLabOperations:
                 or state != state.strip()
                 or "\x00" in state
             ):
+                raise GitLabError("invalid_remote_data")
+            expected_states = (
+                {"opened", "merged"}
+                if merge_when_pipeline_succeeds
+                else {"merged"}
+            )
+            if state not in expected_states:
                 raise GitLabError("invalid_remote_data")
             merge_commit_sha = payload.get("merge_commit_sha")
             if merge_commit_sha is not None and (
@@ -2247,6 +2257,7 @@ class GitLabOperations:
         payload: Mapping[str, Any],
         *,
         deadline: float,
+        passthrough_error_statuses: frozenset[int] = frozenset({400, 409}),
     ) -> tuple[int, Any]:
         """Perform exactly one bounded mutating request without retrying."""
 
@@ -2257,7 +2268,7 @@ class GitLabOperations:
             deadline=deadline,
             raise_on_status=False,
         )
-        if status >= 400 and status not in {400, 409}:
+        if status >= 400 and status not in passthrough_error_statuses:
             raise self.client._error_for_status(status)
         return status, decoded
 

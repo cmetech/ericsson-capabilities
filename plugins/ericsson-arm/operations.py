@@ -23,6 +23,9 @@ else:
 _REPO_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MAX_PATH_CHARS = 1024
 _MAX_CHILDREN = 1000
+_MAX_PROPERTY_KEYS = 64
+_MAX_PROPERTY_VALUES = 32
+_MAX_PROPERTY_CHARS = 1024
 
 
 def _bounded_string(value: Any, maximum: int) -> str | None:
@@ -199,4 +202,71 @@ class ArmOperations:
             } if isinstance(checksums, Mapping) else {},
             "children": children,
             "children_truncated": children_truncated,
+        }
+
+    def get_properties(
+        self, repo: str, path: str, *, keys: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Read an artefact's Artifactory properties.
+
+        This is the join key back to GitLab: CI stamps build.number,
+        build.name and vcs.revision here, so properties are what connect a
+        deployed artefact to the pipeline and commit that produced it.
+
+        Read-only by design. Properties drive promotion gates, so a write
+        here could promote an artefact that has not passed them.
+        """
+        repo = self._repo(repo)
+        path = self._path(path)
+
+        selector = ""
+        if keys is not None:
+            if (
+                not isinstance(keys, list)
+                or not 1 <= len(keys) <= _MAX_PROPERTY_KEYS
+                or any(
+                    not isinstance(key, str)
+                    or not key.strip()
+                    or "," in key
+                    or ";" in key
+                    or len(key) > 255
+                    for key in keys
+                )
+            ):
+                raise ArmError(
+                    "invalid_input",
+                    remediation=(
+                        "keys must be a non-empty list of property names "
+                        "containing no commas or semicolons."
+                    ),
+                )
+            # A comma inside a key would silently become two keys, so keys
+            # are refused above rather than escaped.
+            selector = ",".join(keys)
+
+        payload = self._mapping(
+            self.client.get_json(
+                self._storage_path(repo, path), params={"properties": selector}
+            )
+        )
+        raw = payload.get("properties")
+        if raw is None:
+            properties: dict[str, list[str]] = {}
+        elif isinstance(raw, Mapping):
+            properties = {
+                self._remote_string(name, 255) or "": [
+                    self._remote_string(value, _MAX_PROPERTY_CHARS) or ""
+                    for value in values[:_MAX_PROPERTY_VALUES]
+                ]
+                for name, values in raw.items()
+                if isinstance(values, list)
+            }
+        else:
+            raise ArmError("invalid_remote_data")
+
+        return {
+            "repo": repo,
+            "path": path,
+            "properties": properties,
+            "count": len(properties),
         }

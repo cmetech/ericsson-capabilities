@@ -340,3 +340,119 @@ class TestArtifactInfo:
             "generic-local", "a.tgz"
         )
         assert "secret-token-value" not in repr(result)
+
+
+PROPERTIES = {
+    "uri": "https://artifactory.test/artifactory/api/storage/generic-local/a.tgz",
+    "properties": {
+        "build.number": ["1284"],
+        "build.name": ["oscar-release"],
+        "vcs.revision": ["9f2c1ab"],
+        "qa.approved": ["yes", "by-ci"],
+    },
+}
+
+
+class TestGetProperties:
+    def test_returns_every_property_with_values_as_lists(self):
+        """Artifactory properties are multi-valued. Flattening the single
+        case to a bare string would make the shape depend on the data."""
+        result = ArmOperations(FakeClient([PROPERTIES])).get_properties(
+            "generic-local", "a.tgz"
+        )
+        assert result["properties"]["build.number"] == ["1284"]
+        assert result["properties"]["qa.approved"] == ["yes", "by-ci"]
+
+    def test_requests_the_properties_view(self):
+        client = FakeClient([PROPERTIES])
+        ArmOperations(client).get_properties("generic-local", "a.tgz")
+        _method, path, params = client.calls[0]
+        assert path == "/artifactory/api/storage/generic-local/a.tgz"
+        assert params == {"properties": ""}
+
+    def test_key_filter_is_comma_joined(self):
+        """Matches super-cli's arm.joinComma helper."""
+        client = FakeClient([PROPERTIES])
+        ArmOperations(client).get_properties(
+            "generic-local", "a.tgz", keys=["build.number", "vcs.revision"]
+        )
+        assert client.calls[0][2] == {"properties": "build.number,vcs.revision"}
+
+    def test_empty_key_list_is_rejected_without_a_request(self):
+        client = FakeClient()
+        with pytest.raises(ArmError):
+            ArmOperations(client).get_properties("generic-local", "a.tgz", keys=[])
+        assert client.calls == []
+
+    def test_a_key_containing_a_comma_is_rejected(self):
+        """A comma inside a key would silently become two keys."""
+        client = FakeClient()
+        with pytest.raises(ArmError):
+            ArmOperations(client).get_properties(
+                "generic-local", "a.tgz", keys=["a,b"]
+            )
+        assert client.calls == []
+
+    def test_a_key_containing_a_semicolon_is_rejected(self):
+        client = FakeClient()
+        with pytest.raises(ArmError):
+            ArmOperations(client).get_properties(
+                "generic-local", "a.tgz", keys=["a;b"]
+            )
+        assert client.calls == []
+
+    def test_missing_properties_key_yields_an_empty_map_not_an_error(self):
+        """An artefact with no properties is normal, not a failure."""
+        result = ArmOperations(FakeClient([{"uri": "x"}])).get_properties(
+            "generic-local", "a.tgz"
+        )
+        assert result["properties"] == {}
+
+    def test_property_count_is_reported(self):
+        result = ArmOperations(FakeClient([PROPERTIES])).get_properties(
+            "generic-local", "a.tgz"
+        )
+        assert result["count"] == 4
+
+    def test_values_are_redacted_and_bounded(self):
+        payload = {"properties": {"leak": ["secret-token-value"], "big": ["z" * 5000]}}
+        result = ArmOperations(FakeClient([payload])).get_properties(
+            "generic-local", "a.tgz"
+        )
+        assert "secret-token-value" not in result["properties"]["leak"][0]
+        assert len(result["properties"]["big"][0]) <= 1024
+
+    def test_every_property_name_and_value_redacts_short_tokens(self):
+        client = FakeClient([{"properties": {"beforeQafter": ["beforeQafter"]}}])
+        client.auth.token = "Q"
+        client.auth.auth_header_value = "Bearer Q"
+
+        result = ArmOperations(client).get_properties("generic-local", "a.tgz")
+
+        property_name, values = next(iter(result["properties"].items()))
+        assert "Q" not in property_name
+        assert "Q" not in values[0]
+
+    def test_property_names_and_values_redact_before_bounding(self):
+        client = FakeClient([{
+            "properties": {
+                ("a" * 254) + "WXYZtail": [("z" * 1022) + "WXYZtail"]
+            }
+        }])
+        client.auth.token = "WXYZ"
+        client.auth.auth_header_value = "Bearer WXYZ"
+
+        result = ArmOperations(client).get_properties("generic-local", "a.tgz")
+
+        property_name, values = next(iter(result["properties"].items()))
+        assert "WX" not in property_name
+        assert len(property_name) <= 255
+        assert "WX" not in values[0]
+        assert len(values[0]) <= 1024
+
+    def test_non_mapping_properties_raises(self):
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(FakeClient([{"properties": ["not", "a", "map"]}])).get_properties(
+                "generic-local", "a.tgz"
+            )
+        assert excinfo.value.category == "invalid_remote_data"

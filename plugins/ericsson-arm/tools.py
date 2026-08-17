@@ -66,6 +66,23 @@ SCHEMAS = {
         },
         ["repo", "path"],
     ),
+    "arm_get_properties": _schema(
+        "arm_get_properties",
+        "Read one artefact's Artifactory properties. CI stamps build.number, "
+        "build.name and vcs.revision here, so this is how you connect a "
+        "deployed artefact back to the pipeline and commit that built it.",
+        {
+            "repo": _REPO,
+            "path": _PATH,
+            "keys": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 255},
+                "minItems": 1,
+                "maxItems": 64,
+            },
+        },
+        ["repo", "path"],
+    ),
 }
 
 
@@ -110,6 +127,10 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 values["repo"],
                 values["path"],
                 max_children=values.get("max_children", 100),
+            )
+        if name == "arm_get_properties":
+            return operations.get_properties(
+                values["repo"], values["path"], keys=values.get("keys")
             )
         raise ArmError("invalid_input")
     finally:

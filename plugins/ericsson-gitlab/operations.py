@@ -2481,6 +2481,12 @@ class GitLabOperations:
                 f"/api/v4/projects/{project_endpoint}/merge_requests/{iid}/changes"
             )
         )
+        head_sha = payload.get("sha")
+        if (
+            type(head_sha) is not str
+            or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None
+        ):
+            raise GitLabError("invalid_remote_data")
         raw_changes = _as_list(payload.get("changes"))
         changes: list[dict[str, Any]] = []
         remaining = self.client.max_diff_bytes
@@ -2536,6 +2542,7 @@ class GitLabOperations:
         result = {
             "id": payload.get("id"),
             "iid": payload.get("iid"),
+            "head_sha": head_sha,
             "title": payload.get("title"),
             "state": payload.get("state"),
             "source_branch": payload.get("source_branch"),

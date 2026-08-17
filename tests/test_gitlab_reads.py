@@ -472,10 +472,11 @@ def test_read_merge_request_bounds_change_count_and_aggregate_diff_bytes():
         respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests/7/changes").mock(
             return_value=httpx.Response(
                 200,
-                json={"id": 70, "iid": 7, "title": "Review", "state": "opened", "source_branch": "feature", "target_branch": "main", "web_url": f"{ORIGIN}/x/y/-/merge_requests/7", "changes": changes},
+                json={"id": 70, "iid": 7, "sha": "a" * 40, "title": "Review", "state": "opened", "source_branch": "feature", "target_branch": "main", "web_url": f"{ORIGIN}/x/y/-/merge_requests/7", "changes": changes},
             )
         )
         result = operations.read_merge_request("42", 7)
+    assert result["head_sha"] == "a" * 40
     assert len(result["changes"]) == 2
     assert sum(len(change["diff"].encode()) for change in result["changes"]) <= 12
     assert result["truncated"] is True
@@ -495,6 +496,7 @@ def test_merge_request_remote_incomplete_evidence_forces_truncation_warning(
     payload = {
         "id": 70,
         "iid": 7,
+        "sha": "a" * 40,
         "title": "Review",
         "state": "opened",
         "source_branch": "feature",
@@ -530,6 +532,7 @@ def test_merge_request_rejects_malformed_or_under_count_remote_change_evidence(
     payload = {
         "id": 70,
         "iid": 7,
+        "sha": "a" * 40,
         "title": "Review",
         "state": "opened",
         "source_branch": "feature",
@@ -562,6 +565,7 @@ def test_merge_request_rejects_cross_origin_url_and_non_scalar_identity():
     base = {
         "id": 70,
         "iid": 7,
+        "sha": "a" * 40,
         "title": "Review",
         "state": "opened",
         "source_branch": "feature",
@@ -580,6 +584,74 @@ def test_merge_request_rejects_cross_origin_url_and_non_scalar_identity():
             with pytest.raises(Exception) as caught:
                 operations.read_merge_request("42", 7)
             assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+class _RemoteString(str):
+    """A hostile mapping can supply a string subclass outside JSON decoding."""
+
+
+@pytest.mark.parametrize(
+    "sha_override",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"sha": "a" * 39}, id="short"),
+        pytest.param({"sha": "a" * 41}, id="long"),
+        pytest.param({"sha": "A" * 40}, id="uppercase"),
+        pytest.param({"sha": "g" * 40}, id="non-hex"),
+        pytest.param({"sha": 7}, id="integer"),
+        pytest.param({"sha": ["a" * 40]}, id="list"),
+        pytest.param({"sha": _RemoteString("a" * 40)}, id="string-subclass"),
+    ],
+)
+def test_read_merge_request_rejects_missing_or_noncanonical_head_sha(
+    monkeypatch, sha_override
+):
+    """Removing exact lowercase 40-hex validation must fail this contract."""
+    operations = _operations()
+    payload = {
+        "id": 70,
+        "iid": 7,
+        "title": "Review",
+        "state": "opened",
+        "source_branch": "feature",
+        "target_branch": "main",
+        "web_url": f"{ORIGIN}/x/y/-/merge_requests/7",
+        "changes": [],
+        **sha_override,
+    }
+    monkeypatch.setattr(operations.client, "get_json", lambda *_a, **_kw: payload)
+
+    with pytest.raises(Exception) as caught:
+        operations.read_merge_request("42", 7)
+
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+def test_read_merge_request_reread_exposes_changed_remote_head_sha():
+    """A new push must be visible before an agent approves or merges."""
+    operations = _operations()
+    base = {
+        "id": 70,
+        "iid": 7,
+        "title": "Review",
+        "state": "opened",
+        "source_branch": "feature",
+        "target_branch": "main",
+        "web_url": f"{ORIGIN}/x/y/-/merge_requests/7",
+        "changes": [],
+    }
+    with respx.mock:
+        route = respx.get(f"{ORIGIN}/api/v4/projects/42/merge_requests/7/changes")
+        route.side_effect = [
+            httpx.Response(200, json={**base, "sha": "a" * 40}),
+            httpx.Response(200, json={**base, "sha": "b" * 40}),
+        ]
+        reviewed = operations.read_merge_request("42", 7)
+        reread = operations.read_merge_request("42", 7)
+
+    assert reviewed["head_sha"] == "a" * 40
+    assert reread["head_sha"] == "b" * 40
+    assert reread["head_sha"] != reviewed["head_sha"]
 
 
 def test_list_pipelines_is_bounded_paginated_and_normalized_for_public_task8_tool():

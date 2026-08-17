@@ -38,6 +38,7 @@ PLUGIN_SKILLS = {
             "gitlab_list_merge_request_commits",
             "gitlab_list_merge_request_discussions",
             "gitlab_merge_request_approvals",
+            "gitlab_list_pipelines",
         },
         "write": {
             "gitlab_create_mr_note",
@@ -179,11 +180,13 @@ def test_merge_request_review_uses_active_agent_and_closes_the_approved_loop() -
         "gitlab_resolve_discussion",
         "gitlab_merge_request_approvals",
         "gitlab_approve_merge_request",
+        "gitlab_list_pipelines",
         "gitlab_merge_merge_request",
     )
     positions = [body.index(tool) for tool in ordered_loop]
     assert positions == sorted(positions)
     assert "exact reviewed head SHA" in body
+    assert "source_branch" in body
 
 
 def test_activity_digest_supports_natural_language_one_time_and_recurring_runs() -> None:

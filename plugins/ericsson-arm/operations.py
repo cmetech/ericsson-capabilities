@@ -9,15 +9,22 @@ Redaction and approval discipline follow ericsson-jira.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
 from typing import Any, Mapping
 
 if __package__:
     from ._common.envelope import result_envelope
+    from ._common.errors import ConnectorError
+    from ._common.guardrails import require_explicit_intent
     from .aql import prepare as prepare_aql
     from .models import ArmError
 else:
     from _common.envelope import result_envelope
+    from _common.errors import ConnectorError
+    from _common.guardrails import require_explicit_intent
     from aql import prepare as prepare_aql
     from models import ArmError
 
@@ -28,6 +35,7 @@ _MAX_CHILDREN = 1000
 _MAX_PROPERTY_KEYS = 64
 _MAX_PROPERTY_VALUES = 32
 _MAX_PROPERTY_CHARS = 1024
+_CHECKSUM_CHUNK = 1024 * 1024
 
 
 def _bounded_string(value: Any, maximum: int) -> str | None:
@@ -320,4 +328,169 @@ class ArmOperations:
             "path": path,
             "properties": properties,
             "count": len(properties),
+        }
+
+    def _resolve_source(self, source_file: Any) -> tuple[str, int]:
+        """Validate a local upload source and return its real path and size."""
+        if not isinstance(source_file, str) or not source_file:
+            raise ArmError("invalid_input")
+        if not os.path.isabs(source_file):
+            raise ArmError(
+                "invalid_input",
+                remediation="source_file must be an absolute path.",
+            )
+        real = os.path.realpath(source_file)
+        if not os.path.isfile(real):
+            raise ArmError(
+                "not_found",
+                remediation="source_file does not name a readable file.",
+            )
+
+        root = getattr(self.client.auth, "deploy_root", None)
+        if root:
+            try:
+                contained = os.path.commonpath([real, os.path.realpath(root)]) == os.path.realpath(root)
+            except ValueError:
+                contained = False
+            if not contained:
+                raise ArmError(
+                    "permission",
+                    remediation=(
+                        "This profile confines uploads to its configured deploy source "
+                        "root."
+                    ),
+                )
+
+        size = os.path.getsize(real)
+        limit = getattr(self.client.auth, "max_deploy_bytes", 0)
+        if size > limit:
+            raise ArmError(
+                "capacity",
+                remediation=(
+                    "The file is larger than this profile's maximum upload size. "
+                    "Raise it in the profile if this is expected."
+                ),
+            )
+        return real, size
+
+    @staticmethod
+    def _file_checksums(real_path: str) -> dict[str, str]:
+        """Compute Artifactory's three checksums in a single file pass."""
+        digests = {
+            "md5": hashlib.md5(usedforsecurity=False),
+            "sha1": hashlib.sha1(usedforsecurity=False),
+            "sha256": hashlib.sha256(),
+        }
+        with open(real_path, "rb") as handle:
+            for block in iter(lambda: handle.read(_CHECKSUM_CHUNK), b""):
+                for digest in digests.values():
+                    digest.update(block)
+        return {name: digest.hexdigest() for name, digest in digests.items()}
+
+    def _verify_deploy(self, response, checksums: dict[str, str]) -> Mapping[str, Any]:
+        """Verify that Artifactory's deploy response names this exact file."""
+        try:
+            payload = json.loads(response.body) if response.body else None
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            payload = None
+        if not isinstance(payload, Mapping):
+            raise ArmError(
+                "invalid_remote_data",
+                remediation="Artifactory did not return a deploy result.",
+            )
+        reported = payload.get("checksums")
+        if not isinstance(reported, Mapping) or not reported.get("sha256"):
+            raise ArmError(
+                "invalid_remote_data",
+                remediation="Artifactory returned no checksums to verify against.",
+            )
+        if reported.get("sha256") != checksums["sha256"]:
+            raise ArmError(
+                "invalid_remote_data",
+                remediation=(
+                    "The sha256 checksum Artifactory reported does not match the "
+                    "file that was sent. Do not treat this artefact as published."
+                ),
+            )
+        return payload
+
+    def deploy(
+        self,
+        repo: str,
+        path: str,
+        source_file: str,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Publish one local file with a checksum-only probe and full fallback."""
+        repo = self._repo(repo)
+        path = self._path(path)
+        real_path, size = self._resolve_source(source_file)
+        checksums = self._file_checksums(real_path)
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"an upload to {repo}/{path}",
+            )
+        except ConnectorError as exc:
+            raise ArmError(exc.category) from None
+
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "repo": repo,
+                "path": path,
+                "source_file": real_path,
+                "size": size,
+                "checksums": checksums,
+                "deduplicated": None,
+                "bytes_uploaded": None,
+            }
+
+        target = f"{self.base}/{repo}/{path}"
+        checksum_headers = {
+            "X-Checksum-Sha256": checksums["sha256"],
+            "X-Checksum-Sha1": checksums["sha1"],
+            "X-Checksum-Md5": checksums["md5"],
+        }
+        probe = self.client.send(
+            "PUT",
+            target,
+            extra_headers={"X-Checksum-Deploy": "true", **checksum_headers},
+            classify=False,
+        )
+        if 200 <= probe.status < 300:
+            payload = self._verify_deploy(probe, checksums)
+            return {
+                "ok": True,
+                "dry_run": False,
+                "repo": repo,
+                "path": path,
+                "source_file": real_path,
+                "size": size,
+                "checksums": checksums,
+                "deduplicated": True,
+                "bytes_uploaded": 0,
+                "download_uri": self._redact(_bounded_string(payload.get("downloadUri"), 2048)),
+            }
+
+        with open(real_path, "rb") as handle:
+            response = self.client.send(
+                "PUT", target, extra_headers=checksum_headers, content=handle
+            )
+        payload = self._verify_deploy(response, checksums)
+        return {
+            "ok": True,
+            "dry_run": False,
+            "repo": repo,
+            "path": path,
+            "source_file": real_path,
+            "size": size,
+            "checksums": checksums,
+            "deduplicated": False,
+            "bytes_uploaded": size,
+            "download_uri": self._redact(_bounded_string(payload.get("downloadUri"), 2048)),
         }

@@ -2,13 +2,53 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
-# Task 1 has no write tools. Keep the registered hook intentionally inert:
-# it must not inspect, serialize, or render untrusted arguments before Task 5
-# introduces bounded, argument-scoped approval summaries.
-_WRITE_TOOLS: frozenset[str] = frozenset()
-WRITE_APPROVALS: dict[str, object] = {}
+_WRITE_TOOLS = frozenset({"arm_deploy"})
+_APPROVAL_STRING_LIMITS = {"repo": 128, "path": 1024, "source_file": 4096}
+
+
+def _approval_rule_digest(args: object) -> str | None:
+    """Bind approval to one bounded, schema-shaped deploy request."""
+    if type(args) is not dict:
+        return None
+    allowed = set(_APPROVAL_STRING_LIMITS) | {"dry_run", "confirm"}
+    if (
+        not {"repo", "path", "source_file"}.issubset(args)
+        or not set(args).issubset(allowed)
+        or any(
+            type(args.get(name)) is not str
+            or not args[name]
+            or len(args[name]) > maximum
+            for name, maximum in _APPROVAL_STRING_LIMITS.items()
+        )
+        or any(type(args[name]) is not bool for name in ("dry_run", "confirm") if name in args)
+    ):
+        return None
+    try:
+        canonical = json.dumps(args, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _arg(args: object, name: str) -> str:
+    """Render one already-bounded string argument for approval."""
+    value = args.get(name) if type(args) is dict else None
+    maximum = _APPROVAL_STRING_LIMITS.get(name, 0)
+    if type(value) is not str or not value or len(value) > maximum:
+        return '"<invalid>"'
+    return json.dumps(value, ensure_ascii=True)
+
+
+WRITE_APPROVALS = {
+    "arm_deploy": lambda a: (
+        f"Upload file: {_arg(a, 'source_file')}\n"
+        f"To repository: {_arg(a, 'repo')}\n"
+        f"At path: {_arg(a, 'path')}"
+    ),
+}
 
 
 def _json(value) -> str:
@@ -39,13 +79,35 @@ def _interrupt_authority():
     return is_interrupted
 
 
-def register(ctx: object) -> None:
-    """Register bounded ARM reads and reserve the hook for future writes."""
+def _has_write_admission(admission, tool_name: str) -> bool:
+    try:
+        return (
+            getattr(admission, "approved", None) is True
+            and getattr(admission, "policy", None) == "plugin_approve"
+            and getattr(admission, "tool_name", None) == tool_name
+        )
+    except Exception:
+        return False
 
-    def require_write_approval(
-        _tool_name: object, _args: object, **_kwargs: object
-    ) -> None:
-        return None
+
+def register(ctx: object) -> None:
+    """Register bounded ARM operations and approve writes by exact arguments."""
+
+    def require_write_approval(tool_name: object, args: object, **_kwargs: object):
+        summarise = WRITE_APPROVALS.get(tool_name)
+        if summarise is None:
+            return None
+        argument_digest = _approval_rule_digest(args)
+        if argument_digest is None:
+            return {
+                "action": "block",
+                "message": "ARM deploy arguments cannot be safely approved",
+            }
+        return {
+            "action": "approve",
+            "message": f"Approve Ericsson Artifactory deploy: {tool_name}\n{summarise(args)}",
+            "rule_key": f"{tool_name}:{argument_digest}",
+        }
 
     ctx.register_hook("pre_tool_call", require_write_approval)
 
@@ -62,6 +124,18 @@ def register(ctx: object) -> None:
 
     def handler(name):
         def invoke(args: dict, **_kwargs) -> str:
+            if name in _WRITE_TOOLS and not _has_write_admission(
+                _kwargs.get("tool_admission"), name
+            ):
+                return _json(
+                    {
+                        "success": False,
+                        "error": {
+                            "category": "permission",
+                            "message": SAFE_ERROR_MESSAGES["permission"],
+                        },
+                    }
+                )
             try:
                 configuration = ctx.configuration()
             except Exception:

@@ -95,6 +95,23 @@ SCHEMAS = {
         },
         ["query"],
     ),
+    "arm_deploy": _schema(
+        "arm_deploy",
+        "Upload one local file to Artifactory. It first tries a checksum-only "
+        "deploy, then uploads the file when Artifactory does not already hold "
+        "the blob. Requires dry_run or confirm.",
+        {
+            "repo": _REPO,
+            "path": _PATH,
+            "source_file": {
+                "type": "string", "minLength": 1, "maxLength": 4096,
+                "description": "Absolute path to the local file to upload.",
+            },
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["repo", "path", "source_file"],
+    ),
 }
 
 
@@ -147,6 +164,14 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         if name == "arm_search_artifacts":
             return operations.search_artifacts(
                 values["query"], max_results=values.get("max_results", 25)
+            )
+        if name == "arm_deploy":
+            return operations.deploy(
+                values["repo"],
+                values["path"],
+                values["source_file"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
             )
         raise ArmError("invalid_input")
     finally:

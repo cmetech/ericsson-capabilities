@@ -115,6 +115,35 @@ class TestErrors:
         ):
             assert models.ArmError("invalid_input", remediation=unsafe).remediation is None
 
+    def test_deploy_remediations_are_exact_static_literals(self):
+        """Deploy must not reflect local paths or Artifactory output."""
+        models = _load_models_module()
+        remediations = (
+            "source_file must be an absolute path.",
+            "source_file does not name a readable file.",
+            (
+                "This profile confines uploads to its configured deploy source "
+                "root."
+            ),
+            (
+                "The file is larger than this profile's maximum upload size. "
+                "Raise it in the profile if this is expected."
+            ),
+            "Artifactory did not return a deploy result.",
+            "Artifactory returned no checksums to verify against.",
+            (
+                "The sha256 checksum Artifactory reported does not match the file "
+                "that was sent. Do not treat this artefact as published."
+            ),
+        )
+        for remediation in remediations:
+            assert models.ArmError(
+                "invalid_remote_data", remediation=remediation
+            ).remediation == remediation
+            assert models.ArmError(
+                "invalid_remote_data", remediation=remediation + " token=secret"
+            ).remediation is None
+
     def test_client_static_remediations_preserve_only_exact_owned_literals(self):
         models = _load_models_module()
         access_guidance = (

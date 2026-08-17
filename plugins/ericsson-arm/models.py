@@ -82,6 +82,19 @@ _SAFE_REMEDIATIONS = frozenset({
         "Do not put .limit() in the query; AQL accepts only one and the "
         "connector supplies it. Use max_results instead."
     ),
+    "source_file must be an absolute path.",
+    "source_file does not name a readable file.",
+    "This profile confines uploads to its configured deploy source root.",
+    (
+        "The file is larger than this profile's maximum upload size. Raise it "
+        "in the profile if this is expected."
+    ),
+    "Artifactory did not return a deploy result.",
+    "Artifactory returned no checksums to verify against.",
+    (
+        "The sha256 checksum Artifactory reported does not match the file that "
+        "was sent. Do not treat this artefact as published."
+    ),
 })
 _CERTIFICATE_EXPIRY_TEMPLATE = (
     "The client certificate expired on {expired_on}. Renew it and update "

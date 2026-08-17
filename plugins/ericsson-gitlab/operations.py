@@ -42,6 +42,7 @@ _MAX_DISCUSSIONS = 1000
 _MAX_NOTES_PER_DISCUSSION = 500
 _MAX_NOTE_BODY = 128 * 1024
 _MAX_MERGE_REQUESTS = 2000
+_MAX_MR_LABELS = 1000
 _MAX_REF = 512
 _MAX_PATH = 4096
 _MAX_TREE_ITEMS = 2000
@@ -67,6 +68,7 @@ _MAX_NOTE_BYTES = 100_000
 _DUPLICATE_MR_MESSAGE = "another open merge request already exists"
 _DISCUSSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
+_MR_STATE_EVENTS = frozenset({"close", "reopen"})
 
 
 class _YamlCapacityError(Exception):
@@ -1863,6 +1865,183 @@ class GitLabOperations:
             }
 
         return self._usable_write_result(finish_merge_write)
+
+    def update_merge_request(
+        self,
+        project: str | int,
+        iid: int,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        add_labels: list | None = None,
+        remove_labels: list | None = None,
+        state_event: str | None = None,
+        draft: bool | None = None,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Update an existing merge request with one non-retried write.
+
+        Label changes are incremental so this operation never replaces a
+        concurrently edited label list. Draft changes require the title in
+        the same call because GitLab represents draft state in that title.
+        """
+        iid = self._iid(iid)
+        body: dict[str, Any] = {}
+        if title is not None:
+            if (
+                type(title) is not str
+                or not title.strip()
+                or len(title) > _MAX_MR_TITLE_INPUT
+                or "\x00" in title
+            ):
+                raise GitLabError("invalid_input")
+            body["title"] = title
+        if description is not None:
+            if (
+                type(description) is not str
+                or len(description) > _MAX_MR_DESCRIPTION
+                or "\x00" in description
+            ):
+                raise GitLabError("invalid_input")
+            body["description"] = description
+
+        normalized_labels: dict[str, list[str]] = {}
+        for key, labels in (
+            ("add_labels", add_labels),
+            ("remove_labels", remove_labels),
+        ):
+            if labels is None:
+                continue
+            if (
+                type(labels) is not list
+                or not labels
+                or len(labels) > 50
+                or any(
+                    type(label) is not str
+                    or not label
+                    or label != label.strip()
+                    or len(label) > 255
+                    or "," in label
+                    or "\x00" in label
+                    for label in labels
+                )
+            ):
+                raise GitLabError("invalid_input")
+            normalized_labels[key] = labels
+            body[key] = ",".join(labels)
+        if set(normalized_labels.get("add_labels", ())) & set(
+            normalized_labels.get("remove_labels", ())
+        ):
+            raise GitLabError("invalid_input")
+
+        if state_event is not None:
+            if type(state_event) is not str or state_event not in _MR_STATE_EVENTS:
+                raise GitLabError("invalid_input")
+            body["state_event"] = state_event
+        if draft is not None:
+            if type(draft) is not bool or "title" not in body:
+                raise GitLabError("invalid_input")
+            base_title = body["title"]
+            for prefix in ("Draft:", "WIP:"):
+                if base_title.startswith(prefix):
+                    base_title = base_title[len(prefix) :].strip()
+                    break
+            if not base_title:
+                raise GitLabError("invalid_input")
+            body["title"] = f"Draft: {base_title}" if draft else base_title
+        if not body:
+            raise GitLabError("invalid_input")
+
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"merge request !{iid}",
+            )
+        except ConnectorError as exc:
+            raise GitLabError(exc.category) from None
+
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        project_path = resolved.get("path", resolved.get("path_with_namespace"))
+        if not isinstance(project_path, str):
+            raise GitLabError("invalid_remote_data")
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "project": project_path,
+                "iid": iid,
+                "requested": body,
+            }
+
+        status, payload = self._write_json(
+            "PUT",
+            f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}",
+            body,
+            deadline=deadline,
+        )
+        if status >= 400:
+            raise self.client._error_for_status(status)
+
+        def finish_update_write():
+            if status != 200 or not isinstance(payload, Mapping):
+                raise GitLabError("invalid_remote_data")
+            if type(payload.get("iid")) is not int or payload["iid"] != iid:
+                raise GitLabError("invalid_remote_data")
+            remote_state = payload.get("state")
+            if (
+                type(remote_state) is not str
+                or not remote_state
+                or len(remote_state) > 64
+                or remote_state != remote_state.strip()
+                or "\x00" in remote_state
+            ):
+                raise GitLabError("invalid_remote_data")
+            for field in ("title", "description"):
+                if field in body and (
+                    type(payload.get(field)) is not str
+                    or payload[field] != body[field]
+                ):
+                    raise GitLabError("invalid_remote_data")
+            if normalized_labels:
+                remote_labels = payload.get("labels")
+                if (
+                    type(remote_labels) is not list
+                    or len(remote_labels) > _MAX_MR_LABELS
+                    or any(
+                        type(label) is not str
+                        or not label
+                        or len(label) > 255
+                        or "\x00" in label
+                        for label in remote_labels
+                    )
+                ):
+                    raise GitLabError("invalid_remote_data")
+                if any(
+                    label not in remote_labels
+                    for label in normalized_labels.get("add_labels", ())
+                ) or any(
+                    label in remote_labels
+                    for label in normalized_labels.get("remove_labels", ())
+                ):
+                    raise GitLabError("invalid_remote_data")
+            expected_state = {"close": "closed", "reopen": "opened"}.get(
+                state_event
+            )
+            if expected_state is not None and remote_state != expected_state:
+                raise GitLabError("invalid_remote_data")
+            return {
+                "ok": True,
+                "dry_run": False,
+                "project": project_path,
+                "iid": iid,
+                "state": remote_state,
+                "requested": body,
+            }
+
+        return self._usable_write_result(finish_update_write)
 
     def _list_named_refs(
         self, project_id: int, kind: str, *, deadline: float

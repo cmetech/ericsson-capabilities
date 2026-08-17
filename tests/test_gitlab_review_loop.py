@@ -375,6 +375,193 @@ class TestMergeMergeRequest:
         assert excinfo.value.category == "write_ambiguous"
         assert len(client.calls) == 1
 
+
+class TestUpdateMergeRequest:
+    def test_neither_flag_is_refused_without_a_request(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request("g/p", 42, title="New")
+        assert excinfo.value.category == "confirmation_required"
+        assert client.calls == []
+
+    def test_no_change_requested_is_rejected_without_a_request(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request("g/p", 42, confirm=True)
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_title_and_description_are_sent_and_verified(self):
+        client = FakeClient(
+            [{"iid": 42, "title": "New", "description": "Body", "state": "opened"}]
+        )
+        result = _ops(client).update_merge_request(
+            "g/p", 42, title="New", description="Body", confirm=True
+        )
+        method, path, body = client.calls[0]
+        assert method == "PUT"
+        assert path == "/api/v4/projects/7/merge_requests/42"
+        assert body == {"title": "New", "description": "Body"}
+        assert result["iid"] == 42
+        assert result["state"] == "opened"
+
+    def test_labels_use_add_remove_not_wholesale_replace(self):
+        """Incremental label edits must not race by replacing the full list."""
+        client = FakeClient(
+            [{"iid": 42, "labels": ["needs-review"], "state": "opened"}]
+        )
+        _ops(client).update_merge_request(
+            "g/p",
+            42,
+            add_labels=["needs-review"],
+            remove_labels=["wip"],
+            confirm=True,
+        )
+        body = client.calls[0][2]
+        assert body["add_labels"] == "needs-review"
+        assert body["remove_labels"] == "wip"
+        assert "labels" not in body
+
+    @pytest.mark.parametrize(
+        ("state_event", "remote_state"), [("close", "closed"), ("reopen", "opened")]
+    )
+    def test_state_event_requires_the_requested_transition(
+        self, state_event, remote_state
+    ):
+        client = FakeClient([{"iid": 42, "state": remote_state}])
+        result = _ops(client).update_merge_request(
+            "g/p", 42, state_event=state_event, confirm=True
+        )
+        assert client.calls[0][2]["state_event"] == state_event
+        assert result["state"] == remote_state
+
+    def test_invalid_state_event_rejected_without_a_request(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, state_event="delete", confirm=True
+            )
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_draft_toggles_via_the_supplied_title(self):
+        client = FakeClient(
+            [{"iid": 42, "title": "Draft: Fix thing", "state": "opened"}]
+        )
+        _ops(client).update_merge_request(
+            "g/p", 42, title="Fix thing", draft=True, confirm=True
+        )
+        assert client.calls[0][2]["title"] == "Draft: Fix thing"
+
+    def test_draft_without_a_title_is_rejected_without_a_hidden_read(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, draft=True, confirm=True
+            )
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_dry_run_previews_the_body_without_a_request(self):
+        client = FakeClient()
+        result = _ops(client).update_merge_request(
+            "g/p", 42, title="New", dry_run=True
+        )
+        assert result["dry_run"] is True
+        assert result["requested"] == {"title": "New"}
+        assert client.calls == []
+
+    @pytest.mark.parametrize("remote_iid", [43, True, "42", None])
+    def test_response_must_prove_the_requested_iid(self, remote_iid):
+        client = FakeClient(
+            [{"iid": remote_iid, "title": "New", "state": "opened"}]
+        )
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, title="New", confirm=True
+            )
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client.calls) == 1
+
+    @pytest.mark.parametrize(
+        ("requested", "payload"),
+        [
+            ({"title": "New"}, {"iid": 42, "title": "Old", "state": "opened"}),
+            (
+                {"description": "Body"},
+                {"iid": 42, "description": "Other", "state": "opened"},
+            ),
+            (
+                {"add_labels": ["needs-review"]},
+                {"iid": 42, "labels": [], "state": "opened"},
+            ),
+            (
+                {"remove_labels": ["wip"]},
+                {"iid": 42, "labels": ["wip"], "state": "opened"},
+            ),
+            ({"state_event": "close"}, {"iid": 42, "state": "opened"}),
+            ({"state_event": "reopen"}, {"iid": 42, "state": "closed"}),
+        ],
+    )
+    def test_unproven_requested_change_is_write_ambiguous(self, requested, payload):
+        client = FakeClient([payload])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, confirm=True, **requested
+            )
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client.calls) == 1
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            ["not", "a", "mapping"],
+            {"iid": 42, "title": "New", "state": True},
+            {"iid": 42, "title": "New", "state": " opened "},
+        ],
+    )
+    def test_malformed_success_evidence_is_write_ambiguous(self, payload):
+        client = FakeClient([payload])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, title="New", confirm=True
+            )
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client.calls) == 1
+
+    def test_inappropriate_success_status_is_write_ambiguous_after_one_attempt(self):
+        operations = _http_ops()
+        try:
+            with respx.mock:
+                route = respx.put(
+                    "https://gitlab.test/api/v4/projects/7/merge_requests/42"
+                ).mock(
+                    return_value=httpx.Response(
+                        201,
+                        json={"iid": 42, "title": "New", "state": "opened"},
+                    )
+                )
+                with pytest.raises(GitLabError) as excinfo:
+                    operations.update_merge_request(
+                        "g/p", 42, title="New", confirm=True
+                    )
+                assert route.call_count == 1
+                assert len(respx.calls) == 1
+            assert excinfo.value.category == "write_ambiguous"
+        finally:
+            operations.client.close()
+
+    def test_uncertain_write_is_not_retried_or_reconciled(self):
+        client = FakeClient([GitLabError("write_ambiguous")])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, title="New", confirm=True
+            )
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client.calls) == 1
+
+
+class TestMergeMergeRequestResponseSafety:
     @pytest.mark.parametrize(
         ("merge_when_pipeline_succeeds", "state"),
         [

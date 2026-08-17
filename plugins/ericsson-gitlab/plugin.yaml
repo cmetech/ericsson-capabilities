@@ -29,5 +29,6 @@ provides_tools:
   - gitlab_merge_request_approvals
   - gitlab_approve_merge_request
   - gitlab_merge_merge_request
+  - gitlab_update_merge_request
 provides_hooks:
   - pre_tool_call

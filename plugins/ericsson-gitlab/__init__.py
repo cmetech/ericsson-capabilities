@@ -20,6 +20,7 @@ _WRITE_TOOLS = frozenset(
         "gitlab_resolve_discussion",
         "gitlab_approve_merge_request",
         "gitlab_merge_merge_request",
+        "gitlab_update_merge_request",
     }
 )
 
@@ -72,6 +73,13 @@ WRITE_APPROVALS = {
         f"Remove source: {_arg(a, 'remove_source_branch')}\n"
         f"Merge when pipeline succeeds: "
         f"{_arg(a, 'merge_when_pipeline_succeeds')}"
+    ),
+    "gitlab_update_merge_request": lambda a: (
+        f"Project: {_arg(a, 'project')}\nUpdate MR: !{_arg(a, 'iid')}\n"
+        f"Title: {_arg(a, 'title')}  Draft: {_arg(a, 'draft')}\n"
+        f"Description: {_arg(a, 'description')}\n"
+        f"State: {_arg(a, 'state_event')}\n"
+        f"+labels: {_arg(a, 'add_labels')}  -labels: {_arg(a, 'remove_labels')}"
     ),
 }
 _PLUGIN_SKILLS = (

@@ -456,6 +456,36 @@ SCHEMAS = {
         },
         ["project", "iid"],
     ),
+    "gitlab_update_merge_request": _schema(
+        "gitlab_update_merge_request",
+        "Edit one existing GitLab merge request: title, description, labels, "
+        "draft state, or close/reopen. Labels are added and removed "
+        "individually rather than replaced wholesale. Draft changes require "
+        "title in the same call. Requires dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1},
+            "title": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "description": {"type": "string", "maxLength": 65536},
+            "add_labels": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 255},
+                "minItems": 1,
+                "maxItems": 50,
+            },
+            "remove_labels": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 255},
+                "minItems": 1,
+                "maxItems": 50,
+            },
+            "state_event": {"type": "string", "enum": ["close", "reopen"]},
+            "draft": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "iid"],
+    ),
 }
 
 
@@ -670,6 +700,19 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 merge_when_pipeline_succeeds=values.get(
                     "merge_when_pipeline_succeeds", False
                 ),
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "gitlab_update_merge_request":
+            return operations.update_merge_request(
+                values["project"],
+                values["iid"],
+                title=values.get("title"),
+                description=values.get("description"),
+                add_labels=values.get("add_labels"),
+                remove_labels=values.get("remove_labels"),
+                state_event=values.get("state_event"),
+                draft=values.get("draft"),
                 dry_run=values.get("dry_run", False),
                 confirm=values.get("confirm", False),
             )

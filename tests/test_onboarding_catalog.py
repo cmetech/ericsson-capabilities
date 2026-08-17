@@ -313,9 +313,20 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         },
     ),
     "artifactory-arm-tools": (
-        "planned-not-implemented",
-        False,
-        EMPTY_IMPLEMENTATION | {"plugins": ["plugins/ericsson-arm"]},
+        "available",
+        True,
+        EMPTY_IMPLEMENTATION
+        | {
+            "plugins": ["plugins/ericsson-arm"],
+            "tools": [
+                "arm_list_repositories",
+                "arm_artifact_info",
+                "arm_get_properties",
+                "arm_search_artifacts",
+                "arm_deploy",
+                "arm_delete",
+            ],
+        },
     ),
 }
 
@@ -647,7 +658,6 @@ def test_real_catalog_maturity_is_honest() -> None:
         "third-party-support-lcm-tracker",
         "re-identification",
         "windows-laptop-diagnostic",
-        "artifactory-arm-tools",
     }
     assert {
         entry_id
@@ -780,20 +790,6 @@ def test_jira_and_teams_entries_teach_only_supported_narrowing() -> None:
     assert "bounded explicit search" in jira
     assert "supported team, channel, and message count" in teams
     assert "date filter" not in teams
-
-
-def test_scaffold_entries_make_no_runnable_claims() -> None:
-    repo = Path(__file__).resolve().parents[1]
-    entries = {entry["id"]: entry for entry in load_entries(repo)}
-
-    for entry_id in ("artifactory-arm-tools",):
-        entry = entries[entry_id]
-        assert entry["maturity"] == "planned-not-implemented"
-        assert entry["recommendation_eligible"] is False
-        assert entry["implementation"]["tools"] == []
-        assert entry["reads"] == []
-        assert entry["writes"] == []
-        assert entry["demonstrations"] == []
 
 
 def test_real_capability_entries_have_the_education_contract() -> None:

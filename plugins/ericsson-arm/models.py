@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date
 from dataclasses import dataclass
+import re
 from typing import Any
 
 SAFE_ERROR_MESSAGES = {
@@ -34,14 +36,100 @@ SAFE_ERROR_MESSAGES = {
 
 # Exception-derived remediation is an output boundary. Only a connector-owned
 # literal can cross it; remote text and token-bearing values are always dropped.
-_SAFE_REMEDIATIONS = frozenset({"Update the Artifactory token."})
+_SAFE_REMEDIATIONS = frozenset({
+    "Update the Artifactory token.",
+    (
+        "The arm token is missing, expired, or invalid. Update the arm "
+        "personal access token in the connector's configuration."
+    ),
+    (
+        "The arm token is valid but lacks permission for this resource. "
+        "Check the token's scopes, or that your account can see the project "
+        "or space."
+    ),
+    (
+        "The arm resource does not exist, or the token cannot see it. Verify "
+        "the identifier, then verify the token's access."
+    ),
+    (
+        "The arm connector configuration is invalid. Re-check the base URL "
+        "and authentication mode."
+    ),
+    (
+        "arm is rate limiting this client. It will retry automatically; if it "
+        "persists, reduce how often this tool is called."
+    ),
+    (
+        "Repeated failures against arm have tripped this connector's circuit "
+        "breaker, so further calls are being refused locally. Check whether "
+        "arm is reachable and healthy, then retry."
+    ),
+    (
+        "Access to this Artifactory was refused at the edge, before the request "
+        "reached Artifactory. This is normally an expired or missing mTLS client "
+        "certificate rather than a problem with the Artifactory token. Check the "
+        "client certificate and key configured for this profile."
+    ),
+    (
+        "Artifactory redirected the request instead of answering it. Check that "
+        "the base URL names the Artifactory origin."
+    ),
+    (
+        "Artifactory returned HTML where JSON was expected, which normally means "
+        "an authentication interstitial answered instead of the API."
+    ),
+    (
+        "Do not put .limit() in the query; AQL accepts only one and the "
+        "connector supplies it. Use max_results instead."
+    ),
+    "source_file must be an absolute path.",
+    "source_file does not name a readable file.",
+    "This profile confines uploads to its configured deploy source root.",
+    (
+        "The file is larger than this profile's maximum upload size. Raise it "
+        "in the profile if this is expected."
+    ),
+    "Artifactory did not return a deploy result.",
+    "Artifactory returned no checksums to verify against.",
+    (
+        "The sha256 checksum Artifactory reported does not match the file that "
+        "was sent. Do not treat this artefact as published."
+    ),
+})
+_CERTIFICATE_EXPIRY_TEMPLATE = (
+    "The client certificate expired on {expired_on}. Renew it and update "
+    "the certificate and key paths in this profile. Until then every "
+    "request is refused at the edge before it reaches Artifactory."
+)
+_CERTIFICATE_EXPIRY_REMEDIATION = re.compile(
+    r"\AThe client certificate expired on (?P<expired_on>\d{4}-\d{2}-\d{2})\. "
+    r"Renew it and update the certificate and key paths in this profile\. "
+    r"Until then every request is refused at the edge before it reaches "
+    r"Artifactory\.\Z"
+)
+
+
+def certificate_expiry_remediation(expired_on: object) -> str | None:
+    """Return the only date-bearing remediation allowed across this boundary."""
+    if type(expired_on) is not str or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expired_on):
+        return None
+    try:
+        date.fromisoformat(expired_on)
+    except ValueError:
+        return None
+    return _CERTIFICATE_EXPIRY_TEMPLATE.format(expired_on=expired_on)
 
 
 def safe_remediation(value: object) -> str | None:
-    """Return only static, connector-owned remediation guidance."""
-    if type(value) is not str or value not in _SAFE_REMEDIATIONS:
+    """Return only connector-owned remediation guidance."""
+    if type(value) is not str:
         return None
-    return value
+    if value in _SAFE_REMEDIATIONS:
+        return value
+    match = _CERTIFICATE_EXPIRY_REMEDIATION.fullmatch(value)
+    if match is None:
+        return None
+    return certificate_expiry_remediation(match.group("expired_on"))
 
 
 class ArmError(RuntimeError):

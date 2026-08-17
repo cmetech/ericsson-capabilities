@@ -1760,6 +1760,100 @@ class GitLabOperations:
 
         return self._usable_write_result(finish_approval_write)
 
+    def merge_merge_request(
+        self,
+        project: str | int,
+        iid: int,
+        *,
+        sha: str | None = None,
+        squash: bool | None = None,
+        remove_source_branch: bool | None = None,
+        merge_when_pipeline_succeeds: bool = False,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Merge one merge request without retrying or reconciling it.
+
+        Optional flags remain absent when the caller leaves them unset so
+        this operation preserves the project's configured defaults.
+        """
+        iid = self._iid(iid)
+        body: dict[str, Any] = {}
+        if sha is not None:
+            body["sha"] = self._sha(sha)
+        for key, value in (
+            ("squash", squash),
+            ("should_remove_source_branch", remove_source_branch),
+        ):
+            if value is not None:
+                if type(value) is not bool:
+                    raise GitLabError("invalid_input")
+                body[key] = value
+        if type(merge_when_pipeline_succeeds) is not bool:
+            raise GitLabError("invalid_input")
+        if merge_when_pipeline_succeeds:
+            body["merge_when_pipeline_succeeds"] = True
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"merge request !{iid}",
+            )
+        except ConnectorError as exc:
+            raise GitLabError(exc.category) from None
+
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        project_path = resolved.get("path", resolved.get("path_with_namespace"))
+        if not isinstance(project_path, str):
+            raise GitLabError("invalid_remote_data")
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "project": project_path,
+                "iid": iid,
+                "requested": body,
+            }
+
+        status, payload = self._write_json(
+            "PUT",
+            f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/merge",
+            body,
+            deadline=deadline,
+        )
+        if status >= 400:
+            raise self.client._error_for_status(status)
+
+        def finish_merge_write():
+            if status != 200 or not isinstance(payload, Mapping):
+                raise GitLabError("invalid_remote_data")
+            state = payload.get("state")
+            if (
+                type(state) is not str
+                or not state
+                or len(state) > 64
+                or state != state.strip()
+                or "\x00" in state
+            ):
+                raise GitLabError("invalid_remote_data")
+            merge_commit_sha = payload.get("merge_commit_sha")
+            if merge_commit_sha is not None and (
+                type(merge_commit_sha) is not str
+                or re.fullmatch(r"[0-9a-f]{40}", merge_commit_sha) is None
+            ):
+                raise GitLabError("invalid_remote_data")
+            return {
+                "ok": True,
+                "dry_run": False,
+                "project": project_path,
+                "iid": iid,
+                "state": state,
+                "merge_commit_sha": merge_commit_sha,
+            }
+
+        return self._usable_write_result(finish_merge_write)
+
     def _list_named_refs(
         self, project_id: int, kind: str, *, deadline: float
     ) -> list[str]:

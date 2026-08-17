@@ -438,6 +438,24 @@ SCHEMAS = {
         },
         ["project", "iid"],
     ),
+    "gitlab_merge_merge_request": _schema(
+        "gitlab_merge_merge_request",
+        "Merge one GitLab merge request. Supply sha to pin the merge to the "
+        "reviewed commit so GitLab refuses if the branch moved. Omit squash "
+        "and remove_source_branch to keep the project's own defaults. "
+        "Requires dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1},
+            "sha": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+            "squash": {"type": "boolean"},
+            "remove_source_branch": {"type": "boolean"},
+            "merge_when_pipeline_succeeds": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "iid"],
+    ),
 }
 
 
@@ -639,6 +657,19 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 values["project"],
                 values["iid"],
                 sha=values.get("sha"),
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "gitlab_merge_merge_request":
+            return operations.merge_merge_request(
+                values["project"],
+                values["iid"],
+                sha=values.get("sha"),
+                squash=values.get("squash"),
+                remove_source_branch=values.get("remove_source_branch"),
+                merge_when_pipeline_succeeds=values.get(
+                    "merge_when_pipeline_succeeds", False
+                ),
                 dry_run=values.get("dry_run", False),
                 confirm=values.get("confirm", False),
             )

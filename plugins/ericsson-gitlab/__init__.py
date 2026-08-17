@@ -19,6 +19,7 @@ _WRITE_TOOLS = frozenset(
         "gitlab_reply_to_discussion",
         "gitlab_resolve_discussion",
         "gitlab_approve_merge_request",
+        "gitlab_merge_merge_request",
     }
 )
 
@@ -63,6 +64,14 @@ WRITE_APPROVALS = {
     "gitlab_approve_merge_request": lambda a: (
         f"Project: {_arg(a, 'project')}\nApprove MR: !{_arg(a, 'iid')}\n"
         f"Pinned SHA: {_arg(a, 'sha')}"
+    ),
+    "gitlab_merge_merge_request": lambda a: (
+        f"Project: {_arg(a, 'project')}\nMERGE MR: !{_arg(a, 'iid')}\n"
+        f"Pinned SHA: {_arg(a, 'sha')}\n"
+        f"Squash: {_arg(a, 'squash')}  "
+        f"Remove source: {_arg(a, 'remove_source_branch')}\n"
+        f"Merge when pipeline succeeds: "
+        f"{_arg(a, 'merge_when_pipeline_succeeds')}"
     ),
 }
 _PLUGIN_SKILLS = (

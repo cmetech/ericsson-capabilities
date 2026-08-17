@@ -324,6 +324,18 @@ class _SkillContext:
         self.skills.append((name, path, description))
 
 
+class _RegisteredToolContext(_SkillContext):
+    def __init__(self):
+        super().__init__()
+        self.tools = {}
+
+    def configuration(self):
+        return object()
+
+    def register_tool(self, **kwargs):
+        self.tools[kwargs["name"]] = kwargs["handler"]
+
+
 def _load_skill_plugin_module():
     """Load the plugin as a package, keeping its relative imports isolated."""
     module_name = "ericsson_arm_skill_plugin"
@@ -353,6 +365,80 @@ def test_register_exposes_the_artifact_research_skill():
             "Trace a release artefact back to the build that made it.",
         )
     ]
+
+
+def test_registered_write_handlers_reject_invalid_admissions_before_invoke(monkeypatch):
+    plugin = _load_skill_plugin_module()
+    context = _RegisteredToolContext()
+    invoked = []
+    monkeypatch.setattr(
+        plugin.arm_tools,
+        "invoke",
+        lambda *args, **kwargs: invoked.append((args, kwargs)),
+    )
+    plugin.register(context)
+
+    requests = {
+        "arm_deploy": {
+            "repo": "generic-local",
+            "path": "Infra/a.tgz",
+            "source_file": "/tmp/a.tgz",
+        },
+        "arm_delete": {"repo": "generic-local", "path": "Infra/a.tgz"},
+    }
+    for tool_name, arguments in requests.items():
+        other_tool = "arm_delete" if tool_name == "arm_deploy" else "arm_deploy"
+        invalid_admissions = (
+            None,
+            types.SimpleNamespace(
+                approved=True, policy="plugin_approve", tool_name=other_tool
+            ),
+            types.SimpleNamespace(
+                approved=True, policy="forged", tool_name=tool_name
+            ),
+            types.SimpleNamespace(
+                approved=False, policy="plugin_approve", tool_name=tool_name
+            ),
+        )
+        for admission in invalid_admissions:
+            result = json.loads(
+                context.tools[tool_name](arguments, tool_admission=admission)
+            )
+            assert result["success"] is False
+            assert result["error"]["category"] == "permission"
+    assert invoked == []
+
+
+def test_registered_write_handlers_invoke_only_for_matching_admission(monkeypatch):
+    plugin = _load_skill_plugin_module()
+    context = _RegisteredToolContext()
+    invoked = []
+
+    def invoke(*args, **kwargs):
+        invoked.append((args, kwargs))
+        return {"ok": True}
+
+    monkeypatch.setattr(plugin.arm_tools, "invoke", invoke)
+    plugin.register(context)
+
+    requests = {
+        "arm_deploy": {
+            "repo": "generic-local",
+            "path": "Infra/a.tgz",
+            "source_file": "/tmp/a.tgz",
+        },
+        "arm_delete": {"repo": "generic-local", "path": "Infra/a.tgz"},
+    }
+    for tool_name, arguments in requests.items():
+        admission = types.SimpleNamespace(
+            approved=True, policy="plugin_approve", tool_name=tool_name
+        )
+        result = json.loads(
+            context.tools[tool_name](arguments, tool_admission=admission)
+        )
+        assert result == {"success": True, "result": {"ok": True}}
+
+    assert [call[0][0] for call in invoked] == ["arm_deploy", "arm_delete"]
 
 
 def test_catalog_validator_recognizes_all_arm_tool_handlers():

@@ -68,6 +68,7 @@ _MAX_NOTE_BYTES = 100_000
 _DUPLICATE_MR_MESSAGE = "another open merge request already exists"
 _DISCUSSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
+_MR_DRAFT_PREFIX = re.compile(r"^(?:draft:|\[draft\]|\(draft\)|wip:)", re.I)
 _MR_STATE_EVENTS = frozenset({"close", "reopen"})
 _MR_RESPONSE_STATES = frozenset({"opened", "closed", "merged", "locked"})
 
@@ -1944,9 +1945,10 @@ class GitLabOperations:
             if type(draft) is not bool or "title" not in body:
                 raise GitLabError("invalid_input")
             base_title = body["title"]
-            while base_title.startswith(("Draft:", "WIP:")):
-                prefix = "Draft:" if base_title.startswith("Draft:") else "WIP:"
-                base_title = base_title[len(prefix) :].strip()
+            marker = _MR_DRAFT_PREFIX.match(base_title)
+            while marker is not None:
+                base_title = base_title[marker.end() :].strip()
+                marker = _MR_DRAFT_PREFIX.match(base_title)
             if not base_title:
                 raise GitLabError("invalid_input")
             body["title"] = f"Draft: {base_title}" if draft else base_title
@@ -2000,6 +2002,11 @@ class GitLabOperations:
                 or remote_state != remote_state.strip()
                 or "\x00" in remote_state
                 or remote_state not in _MR_RESPONSE_STATES
+            ):
+                raise GitLabError("invalid_remote_data")
+            if draft is not None and (
+                type(payload.get("draft")) is not bool
+                or payload["draft"] is not draft
             ):
                 raise GitLabError("invalid_remote_data")
             for field in ("title", "description"):

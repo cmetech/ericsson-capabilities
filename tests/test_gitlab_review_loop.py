@@ -446,7 +446,14 @@ class TestUpdateMergeRequest:
 
     def test_draft_toggles_via_the_supplied_title(self):
         client = FakeClient(
-            [{"iid": 42, "title": "Draft: Fix thing", "state": "opened"}]
+            [
+                {
+                    "iid": 42,
+                    "title": "Draft: Fix thing",
+                    "state": "opened",
+                    "draft": True,
+                }
+            ]
         )
         _ops(client).update_merge_request(
             "g/p", 42, title="Fix thing", draft=True, confirm=True
@@ -458,13 +465,24 @@ class TestUpdateMergeRequest:
         [
             (False, "Draft: WIP: Draft: Fix thing", "Fix thing"),
             (True, "WIP: Draft: WIP: Fix thing", "Draft: Fix thing"),
+            (False, "[Draft] Fix thing", "Fix thing"),
+            (True, "(draft) Fix thing", "Draft: Fix thing"),
+            (False, "draft: Fix thing", "Fix thing"),
+            (True, "[DRAFT] (draft) dRaFt: Fix thing", "Draft: Fix thing"),
         ],
     )
     def test_draft_toggle_strips_every_stacked_marker_and_verifies_the_result(
         self, draft, supplied_title, expected_title
     ):
         client = FakeClient(
-            [{"iid": 42, "title": expected_title, "state": "opened"}]
+            [
+                {
+                    "iid": 42,
+                    "title": expected_title,
+                    "state": "opened",
+                    "draft": draft,
+                }
+            ]
         )
         result = _ops(client).update_merge_request(
             "g/p", 42, title=supplied_title, draft=draft, confirm=True
@@ -478,6 +496,39 @@ class TestUpdateMergeRequest:
         ]
         assert result["requested"] == {"title": expected_title}
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"iid": 42, "title": "Draft: Fix thing", "state": "opened"},
+            {
+                "iid": 42,
+                "title": "Draft: Fix thing",
+                "state": "opened",
+                "draft": False,
+            },
+            {
+                "iid": 42,
+                "title": "Draft: Fix thing",
+                "state": "opened",
+                "draft": "true",
+            },
+            {
+                "iid": 42,
+                "title": "Draft: Fix thing",
+                "state": "opened",
+                "draft": 1,
+            },
+        ],
+    )
+    def test_requested_draft_requires_exact_matching_remote_evidence(self, payload):
+        client = FakeClient([payload])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).update_merge_request(
+                "g/p", 42, title="Fix thing", draft=True, confirm=True
+            )
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client.calls) == 1
+
     def test_draft_without_a_title_is_rejected_without_a_hidden_read(self):
         client = FakeClient()
         with pytest.raises(GitLabError) as excinfo:
@@ -490,7 +541,14 @@ class TestUpdateMergeRequest:
     def test_draft_transformed_title_may_be_exactly_1024_characters(self):
         expected_title = "Draft: " + "x" * 1017
         client = FakeClient(
-            [{"iid": 42, "title": expected_title, "state": "opened"}]
+            [
+                {
+                    "iid": 42,
+                    "title": expected_title,
+                    "state": "opened",
+                    "draft": True,
+                }
+            ]
         )
         result = _ops(client).update_merge_request(
             "g/p", 42, title="x" * 1017, draft=True, confirm=True

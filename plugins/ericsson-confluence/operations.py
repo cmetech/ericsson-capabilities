@@ -212,6 +212,50 @@ class ConfluenceOperations:
             untrusted=True,
         )
 
+    def list_comments(
+        self, content_id: str, *, max_results: int = 25
+    ) -> dict[str, Any]:
+        """List comments on a page, with bodies rendered as Markdown."""
+        content_id = self._content_id(content_id)
+        if type(max_results) is not int or not 1 <= max_results <= 100:
+            raise ConfluenceError("invalid_input")
+        rows, total, truncated = self._paged(
+            f"{self.base}/content/{content_id}/child/comment",
+            {"expand": "body.storage,version"},
+            max_results,
+        )
+        comments = []
+        for row in rows:
+            version = row.get("version")
+            author = None
+            created = None
+            if isinstance(version, Mapping):
+                by = version.get("by")
+                if isinstance(by, Mapping):
+                    author = self._redact(
+                        _bounded_string(by.get("displayName"), 255)
+                    )
+                created = _bounded_string(version.get("when"), 64)
+            markdown, _truncated = self._markdown(
+                self._storage_value(row), max_chars=_MAX_BODY_CHARS
+            )
+            markdown = markdown.rstrip()
+            comments.append(
+                {
+                    "id": _bounded_string(row.get("id"), 64) or "",
+                    "author": author,
+                    "created": created,
+                    "markdown": markdown,
+                }
+            )
+        return result_envelope(
+            comments,
+            total=total,
+            truncated=truncated,
+            hint="More comments exist. Raise max_results." if truncated else None,
+            untrusted=True,
+        )
+
     def get_page(self, content_id: str) -> dict[str, Any]:
         content_id = self._content_id(content_id)
         payload = self._mapping(self.client.get_json(f"{self.base}/content/{content_id}", params={"expand": EXPAND_PAGE}))

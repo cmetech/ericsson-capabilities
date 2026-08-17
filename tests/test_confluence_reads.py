@@ -296,3 +296,53 @@ class TestListChildren:
             "start": 0, "limit": 25, "size": 1,
         }])
         assert ConfluenceOperations(client).list_children("1")["content_warning"]
+
+
+class TestListComments:
+    def test_requests_the_storage_expansion(self):
+        client = FakeClient([{
+            "results": [{
+                "id": "77",
+                "body": {"storage": {"value": "<p>Looks wrong</p>"}},
+                "version": {"number": 1, "by": {"displayName": "Alice"},
+                            "when": "2026-08-01T10:00:00.000Z"},
+            }],
+            "start": 0, "limit": 25, "size": 1,
+        }])
+        result = ConfluenceOperations(client).list_comments("12345")
+        _method, path, params = client.calls[0]
+        assert path == "/rest/api/content/12345/child/comment"
+        assert params["expand"] == "body.storage,version"
+        assert result["items"][0]["markdown"] == "Looks wrong"
+        assert result["items"][0]["author"] == "Alice"
+
+    def test_comment_structure_is_preserved(self):
+        client = FakeClient([{
+            "results": [{"id": "77", "body": {"storage": {
+                "value": "<ul><li>one</li><li>two</li></ul>"}}}],
+            "start": 0, "limit": 25, "size": 1,
+        }])
+        result = ConfluenceOperations(client).list_comments("1")
+        assert "- one" in result["items"][0]["markdown"]
+
+    def test_comment_bodies_are_redacted(self):
+        client = FakeClient([{
+            "results": [{"id": "77", "body": {"storage": {
+                "value": "<p>Bearer secret-token-value</p>"}}}],
+            "start": 0, "limit": 25, "size": 1,
+        }])
+        result = ConfluenceOperations(client).list_comments("12345")
+        assert "secret-token-value" not in result["items"][0]["markdown"]
+
+    def test_comments_carry_the_untrusted_warning(self):
+        client = FakeClient([{"results": [], "start": 0, "limit": 25, "size": 0}])
+        assert ConfluenceOperations(client).list_comments("1")["content_warning"]
+
+    def test_missing_author_is_none_not_an_error(self):
+        client = FakeClient([{
+            "results": [{"id": "77", "body": {"storage": {"value": "<p>x</p>"}}}],
+            "start": 0, "limit": 25, "size": 1,
+        }])
+        assert ConfluenceOperations(client).list_comments("1")["items"][0][
+            "author"
+        ] is None

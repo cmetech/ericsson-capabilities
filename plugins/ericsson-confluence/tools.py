@@ -81,6 +81,12 @@ SCHEMAS = {
         {"content_id": _CONTENT_ID_SCHEMA, "max_results": _LIMIT},
         ["content_id"],
     ),
+    "confluence_list_comments": _schema(
+        "confluence_list_comments",
+        "List comments on one Confluence page, with bodies as Markdown.",
+        {"content_id": _CONTENT_ID_SCHEMA, "max_results": _LIMIT},
+        ["content_id"],
+    ),
 }
 
 
@@ -133,6 +139,10 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         )
     if name == "confluence_list_children":
         return operations.list_children(
+            values["content_id"], max_results=values.get("max_results", 25)
+        )
+    if name == "confluence_list_comments":
+        return operations.list_comments(
             values["content_id"], max_results=values.get("max_results", 25)
         )
     raise ConfluenceError("invalid_input")

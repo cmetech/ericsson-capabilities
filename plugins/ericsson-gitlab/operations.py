@@ -356,12 +356,14 @@ class GitLabOperations:
         )
         raw = response.body
         total = len(raw)
-        truncated = total > max_bytes
-        tail = raw[-max_bytes:] if truncated else raw
+        source_truncated = total > max_bytes
+        tail = raw[-max_bytes:] if source_truncated else raw
         text = self._redact_text(tail.decode("utf-8", errors="replace"))
         encoded = text.encode("utf-8")
-        if len(encoded) > max_bytes:
+        presentation_truncated = len(encoded) > max_bytes
+        if presentation_truncated:
             text = encoded[-max_bytes:].decode("utf-8", errors="ignore")
+        truncated = source_truncated or presentation_truncated
         result: dict[str, Any] = {
             "job_id": job_id,
             "log": text,
@@ -371,11 +373,17 @@ class GitLabOperations:
             "content_warning": UNTRUSTED_CONTENT_WARNING,
         }
         if truncated:
-            result["hint"] = (
-                "Only the last portion of the log is shown, because a failing "
-                "job's cause is normally at the end. Raise max_bytes to see "
-                "more."
-            )
+            if source_truncated:
+                result["hint"] = (
+                    "Only the last portion of the log is shown, because a failing "
+                    "job's cause is normally at the end. Raise max_bytes to see "
+                    "more."
+                )
+            else:
+                result["hint"] = (
+                    "The displayed log was shortened after decoding or redaction "
+                    "to remain within max_bytes."
+                )
         return result
 
     def _parse_project_reference(self, reference: str | int) -> dict[str, Any]:

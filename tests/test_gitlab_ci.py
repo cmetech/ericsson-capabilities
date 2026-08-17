@@ -921,6 +921,8 @@ class TestJobLog:
         ops = _project_resolved(GitLabOperations(client))
         result = ops.job_log("g/p", 42, max_bytes=4)
         assert result["returned_bytes"] <= 4
+        assert result["truncated"] is True
+        assert "redaction" in result["hint"].lower()
 
     def test_bad_job_id_rejected_without_a_request(self):
         client = FakeClient()

@@ -66,6 +66,7 @@ _MAX_MR_DESCRIPTION = 64 * 1024
 _MAX_NOTE_BYTES = 100_000
 _DUPLICATE_MR_MESSAGE = "another open merge request already exists"
 _DISCUSSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SHA = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 class _YamlCapacityError(Exception):
@@ -362,6 +363,12 @@ class GitLabOperations:
     @staticmethod
     def _discussion_id(value: Any) -> str:
         if not isinstance(value, str) or _DISCUSSION_ID.fullmatch(value) is None:
+            raise GitLabError("invalid_input")
+        return value
+
+    @staticmethod
+    def _sha(value: Any) -> str:
+        if not isinstance(value, str) or _SHA.fullmatch(value) is None:
             raise GitLabError("invalid_input")
         return value
 
@@ -1645,6 +1652,102 @@ class GitLabOperations:
             }
 
         return self._usable_write_result(finish_discussion_resolution)
+
+    def merge_request_approvals(
+        self, project: str | int, iid: int
+    ) -> dict[str, Any]:
+        """Read an MR's approval state and the users who have approved it."""
+        iid = self._iid(iid)
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        project_path = resolved.get("path", resolved.get("path_with_namespace"))
+        if not isinstance(project_path, str):
+            raise GitLabError("invalid_remote_data")
+        payload = self.client.get_json(
+            f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/approvals",
+            deadline=deadline,
+        )
+        if not isinstance(payload, Mapping):
+            raise GitLabError("invalid_remote_data")
+        approvers = []
+        raw_approved_by = payload.get("approved_by")
+        if isinstance(raw_approved_by, list):
+            for entry in raw_approved_by[:100]:
+                if not isinstance(entry, Mapping):
+                    continue
+                user = entry.get("user")
+                if not isinstance(user, Mapping):
+                    continue
+                username = user.get("username")
+                if isinstance(username, str) and username:
+                    approvers.append(self._redact_text(username[:255]))
+        return {
+            "project": project_path,
+            "iid": iid,
+            "approved": bool(payload.get("approved")),
+            "approvals_required": payload.get("approvals_required"),
+            "approvals_left": payload.get("approvals_left"),
+            "approved_by": approvers,
+        }
+
+    def approve_merge_request(
+        self,
+        project: str | int,
+        iid: int,
+        *,
+        sha: str | None = None,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Approve one merge request, optionally pinning it to a reviewed SHA."""
+        iid = self._iid(iid)
+        body: dict[str, Any] = {}
+        if sha is not None:
+            body["sha"] = self._sha(sha)
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run, confirm=confirm, action=f"merge request !{iid}"
+            )
+        except ConnectorError as exc:
+            raise GitLabError(exc.category) from None
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
+        project_path = resolved.get("path", resolved.get("path_with_namespace"))
+        if not isinstance(project_path, str):
+            raise GitLabError("invalid_remote_data")
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "project": project_path,
+                "iid": iid,
+                "sha": sha,
+            }
+        status, payload = self._write_json(
+            "POST",
+            f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/approve",
+            body,
+            deadline=deadline,
+        )
+        if status >= 400:
+            raise self.client._error_for_status(status)
+
+        def finish_approval_write():
+            if status != 201 or not isinstance(payload, Mapping):
+                raise GitLabError("invalid_remote_data")
+            approved = payload.get("approved")
+            if type(approved) is not bool:
+                raise GitLabError("invalid_remote_data")
+            return {
+                "ok": True,
+                "dry_run": False,
+                "project": project_path,
+                "iid": iid,
+                "sha": sha,
+                "approved": approved,
+            }
+
+        return self._usable_write_result(finish_approval_write)
 
     def _list_named_refs(
         self, project_id: int, kind: str, *, deadline: float

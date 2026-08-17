@@ -18,6 +18,7 @@ _WRITE_TOOLS = frozenset(
         "gitlab_create_mr_note",
         "gitlab_reply_to_discussion",
         "gitlab_resolve_discussion",
+        "gitlab_approve_merge_request",
     }
 )
 
@@ -58,6 +59,10 @@ WRITE_APPROVALS = {
         f"Project: {_arg(a, 'project')}\nMR: !{_arg(a, 'iid')}\n"
         f"Thread: {_arg(a, 'discussion_id')}\n"
         f"Set resolved: {_arg_or_default(a, 'resolved', True)}"
+    ),
+    "gitlab_approve_merge_request": lambda a: (
+        f"Project: {_arg(a, 'project')}\nApprove MR: !{_arg(a, 'iid')}\n"
+        f"Pinned SHA: {_arg(a, 'sha')}"
     ),
 }
 _PLUGIN_SKILLS = (

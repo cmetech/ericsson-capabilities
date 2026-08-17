@@ -206,3 +206,72 @@ class TestResolveDiscussion:
         with pytest.raises(GitLabError) as excinfo:
             _ops(client).resolve_discussion("g/p", 42, "abc123", confirm=True)
         assert excinfo.value.category == "write_ambiguous"
+
+
+class TestApprovals:
+    def test_reads_approval_state(self):
+        client = FakeClient([
+            {
+                "approved": False,
+                "approvals_required": 2,
+                "approvals_left": 1,
+                "approved_by": [{"user": {"username": "alice", "name": "Alice"}}],
+            }
+        ])
+        result = _ops(client).merge_request_approvals("g/p", 42)
+        assert client.calls[0][1] == (
+            "/api/v4/projects/7/merge_requests/42/approvals"
+        )
+        assert result["approvals_required"] == 2
+        assert result["approvals_left"] == 1
+        assert result["approved_by"] == ["alice"]
+
+    def test_malformed_approval_payload_raises(self):
+        client = FakeClient([["not", "a", "mapping"]])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).merge_request_approvals("g/p", 42)
+        assert excinfo.value.category == "invalid_remote_data"
+
+
+class TestApproveMergeRequest:
+    def test_neither_flag_is_refused(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).approve_merge_request("g/p", 42)
+        assert excinfo.value.category == "confirmation_required"
+
+    def test_confirm_approves(self):
+        client = FakeClient([{"approved": True}])
+        result = _ops(client).approve_merge_request("g/p", 42, confirm=True)
+        method, path, _body = client.calls[0]
+        assert method == "POST"
+        assert path == "/api/v4/projects/7/merge_requests/42/approve"
+        assert result["ok"] is True
+
+    def test_sha_is_forwarded_when_supplied(self):
+        """A pinned SHA prevents approval after the reviewed branch moved."""
+        client = FakeClient([{"approved": True}])
+        _ops(client).approve_merge_request(
+            "g/p", 42, sha="a" * 40, confirm=True
+        )
+        assert client.calls[0][2] == {"sha": "a" * 40}
+
+    def test_malformed_sha_rejected(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError):
+            _ops(client).approve_merge_request(
+                "g/p", 42, sha="not-a-sha", confirm=True
+            )
+        assert client.calls == []
+
+    def test_dry_run_previews(self):
+        client = FakeClient()
+        result = _ops(client).approve_merge_request("g/p", 42, dry_run=True)
+        assert result["dry_run"] is True
+        assert client.calls == []
+
+    def test_success_without_approval_evidence_is_write_ambiguous(self):
+        client = FakeClient([{}])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).approve_merge_request("g/p", 42, confirm=True)
+        assert excinfo.value.category == "write_ambiguous"

@@ -38,6 +38,8 @@ EXPECTED_TOOLS = {
     "gitlab_create_mr_note",
     "gitlab_reply_to_discussion",
     "gitlab_resolve_discussion",
+    "gitlab_merge_request_approvals",
+    "gitlab_approve_merge_request",
 }
 
 
@@ -85,6 +87,7 @@ class Configuration:
 class Context:
     def __init__(self):
         self.registrations = {}
+        self.hooks = {}
         self.configuration_calls = 0
 
     def configuration(self):
@@ -95,7 +98,7 @@ class Context:
         self.registrations[registration["name"]] = registration
 
     def register_hook(self, name, callback):
-        pass
+        self.hooks[name] = callback
 
 
 def test_descriptor_is_standalone_static_and_declares_exact_current_tools():
@@ -106,6 +109,7 @@ def test_descriptor_is_standalone_static_and_declares_exact_current_tools():
     assert manifest["name"] == "ericsson-gitlab"
     assert manifest["kind"] == "standalone"
     assert manifest["config_schema"] == "config.schema.json"
+    assert len(EXPECTED_TOOLS) == 23
     assert set(manifest["provides_tools"]) == EXPECTED_TOOLS
     assert {field["id"] for field in descriptor["fields"]} == {
         "origin",
@@ -161,6 +165,7 @@ def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
             "gitlab_create_mr_note",
             "gitlab_reply_to_discussion",
             "gitlab_resolve_discussion",
+            "gitlab_approve_merge_request",
         }:
             kwargs["tool_admission"] = types.SimpleNamespace(
                 approved=True,
@@ -170,6 +175,51 @@ def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
         result = json.loads(context.registrations[name]["handler"]({}, **kwargs))
         assert result == {"success": True, "result": {"invoked": name}}
     assert invoked == sorted(plugin.gitlab_tools.SCHEMAS)
+
+
+def test_approve_merge_request_requires_argument_specific_write_admission(monkeypatch):
+    plugin = _load_plugin()
+    invoked = []
+
+    def invoke(name, args, configuration, **options):
+        invoked.append((name, args))
+        return {"invoked": name}
+
+    monkeypatch.setattr(plugin.gitlab_tools, "invoke", invoke)
+    context = Context()
+    plugin.register(context)
+    handler = context.registrations["gitlab_approve_merge_request"]["handler"]
+    arguments = {"project": "g/p", "iid": 42, "sha": "a" * 40, "confirm": True}
+
+    denied = json.loads(handler(arguments))
+    assert denied["error"]["category"] == "permission"
+    assert invoked == []
+
+    approval = context.hooks["pre_tool_call"](
+        "gitlab_approve_merge_request", arguments
+    )
+    changed_approval = context.hooks["pre_tool_call"](
+        "gitlab_approve_merge_request", {**arguments, "iid": 43}
+    )
+    assert approval["action"] == "approve"
+    assert approval["rule_key"] != changed_approval["rule_key"]
+    assert "Approve MR: !42" in approval["message"]
+
+    admitted = json.loads(
+        handler(
+            arguments,
+            tool_admission=types.SimpleNamespace(
+                approved=True,
+                policy="plugin_approve",
+                tool_name="gitlab_approve_merge_request",
+            ),
+        )
+    )
+    assert admitted == {
+        "success": True,
+        "result": {"invoked": "gitlab_approve_merge_request"},
+    }
+    assert invoked == [("gitlab_approve_merge_request", arguments)]
 
 
 def test_handler_resolves_fresh_host_configuration_on_every_invocation_and_never_accepts_pat():

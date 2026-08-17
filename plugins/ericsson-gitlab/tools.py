@@ -417,6 +417,27 @@ SCHEMAS = {
         },
         ["project", "iid", "discussion_id"],
     ),
+    "gitlab_merge_request_approvals": _schema(
+        "gitlab_merge_request_approvals",
+        "Read approval state for one GitLab merge request: how many "
+        "approvals are required, how many remain, and who has approved.",
+        {"project": _PROJECT, "iid": {"type": "integer", "minimum": 1}},
+        ["project", "iid"],
+    ),
+    "gitlab_approve_merge_request": _schema(
+        "gitlab_approve_merge_request",
+        "Approve one GitLab merge request. Supply sha to pin the approval to "
+        "a reviewed commit so GitLab refuses if the branch moved. Requires "
+        "dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1},
+            "sha": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "iid"],
+    ),
 }
 
 
@@ -606,6 +627,18 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 values["iid"],
                 values["discussion_id"],
                 resolved=values.get("resolved", True),
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "gitlab_merge_request_approvals":
+            return operations.merge_request_approvals(
+                values["project"], values["iid"]
+            )
+        if name == "gitlab_approve_merge_request":
+            return operations.approve_merge_request(
+                values["project"],
+                values["iid"],
+                sha=values.get("sha"),
                 dry_run=values.get("dry_run", False),
                 confirm=values.get("confirm", False),
             )

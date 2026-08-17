@@ -408,3 +408,22 @@ def test_standalone_loader_does_not_reuse_a_foreign_synthetic_namespace(monkeypa
     assert plugin.__package__ != namespace
     package = sys.modules[plugin.__package__]
     assert package._ericsson_arm_root == root
+
+
+def test_standalone_loader_rejects_an_orphaned_foreign_namespace_child(monkeypatch):
+    """An unowned candidate child cannot be imported as ARM's direct binding."""
+    root = str(PLUGIN.resolve())
+    namespace = "_ericsson_arm_standalone_" + hashlib.sha256(
+        root.encode()
+    ).hexdigest()[:16]
+    foreign_tools = types.ModuleType(f"{namespace}.tools")
+    monkeypatch.setitem(sys.modules, f"{namespace}.tools", foreign_tools)
+
+    plugin = _load_plugin_module()
+    ctx = _SkillContext()
+    plugin.register(ctx)
+
+    assert plugin.__package__ != namespace
+    assert plugin.arm_tools is not foreign_tools
+    assert sys.modules[f"{namespace}.tools"] is foreign_tools
+    assert ctx.skills

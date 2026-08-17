@@ -9,6 +9,24 @@ import sys
 import types
 
 
+def _owns_standalone_namespace(name: str, root: str) -> bool:
+    """Return whether a complete synthetic namespace belongs to this plugin."""
+    package = sys.modules.get(name)
+    if getattr(package, "_ericsson_arm_root", None) != root:
+        return False
+    prefix = f"{name}."
+    for module_name, module in tuple(sys.modules.items()):
+        if not module_name.startswith(prefix):
+            continue
+        module_path = getattr(module, "__file__", None)
+        try:
+            if not isinstance(module_path, str) or not Path(module_path).resolve().is_relative_to(root):
+                return False
+        except (OSError, ValueError):
+            return False
+    return True
+
+
 if not __package__ or not hasattr(sys.modules.get(__package__), "__path__"):
     # Tests and narrow host probes can execute this file by path, which leaves
     # __package__ empty. Give ARM's direct relative imports one unique package
@@ -19,21 +37,28 @@ if not __package__ or not hasattr(sys.modules.get(__package__), "__path__"):
         "_ericsson_arm_standalone_"
         f"{hashlib.sha256(_standalone_root.encode()).hexdigest()[:16]}"
     )
-    _STANDALONE_PACKAGE = _standalone_base
-    _suffix = 0
-    while True:
-        _standalone_package = sys.modules.get(_STANDALONE_PACKAGE)
-        if _standalone_package is None:
+    _STANDALONE_PACKAGE = ""
+    for _suffix in range(64):
+        _candidate = (
+            _standalone_base if _suffix == 0 else f"{_standalone_base}_{_suffix}"
+        )
+        _candidate_children = any(
+            module_name.startswith(f"{_candidate}.") for module_name in sys.modules
+        )
+        _standalone_package = sys.modules.get(_candidate)
+        if _standalone_package is None and not _candidate_children:
+            _STANDALONE_PACKAGE = _candidate
             _standalone_package = types.ModuleType(_STANDALONE_PACKAGE)
             _standalone_package.__path__ = [_standalone_root]
             _standalone_package.__package__ = _STANDALONE_PACKAGE
             _standalone_package._ericsson_arm_root = _standalone_root
             sys.modules[_STANDALONE_PACKAGE] = _standalone_package
             break
-        if getattr(_standalone_package, "_ericsson_arm_root", None) == _standalone_root:
+        if _owns_standalone_namespace(_candidate, _standalone_root):
+            _STANDALONE_PACKAGE = _candidate
             break
-        _suffix += 1
-        _STANDALONE_PACKAGE = f"{_standalone_base}_{_suffix}"
+    else:
+        raise ImportError("unable to allocate an isolated ARM plugin namespace")
     # A file-path loader may give this module a non-package spec parent. The
     # explicit package namespace above is authoritative for relative imports.
     __spec__ = None

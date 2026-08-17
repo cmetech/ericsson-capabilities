@@ -147,7 +147,12 @@ class TestReplyToDiscussion:
 
 class TestResolveDiscussion:
     def test_confirm_resolves(self):
-        client = FakeClient([{"id": "abc123", "resolved": True}])
+        client = FakeClient(
+            [{
+                "id": "abc123",
+                "notes": [{"resolvable": True, "resolved": True}],
+            }]
+        )
         result = _ops(client).resolve_discussion(
             "g/p", 42, "abc123", confirm=True
         )
@@ -158,7 +163,12 @@ class TestResolveDiscussion:
         assert result["resolved"] is True
 
     def test_unresolve_sends_false(self):
-        client = FakeClient([{"id": "abc123", "resolved": False}])
+        client = FakeClient(
+            [{
+                "id": "abc123",
+                "notes": [{"resolvable": True, "resolved": False}],
+            }]
+        )
         result = _ops(client).resolve_discussion(
             "g/p", 42, "abc123", resolved=False, confirm=True
         )
@@ -180,8 +190,19 @@ class TestResolveDiscussion:
                 "g/p", 42, "abc123", resolved="yes", confirm=True
             )
 
-    def test_response_without_resolved_is_write_ambiguous(self):
+    def test_response_without_notes_is_write_ambiguous(self):
         client = FakeClient([{"id": "abc123"}])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).resolve_discussion("g/p", 42, "abc123", confirm=True)
+        assert excinfo.value.category == "write_ambiguous"
+
+    def test_response_with_wrong_resolvable_state_is_write_ambiguous(self):
+        client = FakeClient(
+            [{
+                "id": "abc123",
+                "notes": [{"resolvable": True, "resolved": False}],
+            }]
+        )
         with pytest.raises(GitLabError) as excinfo:
             _ops(client).resolve_discussion("g/p", 42, "abc123", confirm=True)
         assert excinfo.value.category == "write_ambiguous"

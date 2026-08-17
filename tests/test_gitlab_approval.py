@@ -96,5 +96,12 @@ class TestApprovalMessage:
         for name, summarise in gitlab_plugin.WRITE_APPROVALS.items():
             assert isinstance(summarise({}), str)
 
+    def test_resolve_discussion_defaults_to_resolved_in_approval_message(self):
+        message = _hook()(
+            "gitlab_resolve_discussion",
+            {"project": "group/proj", "iid": 42, "discussion_id": "abc123"},
+        )["message"]
+        assert "Set resolved: true" in message
+
     def test_read_tools_are_not_gated(self):
         assert _hook()("gitlab_read_file", {"project": "g/p"}) is None

@@ -1612,13 +1612,27 @@ class GitLabOperations:
             raise self.client._error_for_status(status)
 
         def finish_discussion_resolution():
-            if status != 200:
+            if status != 200 or not isinstance(payload, Mapping):
                 raise GitLabError("invalid_remote_data")
+            notes = payload.get("notes")
             if (
-                not isinstance(payload, Mapping)
-                or payload.get("id") != discussion_id
-                or type(payload.get("resolved")) is not bool
-                or payload["resolved"] is not resolved
+                payload.get("id") != discussion_id
+                or not isinstance(notes, list)
+                or not 1 <= len(notes) <= _MAX_NOTES_PER_DISCUSSION
+            ):
+                raise GitLabError("invalid_remote_data")
+            resolvable_states = []
+            for raw_note in notes:
+                if not isinstance(raw_note, Mapping):
+                    raise GitLabError("invalid_remote_data")
+                resolvable = raw_note.get("resolvable")
+                note_resolved = raw_note.get("resolved")
+                if type(resolvable) is not bool or type(note_resolved) is not bool:
+                    raise GitLabError("invalid_remote_data")
+                if resolvable:
+                    resolvable_states.append(note_resolved)
+            if not resolvable_states or any(
+                state is not resolved for state in resolvable_states
             ):
                 raise GitLabError("invalid_remote_data")
             return {
@@ -1627,7 +1641,7 @@ class GitLabOperations:
                 "project": project_path,
                 "iid": iid,
                 "discussion_id": discussion_id,
-                "resolved": payload["resolved"],
+                "resolved": resolved,
             }
 
         return self._usable_write_result(finish_discussion_resolution)

@@ -28,6 +28,12 @@ def _arg(args: dict, name: str) -> str:
     return json.dumps(value, ensure_ascii=True)[:512]
 
 
+def _arg_or_default(args: dict, name: str, default: object) -> str:
+    """Render an argument's effective default in an approval prompt."""
+    value = args.get(name, default) if isinstance(args, dict) else default
+    return json.dumps(value, ensure_ascii=True)[:512]
+
+
 WRITE_APPROVALS = {
     "gitlab_create_branch": lambda a: (
         f"Project: {_arg(a, 'project')}\nTicket: {_arg(a, 'ticket_key')}"
@@ -51,7 +57,7 @@ WRITE_APPROVALS = {
     "gitlab_resolve_discussion": lambda a: (
         f"Project: {_arg(a, 'project')}\nMR: !{_arg(a, 'iid')}\n"
         f"Thread: {_arg(a, 'discussion_id')}\n"
-        f"Set resolved: {_arg(a, 'resolved')}"
+        f"Set resolved: {_arg_or_default(a, 'resolved', True)}"
     ),
 }
 _PLUGIN_SKILLS = (

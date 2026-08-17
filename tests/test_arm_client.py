@@ -99,6 +99,25 @@ def _client(script, **overrides):
 
 
 class TestClient:
+    @pytest.mark.parametrize(
+        ("auth_overrides", "client_overrides"),
+        [
+            ({"request_timeout_seconds": 0}, {}),
+            ({}, {"max_retries": 5}),
+        ],
+    )
+    def test_constructor_translates_shared_configuration_errors(
+        self, auth_overrides, client_overrides
+    ):
+        with pytest.raises(ArmError) as excinfo:
+            ArmClient(
+                _auth(**auth_overrides),
+                transport=FakeTransport([]),
+                **client_overrides,
+            )
+        assert excinfo.value.category == "invalid_configuration"
+        assert not isinstance(excinfo.value, ConnectorError)
+
     def test_decodes_json(self):
         client, _clock = _client([Response(200, {}, b'{"repo":"generic"}')])
         assert client.get_json("/artifactory/api/repositories") == {"repo": "generic"}
@@ -190,6 +209,30 @@ class TestCloudflareAccess:
         with pytest.raises(ArmError):
             client.get_json("/artifactory/api/repositories")
         assert len(client._transport.calls) == 1
+
+    def test_access_redirect_on_post_is_not_write_ambiguous_or_retryable(self):
+        client, _clock = _client([ACCESS_REDIRECT])
+        with pytest.raises(ArmError) as excinfo:
+            client.post_text("/artifactory/api/search/aql", "items.find({})")
+        assert excinfo.value.category == "edge_authentication"
+        assert len(client._transport.calls) == 1
+        assert not client._client._failures
+
+    def test_access_redirect_on_put_is_not_write_ambiguous_or_retryable(self):
+        client, _clock = _client([ACCESS_REDIRECT])
+        with pytest.raises(ArmError) as excinfo:
+            client.send("PUT", "/artifactory/generic/a.tgz", content=b"archive")
+        assert excinfo.value.category == "edge_authentication"
+        assert len(client._transport.calls) == 1
+        assert not client._client._failures
+
+    def test_unrelated_write_redirect_remains_write_ambiguous(self):
+        client, _clock = _client([
+            Response(302, {"location": "https://artifactory.test/elsewhere"}, b"")
+        ])
+        with pytest.raises(ArmError) as excinfo:
+            client.send("PUT", "/artifactory/generic/a.tgz", content=b"archive")
+        assert excinfo.value.category == "write_ambiguous"
 
 
 class TestBodies:

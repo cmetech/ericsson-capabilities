@@ -30,6 +30,48 @@ _ACCESS_REMEDIATION = (
 )
 
 
+def _is_access_challenge(response: Response) -> bool:
+    """Return whether a response is Cloudflare Access refusing mTLS."""
+    return (
+        _ACCESS_SCHEME in response.header("www-authenticate").lower()
+        or _ACCESS_HOST in response.header("location").lower()
+    )
+
+
+class _AccessChallengeTransport:
+    """Surface Cloudflare Access before write ambiguity is decided.
+
+    BoundedClient correctly treats ordinary write redirects as uncertain. An
+    Access redirect is different: it proves the request was rejected at the
+    edge, before it reached Artifactory, so its outcome is deterministic.
+    """
+
+    def __init__(self, transport) -> None:
+        self._transport = transport
+
+    @staticmethod
+    def _response_or_access_error(response: Response) -> Response:
+        if _is_access_challenge(response):
+            raise ConnectorError(
+                "edge_authentication", service="arm", outcome_uncertain=False
+            )
+        return response
+
+    def request(self, *args, **kwargs) -> Response:
+        return self._response_or_access_error(self._transport.request(*args, **kwargs))
+
+    def request_with_controls(self, *args, control, **kwargs) -> Response:
+        controlled_request = getattr(self._transport, "request_with_controls", None)
+        if controlled_request is None:
+            response = self._transport.request(*args, **kwargs)
+        else:
+            response = controlled_request(*args, control=control, **kwargs)
+        return self._response_or_access_error(response)
+
+    def close(self) -> None:
+        self._transport.close()
+
+
 @contextmanager
 def _as_arm_error():
     """Translate shared errors at the connector boundary.
@@ -40,7 +82,12 @@ def _as_arm_error():
     try:
         yield
     except ConnectorError as exc:
-        raise ArmError(exc.category, remediation=exc.remediation) from None
+        remediation = (
+            _ACCESS_REMEDIATION
+            if exc.category == "edge_authentication"
+            else exc.remediation
+        )
+        raise ArmError(exc.category, remediation=remediation) from None
 
 
 class ArmClient:
@@ -71,16 +118,17 @@ class ArmClient:
                 tls_context=authentication.tls_context,
             )
         self._transport = transport
-        self._client = BoundedClient(
-            transport,
-            service="arm",
-            max_retries=max_retries,
-            total_timeout_seconds=float(authentication.request_timeout_seconds),
-            request_timeout_seconds=float(authentication.request_timeout_seconds),
-            cancel_check=cancel_check,
-            clock=clock,
-            sleep=sleep,
-        )
+        with _as_arm_error():
+            self._client = BoundedClient(
+                _AccessChallengeTransport(transport),
+                service="arm",
+                max_retries=max_retries,
+                total_timeout_seconds=float(authentication.request_timeout_seconds),
+                request_timeout_seconds=float(authentication.request_timeout_seconds),
+                cancel_check=cancel_check,
+                clock=clock,
+                sleep=sleep,
+            )
 
     def __repr__(self) -> str:
         return f"ArmClient(origin={self.auth.origin!r})"
@@ -101,18 +149,11 @@ class ArmClient:
         if not isinstance(path, str) or not path.startswith(self.path_prefix):
             raise ArmError("invalid_input")
 
-    @staticmethod
-    def _is_access_challenge(response: Response) -> bool:
-        return (
-            _ACCESS_SCHEME in response.header("www-authenticate").lower()
-            or _ACCESS_HOST in response.header("location").lower()
-        )
-
     def _classify(self, response: Response) -> Response:
         """Raise for a non-2xx, naming the edge separately from the origin."""
         if 200 <= response.status < 300:
             return response
-        if self._is_access_challenge(response):
+        if _is_access_challenge(response):
             raise ArmError("edge_authentication", remediation=_ACCESS_REMEDIATION)
         if 300 <= response.status < 400:
             raise ArmError(

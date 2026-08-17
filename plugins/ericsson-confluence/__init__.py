@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 _WRITE_TOOLS = frozenset({
     "confluence_create_page", "confluence_update_page", "confluence_add_comment",
 })
+
+_PLUGIN_SKILLS = (
+    ("page-research", "Research bounded Confluence page evidence."),
+)
 
 
 def _arg(args: dict, name: str) -> str:
@@ -76,14 +81,24 @@ def register(ctx: object) -> None:
 
     ctx.register_hook("pre_tool_call", require_write_approval)
 
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is not None:
+        skill_root = Path(__file__).parent / "skills"
+        for name, description in _PLUGIN_SKILLS:
+            register_skill(name, skill_root / name / "SKILL.md", description)
+
     # Task 1's minimal hook-only context intentionally has no tool API.
     # Preserve that loading contract while allowing normal plugin hosts to
     # register the read tools below.
     if not hasattr(ctx, "register_tool"):
         return
 
-    from . import tools as confluence_tools
-    from .models import ConfluenceError, SAFE_ERROR_MESSAGES, safe_remediation
+    if __package__:
+        from . import tools as confluence_tools
+        from .models import ConfluenceError, SAFE_ERROR_MESSAGES, safe_remediation
+    else:
+        import tools as confluence_tools
+        from models import ConfluenceError, SAFE_ERROR_MESSAGES, safe_remediation
 
     def json_error(category: str, remediation: object = None) -> str:
         error = {"category": category, "message": SAFE_ERROR_MESSAGES[category]}

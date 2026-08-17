@@ -10,12 +10,12 @@ from typing import Any, Callable, Mapping
 if __package__:
     from ._common.client import BoundedClient
     from ._common.errors import ConnectorError, category_for_status, remediation_for
-    from ._common.transport import HttpxTransport, Response
+    from ._common.transport import HttpxTransport, RequestControl, Response
     from .models import ArmAuth, ArmError
 else:
     from _common.client import BoundedClient
     from _common.errors import ConnectorError, category_for_status, remediation_for
-    from _common.transport import HttpxTransport, Response
+    from _common.transport import HttpxTransport, RequestControl, Response
     from models import ArmAuth, ArmError
 
 
@@ -192,6 +192,56 @@ class ArmClient:
                 raise_on_status=False,
             )
         return self._classify(response) if classify else response
+
+    def checksum_probe(
+        self,
+        path: str,
+        *,
+        extra_headers: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+    ) -> Response:
+        """Send one checksum-only PUT and return any response status.
+
+        A checksum deploy's 3xx and 5xx response is an input to its safe full
+        upload fallback, not a mutation outcome to classify as ambiguous. This
+        deliberately bypasses ``BoundedClient.request``'s write-status policy,
+        while retaining its deadline, cancellation, transport controls, and
+        Cloudflare edge classification.
+        """
+        self._validate(path)
+        if deadline is None:
+            deadline = self.operation_deadline()
+        bounded = self._client
+        try:
+            bounded._check_breaker(path)
+            remaining = bounded._remaining(deadline)
+            control = RequestControl(
+                deadline=deadline,
+                cancel_check=bounded._cancel_check,
+                clock=bounded._clock,
+                service="arm",
+            )
+            request_options = {
+                "params": None,
+                "json_body": None,
+                "timeout_seconds": min(remaining, bounded._request_timeout_seconds),
+                "extra_headers": extra_headers,
+            }
+            controlled_request = getattr(self._transport, "request_with_controls", None)
+            if controlled_request is None:
+                response = self._transport.request("PUT", path, **request_options)
+            else:
+                response = controlled_request(
+                    "PUT", path, control=control, **request_options
+                )
+        except ConnectorError as exc:
+            category = "write_ambiguous" if exc.outcome_uncertain else exc.category
+            raise ArmError(category, remediation=exc.remediation) from None
+        except Exception:
+            raise ArmError("write_ambiguous") from None
+        if _is_access_challenge(response):
+            raise ArmError("edge_authentication", remediation=_ACCESS_REMEDIATION)
+        return response
 
     @staticmethod
     def _decode(response: Response) -> Any:

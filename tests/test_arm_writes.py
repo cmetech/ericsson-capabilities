@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ sys.path.insert(0, str(PLUGIN))
 
 from _common.transport import Response  # noqa: E402
 from models import ArmError  # noqa: E402
+import operations as arm_operations  # noqa: E402
 from operations import ArmOperations  # noqa: E402
 import tools as arm_tools  # noqa: E402
 
@@ -65,14 +67,20 @@ class FakeClient:
 
     def send(self, method, path, *, params=None, json_body=None, content=None,
              extra_headers=None, deadline=None, classify=True):
+        body = content.read() if hasattr(content, "read") else content
         self.calls.append({
             "method": method, "path": path, "headers": dict(extra_headers or {}),
-            "has_body": content is not None, "classify": classify,
+            "has_body": content is not None, "body": body, "classify": classify,
         })
         result = self.raw_results.pop(0)
         if isinstance(result, Exception):
             raise result
         return result
+
+    def checksum_probe(self, path, *, extra_headers=None, deadline=None):
+        return self.send(
+            "PUT", path, extra_headers=extra_headers, deadline=deadline, classify=False
+        )
 
 
 @pytest.fixture
@@ -162,6 +170,28 @@ class TestChecksumDeploy:
         assert second["headers"]["X-Checksum-Md5"] == sums["md5"]
         assert result["deduplicated"] is False
         assert result["bytes_uploaded"] == source.stat().st_size
+
+    @pytest.mark.parametrize("status", [302, 503])
+    def test_any_received_probe_status_falls_back_to_a_full_upload(self, artifact, status):
+        source, sums = artifact
+        client = FakeClient(raw_results=[Response(status, {}, b""), _deployed(sums)])
+        result = ArmOperations(client).deploy(
+            "generic-local", "Infra/a.tgz", str(source), confirm=True
+        )
+        assert [call["method"] for call in client.calls] == ["PUT", "PUT"]
+        assert client.calls[0]["classify"] is False
+        assert client.calls[1]["classify"] is True
+        assert result["deduplicated"] is False
+
+    def test_probe_transport_failure_does_not_fall_back(self, artifact):
+        source, _sums = artifact
+        client = FakeClient(raw_results=[ArmError("write_ambiguous")])
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).deploy(
+                "generic-local", "Infra/a.tgz", str(source), confirm=True
+            )
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client.calls) == 1
 
     def test_the_probe_does_not_classify_its_response(self, artifact):
         source, sums = artifact
@@ -269,6 +299,77 @@ class TestDeploySource:
             "generic-local", "Infra/a.tgz", str(source), confirm=True
         )
         assert result["ok"] is True
+
+    def test_open_descriptor_is_uploaded_after_source_becomes_an_escape_symlink(
+        self, monkeypatch, tmp_path
+    ):
+        root = tmp_path / "allowed"
+        root.mkdir()
+        source = root / "archive.tgz"
+        original = b"inside-root"
+        source.write_bytes(original)
+        outside = tmp_path / "outside.tgz"
+        outside.write_bytes(b"outside-root" * 100)
+        sums = {
+            "md5": hashlib.md5(original, usedforsecurity=False).hexdigest(),
+            "sha1": hashlib.sha1(original, usedforsecurity=False).hexdigest(),
+            "sha256": hashlib.sha256(original).hexdigest(),
+        }
+        client = FakeClient(raw_results=[Response(404, {}, b""), _deployed(sums)], deploy_root=str(root), max_deploy_bytes=64)
+        original_checksums = ArmOperations._file_checksums
+
+        def replace_path_then_hash(handle):
+            source.unlink()
+            source.symlink_to(outside)
+            return original_checksums(handle)
+
+        monkeypatch.setattr(ArmOperations, "_file_checksums", staticmethod(replace_path_then_hash))
+        ArmOperations(client).deploy(
+            "generic-local", "Infra/a.tgz", str(source), confirm=True
+        )
+        assert client.calls[1]["body"] == original
+
+    def test_path_replacement_before_open_is_rejected_without_upload(
+        self, monkeypatch, tmp_path
+    ):
+        root = tmp_path / "allowed"
+        root.mkdir()
+        source = root / "archive.tgz"
+        source.write_bytes(b"inside-root")
+        replacement = root / "replacement.tgz"
+        replacement.write_bytes(b"replacement")
+        client = FakeClient(deploy_root=str(root))
+        original_open = os.open
+
+        def replace_then_open(path, flags):
+            os.replace(replacement, source)
+            return original_open(path, flags)
+
+        monkeypatch.setattr(arm_operations.os, "open", replace_then_open)
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).deploy(
+                "generic-local", "Infra/a.tgz", str(source), confirm=True
+            )
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_download_uri_redacts_a_token_split_at_the_output_bound(self, artifact):
+        source, sums = artifact
+        uri = "x" * 2044 + "Bearer secret-token-value"
+        response = Response(
+            201,
+            {},
+            (
+                '{"repo":"generic-local","path":"/Infra/a.tgz",'
+                f'"downloadUri":"{uri}",'
+                f'"checksums":{{"sha256":"{sums["sha256"]}"}}}}'
+            ).encode(),
+        )
+        result = ArmOperations(FakeClient(raw_results=[response])).deploy(
+            "generic-local", "Infra/a.tgz", str(source), confirm=True
+        )
+        assert "secret-token-value" not in result["download_uri"]
+        assert "Bearer" not in result["download_uri"]
 
 
 def _load_plugin():

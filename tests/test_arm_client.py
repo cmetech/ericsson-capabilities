@@ -151,6 +151,27 @@ class TestClient:
             client.request_json("PUT", "/artifactory/generic/a.tgz", json_body={})
         assert excinfo.value.category == "write_ambiguous"
 
+    @pytest.mark.parametrize("status", [302, 503])
+    def test_checksum_probe_returns_each_received_status_once(self, status):
+        client, _clock = _client([Response(status, {}, b"")])
+        response = client.checksum_probe("/artifactory/generic/a.tgz")
+        assert response.status == status
+        assert len(client._transport.calls) == 1
+
+    def test_checksum_probe_keeps_cloudflare_edge_classification(self):
+        client, _clock = _client([ACCESS_REDIRECT])
+        with pytest.raises(ArmError) as excinfo:
+            client.checksum_probe("/artifactory/generic/a.tgz")
+        assert excinfo.value.category == "edge_authentication"
+        assert len(client._transport.calls) == 1
+
+    def test_checksum_probe_transport_failure_is_ambiguous_and_not_retried(self):
+        client, _clock = _client([RuntimeError("network lost")])
+        with pytest.raises(ArmError) as excinfo:
+            client.checksum_probe("/artifactory/generic/a.tgz")
+        assert excinfo.value.category == "write_ambiguous"
+        assert len(client._transport.calls) == 1
+
     def test_shared_error_type_never_escapes(self):
         client, _clock = _client([Response(401, {}, b"")])
         with pytest.raises(ArmError) as excinfo:

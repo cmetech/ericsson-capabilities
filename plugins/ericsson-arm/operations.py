@@ -13,7 +13,8 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, Mapping
+import stat
+from typing import Any, BinaryIO, Mapping
 
 if __package__:
     from ._common.envelope import result_envelope
@@ -330,8 +331,8 @@ class ArmOperations:
             "count": len(properties),
         }
 
-    def _resolve_source(self, source_file: Any) -> tuple[str, int]:
-        """Validate a local upload source and return its real path and size."""
+    def _open_source(self, source_file: Any) -> tuple[BinaryIO, str, int]:
+        """Open one validated regular file descriptor for hashing and upload."""
         if not isinstance(source_file, str) or not source_file:
             raise ArmError("invalid_input")
         if not os.path.isabs(source_file):
@@ -340,7 +341,14 @@ class ArmOperations:
                 remediation="source_file must be an absolute path.",
             )
         real = os.path.realpath(source_file)
-        if not os.path.isfile(real):
+        try:
+            expected = os.stat(real)
+        except OSError:
+            raise ArmError(
+                "not_found",
+                remediation="source_file does not name a readable file.",
+            ) from None
+        if not stat.S_ISREG(expected.st_mode):
             raise ArmError(
                 "not_found",
                 remediation="source_file does not name a readable file.",
@@ -349,7 +357,8 @@ class ArmOperations:
         root = getattr(self.client.auth, "deploy_root", None)
         if root:
             try:
-                contained = os.path.commonpath([real, os.path.realpath(root)]) == os.path.realpath(root)
+                root_real = os.path.realpath(root)
+                contained = os.path.commonpath([real, root_real]) == root_real
             except ValueError:
                 contained = False
             if not contained:
@@ -361,9 +370,30 @@ class ArmOperations:
                     ),
                 )
 
-        size = os.path.getsize(real)
+        fd = None
+        try:
+            fd = os.open(
+                real,
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+            ):
+                raise ArmError("invalid_input")
+            size = opened.st_size
+            handle = os.fdopen(fd, "rb")
+            fd = None
+        except OSError:
+            raise ArmError("invalid_input") from None
+        finally:
+            if fd is not None:
+                os.close(fd)
+
         limit = getattr(self.client.auth, "max_deploy_bytes", 0)
         if size > limit:
+            handle.close()
             raise ArmError(
                 "capacity",
                 remediation=(
@@ -371,20 +401,19 @@ class ArmOperations:
                     "Raise it in the profile if this is expected."
                 ),
             )
-        return real, size
+        return handle, real, size
 
     @staticmethod
-    def _file_checksums(real_path: str) -> dict[str, str]:
+    def _file_checksums(handle: BinaryIO) -> dict[str, str]:
         """Compute Artifactory's three checksums in a single file pass."""
         digests = {
             "md5": hashlib.md5(usedforsecurity=False),
             "sha1": hashlib.sha1(usedforsecurity=False),
             "sha256": hashlib.sha256(),
         }
-        with open(real_path, "rb") as handle:
-            for block in iter(lambda: handle.read(_CHECKSUM_CHUNK), b""):
-                for digest in digests.values():
-                    digest.update(block)
+        for block in iter(lambda: handle.read(_CHECKSUM_CHUNK), b""):
+            for digest in digests.values():
+                digest.update(block)
         return {name: digest.hexdigest() for name, digest in digests.items()}
 
     def _verify_deploy(self, response, checksums: dict[str, str]) -> Mapping[str, Any]:
@@ -426,44 +455,61 @@ class ArmOperations:
         """Publish one local file with a checksum-only probe and full fallback."""
         repo = self._repo(repo)
         path = self._path(path)
-        real_path, size = self._resolve_source(source_file)
-        checksums = self._file_checksums(real_path)
+        handle, real_path, size = self._open_source(source_file)
         try:
-            execute = require_explicit_intent(
-                dry_run=dry_run,
-                confirm=confirm,
-                action=f"an upload to {repo}/{path}",
-            )
-        except ConnectorError as exc:
-            raise ArmError(exc.category) from None
+            checksums = self._file_checksums(handle)
+            try:
+                execute = require_explicit_intent(
+                    dry_run=dry_run,
+                    confirm=confirm,
+                    action=f"an upload to {repo}/{path}",
+                )
+            except ConnectorError as exc:
+                raise ArmError(exc.category) from None
 
-        if not execute:
-            return {
-                "ok": True,
-                "dry_run": True,
-                "repo": repo,
-                "path": path,
-                "source_file": real_path,
-                "size": size,
-                "checksums": checksums,
-                "deduplicated": None,
-                "bytes_uploaded": None,
+            if not execute:
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "repo": repo,
+                    "path": path,
+                    "source_file": real_path,
+                    "size": size,
+                    "checksums": checksums,
+                    "deduplicated": None,
+                    "bytes_uploaded": None,
+                }
+
+            target = f"{self.base}/{repo}/{path}"
+            checksum_headers = {
+                "X-Checksum-Sha256": checksums["sha256"],
+                "X-Checksum-Sha1": checksums["sha1"],
+                "X-Checksum-Md5": checksums["md5"],
             }
+            probe = self.client.checksum_probe(
+                target,
+                extra_headers={"X-Checksum-Deploy": "true", **checksum_headers},
+            )
+            if 200 <= probe.status < 300:
+                payload = self._verify_deploy(probe, checksums)
+                return {
+                    "ok": True,
+                    "dry_run": False,
+                    "repo": repo,
+                    "path": path,
+                    "source_file": real_path,
+                    "size": size,
+                    "checksums": checksums,
+                    "deduplicated": True,
+                    "bytes_uploaded": 0,
+                    "download_uri": self._remote_string(payload.get("downloadUri"), 2048),
+                }
 
-        target = f"{self.base}/{repo}/{path}"
-        checksum_headers = {
-            "X-Checksum-Sha256": checksums["sha256"],
-            "X-Checksum-Sha1": checksums["sha1"],
-            "X-Checksum-Md5": checksums["md5"],
-        }
-        probe = self.client.send(
-            "PUT",
-            target,
-            extra_headers={"X-Checksum-Deploy": "true", **checksum_headers},
-            classify=False,
-        )
-        if 200 <= probe.status < 300:
-            payload = self._verify_deploy(probe, checksums)
+            handle.seek(0)
+            response = self.client.send(
+                "PUT", target, extra_headers=checksum_headers, content=handle
+            )
+            payload = self._verify_deploy(response, checksums)
             return {
                 "ok": True,
                 "dry_run": False,
@@ -472,25 +518,9 @@ class ArmOperations:
                 "source_file": real_path,
                 "size": size,
                 "checksums": checksums,
-                "deduplicated": True,
-                "bytes_uploaded": 0,
-                "download_uri": self._redact(_bounded_string(payload.get("downloadUri"), 2048)),
+                "deduplicated": False,
+                "bytes_uploaded": size,
+                "download_uri": self._remote_string(payload.get("downloadUri"), 2048),
             }
-
-        with open(real_path, "rb") as handle:
-            response = self.client.send(
-                "PUT", target, extra_headers=checksum_headers, content=handle
-            )
-        payload = self._verify_deploy(response, checksums)
-        return {
-            "ok": True,
-            "dry_run": False,
-            "repo": repo,
-            "path": path,
-            "source_file": real_path,
-            "size": size,
-            "checksums": checksums,
-            "deduplicated": False,
-            "bytes_uploaded": size,
-            "download_uri": self._redact(_bounded_string(payload.get("downloadUri"), 2048)),
-        }
+        finally:
+            handle.close()

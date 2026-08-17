@@ -25,6 +25,18 @@ WRITE_APPROVALS = {
 }
 
 
+def _has_write_admission(admission: object, tool_name: str) -> bool:
+    """Accept only the host admission minted for this exact write tool."""
+    try:
+        return (
+            getattr(admission, "approved", None) is True
+            and getattr(admission, "policy", None) == "plugin_approve"
+            and getattr(admission, "tool_name", None) == tool_name
+        )
+    except Exception:
+        return False
+
+
 def register(ctx: object) -> None:
     """Register bounded Confluence reads and the future write hook."""
 
@@ -83,6 +95,10 @@ def register(ctx: object) -> None:
 
     def handler(name: str):
         def invoke(args: dict, **_kwargs) -> str:
+            if name in _WRITE_TOOLS and not _has_write_admission(
+                _kwargs.get("tool_admission"), name
+            ):
+                return json_error("permission")
             try:
                 configuration = ctx.configuration()
             except Exception:

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import types
+import uuid
 from pathlib import Path
 
 import yaml
@@ -42,6 +43,26 @@ def _load_tools_module():
             if loaded_name == module_name or loaded_name.startswith(module_name + "."):
                 sys.modules.pop(loaded_name, None)
     return module
+
+
+def _load_plugin_package():
+    module_name = f"ericsson_confluence_manifest_plugin_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        PLUGIN / "__init__.py",
+        submodule_search_locations=[str(PLUGIN)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module_name, module
+
+
+def _unload_package(module_name):
+    for loaded_name in tuple(sys.modules):
+        if loaded_name == module_name or loaded_name.startswith(module_name + "."):
+            sys.modules.pop(loaded_name, None)
 
 
 class TestManifest:
@@ -148,8 +169,8 @@ def _load_plugin_module():
     return module
 
 
-def test_empty_write_approval_hook_ignores_untrusted_arguments():
-    """Task 1 has no writes, so no input should be serialized by the hook."""
+def test_unknown_write_hook_ignores_untrusted_arguments():
+    """Unknown tools never serialize or render their untrusted arguments."""
     plugin = _load_plugin_module()
     ctx = _HookContext()
     recursive = {}
@@ -177,3 +198,72 @@ def test_write_contracts_match_the_declared_mutating_tools():
         if "confirm" in schema["parameters"]["properties"]
     }
     assert mutating <= writes
+
+
+class _ToolContext:
+    def __init__(self):
+        self.hooks = {}
+        self.tools = {}
+        self.configuration_calls = 0
+
+    def configuration(self):
+        self.configuration_calls += 1
+        return object()
+
+    def register_hook(self, event_name, hook):
+        self.hooks[event_name] = hook
+
+    def register_tool(self, *, name, handler, **_kwargs):
+        self.tools[name] = handler
+
+
+def test_create_handler_requires_an_exact_host_admission(monkeypatch):
+    """Pre-tool approval is advisory unless the write handler rechecks it."""
+    module_name, plugin = _load_plugin_package()
+    try:
+        ctx = _ToolContext()
+        plugin.register(ctx)
+        invoked = []
+        tools = sys.modules[module_name + ".tools"]
+        monkeypatch.setattr(
+            tools,
+            "invoke",
+            lambda *args: invoked.append(args) or {"ok": True},
+        )
+        handler = ctx.tools["confluence_create_page"]
+        arguments = {"space_key": "OPS", "title": "T", "markdown": "B", "confirm": True}
+
+        missing = json.loads(handler(arguments))
+        assert missing["success"] is False
+        assert missing["error"]["category"] == "permission"
+
+        denied = (
+            types.SimpleNamespace(
+                approved=True,
+                policy="plugin_approve",
+                tool_name="confluence_get_page",
+            ),
+            types.SimpleNamespace(
+                approved=True,
+                policy="other_policy",
+                tool_name="confluence_create_page",
+            ),
+        )
+        for admission in denied:
+            payload = json.loads(handler(arguments, tool_admission=admission))
+            assert payload["success"] is False
+            assert payload["error"]["category"] == "permission"
+        assert invoked == []
+        assert ctx.configuration_calls == 0
+
+        allowed = types.SimpleNamespace(
+            approved=True,
+            policy="plugin_approve",
+            tool_name="confluence_create_page",
+        )
+        payload = json.loads(handler(arguments, tool_admission=allowed))
+        assert payload == {"success": True, "result": {"ok": True}}
+        assert len(invoked) == 1
+        assert ctx.configuration_calls == 1
+    finally:
+        _unload_package(module_name)

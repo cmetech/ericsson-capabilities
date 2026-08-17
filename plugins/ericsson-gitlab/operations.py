@@ -413,7 +413,7 @@ class GitLabOperations:
         )
         raw = response.body
         total = len(raw)
-        source_truncated = total > max_bytes
+        raw_exceeds_max_bytes = total > max_bytes
         # Redact the complete transport-bounded response before choosing the
         # presentation tail. Otherwise a tail boundary inside the PAT turns
         # the secret into an unrecognisable fragment that evades replacement.
@@ -424,7 +424,7 @@ class GitLabOperations:
             text = encoded[-max_bytes:].decode("utf-8", errors="ignore")
         else:
             text = redacted
-        truncated = source_truncated or presentation_truncated
+        truncated = presentation_truncated
         result: dict[str, Any] = {
             "job_id": job_id,
             "log": text,
@@ -434,7 +434,7 @@ class GitLabOperations:
             "content_warning": UNTRUSTED_CONTENT_WARNING,
         }
         if truncated:
-            if source_truncated:
+            if raw_exceeds_max_bytes:
                 result["hint"] = (
                     "Only the last portion of the log is shown, because a failing "
                     "job's cause is normally at the end. Raise max_bytes to see "

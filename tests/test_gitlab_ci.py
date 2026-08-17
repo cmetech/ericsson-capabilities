@@ -932,6 +932,35 @@ class TestJobLog:
         ops = _project_resolved(GitLabOperations(client))
         assert "secret-pat-value" not in ops.job_log("g/p", 42)["log"]
 
+    @pytest.mark.parametrize(
+        ("max_bytes", "truncated"),
+        [(30, False), (24, False), (23, True)],
+    )
+    def test_truncation_reflects_complete_redacted_representation(
+        self, max_bytes, truncated
+    ):
+        secret = "s" * 30
+        raw = f"pre: {secret};post=ok?".encode()
+        safe = "pre: <redacted>;post=ok?"
+        assert len(raw) == 44
+        assert len(safe.encode()) == 24
+        client = FakeClient(raw_results=[Response(200, {}, raw)])
+        client.auth.pat = secret
+        ops = _project_resolved(GitLabOperations(client))
+
+        result = ops.job_log("g/p", 42, max_bytes=max_bytes)
+
+        assert result["total_bytes"] == 44
+        assert result["truncated"] is truncated
+        assert result["returned_bytes"] <= max_bytes
+        if truncated:
+            assert result["log"] == safe.encode()[-max_bytes:].decode()
+            assert "last portion" in result["hint"].lower()
+        else:
+            assert result["log"] == safe
+            assert "hint" not in result
+        assert secret not in result["log"]
+
     @pytest.mark.parametrize("boundary_offset", [1, 12, 24])
     def test_pat_crossing_presentation_boundary_leaks_no_fragment(
         self, boundary_offset

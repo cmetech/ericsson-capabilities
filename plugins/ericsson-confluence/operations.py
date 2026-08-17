@@ -6,11 +6,11 @@ import re
 from typing import Any, Mapping
 
 if __package__:
-    from ._common.envelope import UNTRUSTED_CONTENT_WARNING
+    from ._common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
     from .models import ConfluenceError
     from .storage import storage_to_markdown
 else:
-    from _common.envelope import UNTRUSTED_CONTENT_WARNING
+    from _common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
     from models import ConfluenceError
     from storage import storage_to_markdown
 
@@ -20,6 +20,7 @@ EXPAND_LIST = "version,space,ancestors"
 
 _CONTENT_ID = re.compile(r"^[0-9]{1,19}$")
 _MAX_BODY_CHARS = 100_000
+_MAX_CQL_CHARS = 4096
 
 
 def _bounded_string(value: Any, maximum: int) -> str | None:
@@ -103,11 +104,46 @@ class ConfluenceOperations:
             if type(payload.get("totalSize")) is int:
                 total = payload["totalSize"]
             rows.extend(row for row in results if isinstance(row, Mapping))
-            if len(rows) >= max_results or len(results) < page_size:
+            if len(rows) >= max_results or (
+                len(results) < page_size and (total is None or total <= len(rows))
+            ):
                 break
-            start += page_size
+            start += len(results)
         truncated = len(rows) > max_results or (total is not None and total > len(rows))
         return rows[:max_results], total, truncated
+
+    def search(self, cql: str, *, max_results: int = 25) -> dict[str, Any]:
+        """Search content with CQL.
+
+        Raw CQL is exposed deliberately: it is the whole value of Confluence
+        search, and the configured token carries the user's own permissions,
+        so a query cannot reach content the user could not already read.
+        Enumeration uses EXPAND_LIST -- bodies are fetched deliberately via
+        confluence_get_page rather than dragged along with every hit.
+        """
+        if (
+            not isinstance(cql, str)
+            or not cql.strip()
+            or len(cql) > _MAX_CQL_CHARS
+        ):
+            raise ConfluenceError("invalid_input")
+        if type(max_results) is not int or not 1 <= max_results <= 100:
+            raise ConfluenceError("invalid_input")
+        rows, total, truncated = self._paged(
+            f"{self.base}/content/search",
+            {"cql": cql, "expand": EXPAND_LIST},
+            max_results,
+        )
+        return result_envelope(
+            [self._content_summary(row) for row in rows],
+            total=total,
+            truncated=truncated,
+            hint=(
+                "More content matches this CQL. Raise max_results or narrow "
+                "the query." if truncated else None
+            ),
+            untrusted=True,
+        )
 
     def get_page(self, content_id: str) -> dict[str, Any]:
         content_id = self._content_id(content_id)

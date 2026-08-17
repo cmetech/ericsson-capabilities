@@ -141,3 +141,80 @@ class TestGetPageBody:
     def test_untruncated_body_reports_false(self):
         result = ConfluenceOperations(FakeClient([PAGE])).get_page_body("12345")
         assert result["truncated"] is False
+
+
+SEARCH_PAGE = {
+    "results": [
+        {"id": "1", "title": "First", "type": "page", "space": {"key": "OPS"}},
+        {"id": "2", "title": "Second", "type": "blogpost", "space": {"key": "DEV"}},
+    ],
+    "start": 0, "limit": 25, "size": 2, "totalSize": 2,
+}
+
+
+class TestSearch:
+    def test_sends_cql_paging_and_light_expansion(self):
+        client = FakeClient([SEARCH_PAGE])
+        ConfluenceOperations(client).search("space = OPS", max_results=25)
+        _method, path, params = client.calls[0]
+        assert path == "/rest/api/content/search"
+        assert params["cql"] == "space = OPS"
+        assert params["expand"] == EXPAND_LIST
+        assert params["limit"] == 25 and params["start"] == 0
+
+    def test_returns_bounded_identities(self):
+        result = ConfluenceOperations(FakeClient([SEARCH_PAGE])).search("x")
+        assert [item["id"] for item in result["items"]] == ["1", "2"]
+        assert result["items"][0]["space_key"] == "OPS"
+        assert result["returned"] == 2
+
+    def test_total_is_reported_when_known(self):
+        result = ConfluenceOperations(FakeClient([SEARCH_PAGE])).search("x")
+        assert result["total"] == 2
+        assert result["truncated"] is False
+
+    def test_total_is_omitted_when_absent(self):
+        """Confluence Server does not always return totalSize. A wrong number
+        is worse than none."""
+        page = {k: v for k, v in SEARCH_PAGE.items() if k != "totalSize"}
+        assert "total" not in ConfluenceOperations(FakeClient([page])).search("x")
+
+    def test_paginates_until_max_results(self):
+        first = {"results": [{"id": str(i), "title": f"P{i}", "type": "page"}
+                             for i in range(25)],
+                 "start": 0, "limit": 25, "size": 25, "totalSize": 30}
+        second = {"results": [{"id": str(i), "title": f"P{i}", "type": "page"}
+                              for i in range(25, 30)],
+                  "start": 25, "limit": 25, "size": 5, "totalSize": 30}
+        client = FakeClient([first, second])
+        result = ConfluenceOperations(client).search("x", max_results=30)
+        assert result["returned"] == 30
+        assert client.calls[1][2]["start"] == 25
+
+    def test_stops_at_max_results_and_reports_truncation(self):
+        page = {"results": [{"id": str(i), "title": f"P{i}", "type": "page"}
+                            for i in range(25)],
+                "start": 0, "limit": 25, "size": 25, "totalSize": 500}
+        result = ConfluenceOperations(FakeClient([page])).search("x", max_results=10)
+        assert result["returned"] == 10
+        assert result["truncated"] is True and result["hint"]
+
+    def test_results_carry_the_untrusted_content_warning(self):
+        assert ConfluenceOperations(FakeClient([SEARCH_PAGE])).search("x")[
+            "content_warning"
+        ]
+
+    def test_empty_cql_rejected_without_a_request(self):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError):
+            ConfluenceOperations(client).search("   ")
+        assert client.calls == []
+
+    def test_oversized_cql_rejected(self):
+        with pytest.raises(ConfluenceError):
+            ConfluenceOperations(FakeClient([])).search("x" * 5000)
+
+    def test_missing_results_key_raises(self):
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(FakeClient([{"start": 0}])).search("x")
+        assert excinfo.value.category == "invalid_remote_data"

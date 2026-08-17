@@ -54,6 +54,17 @@ SCHEMAS = {
         },
         ["content_id"],
     ),
+    "confluence_search": _schema(
+        "confluence_search",
+        "Search Confluence content with CQL, for example "
+        "'space = OPS AND type = page AND text ~ \"runbook\"'. Returns "
+        "bounded identities; fetch bodies with confluence_get_page.",
+        {
+            "cql": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "max_results": _LIMIT,
+        },
+        ["cql"],
+    ),
 }
 
 
@@ -94,5 +105,9 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             values["content_id"],
             raw_storage=values.get("raw_storage", False),
             max_chars=values.get("max_chars", 32_000),
+        )
+    if name == "confluence_search":
+        return operations.search(
+            values["cql"], max_results=values.get("max_results", 25)
         )
     raise ConfluenceError("invalid_input")

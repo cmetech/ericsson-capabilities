@@ -168,7 +168,9 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             return operations.list_repositories(
                 repository_type=values.get("repository_type"),
                 package_type=values.get("package_type"),
-                max_results=values.get("max_results", 25),
+                max_results=values.get(
+                    "max_results", operations.client.auth.default_max_results
+                ),
             )
         if name == "arm_artifact_info":
             return operations.artifact_info(
@@ -182,7 +184,10 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             )
         if name == "arm_search_artifacts":
             return operations.search_artifacts(
-                values["query"], max_results=values.get("max_results", 25)
+                values["query"],
+                max_results=values.get(
+                    "max_results", operations.client.auth.default_max_results
+                ),
             )
         if name == "arm_deploy":
             return operations.deploy(

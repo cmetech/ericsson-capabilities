@@ -11,6 +11,7 @@ sys.path.insert(0, str(PLUGIN))
 
 from models import ArmError  # noqa: E402
 from operations import ArmOperations  # noqa: E402
+import tools as arm_tools  # noqa: E402
 
 def _is_arm_module(module: object) -> bool:
     module_file = getattr(module, "__file__", None)
@@ -121,6 +122,90 @@ class FakeClient:
     def post_text(self, path, text, *, deadline=None):
         self.calls.append(("POST", path, text))
         return self._next()
+
+
+class TestToolProfileDefaults:
+    def test_omitted_list_and_search_limits_use_the_profile_default(self, monkeypatch):
+        calls = []
+        created = []
+
+        class Operations:
+            class Client:
+                class Auth:
+                    default_max_results = 7
+
+                auth = Auth()
+
+                def close(self):
+                    calls.append(("close",))
+
+            client = Client()
+
+            def list_repositories(self, **kwargs):
+                calls.append(("list", kwargs))
+                return {"ok": True}
+
+            def search_artifacts(self, query, **kwargs):
+                calls.append(("search", query, kwargs))
+                return {"ok": True}
+
+        def build_operations(*_args, **_kwargs):
+            created.append(object())
+            return Operations()
+
+        monkeypatch.setattr(arm_tools, "operations_from_configuration", build_operations)
+
+        assert arm_tools.invoke("arm_list_repositories", {}, object()) == {"ok": True}
+        assert arm_tools.invoke(
+            "arm_search_artifacts", {"query": 'items.find({})'}, object()
+        ) == {"ok": True}
+
+        assert created and len(created) == 2
+        assert calls == [
+            ("list", {"repository_type": None, "package_type": None, "max_results": 7}),
+            ("close",),
+            ("search", 'items.find({})', {"max_results": 7}),
+            ("close",),
+        ]
+
+    def test_explicit_list_and_search_limits_override_the_profile_default(self, monkeypatch):
+        calls = []
+
+        class Operations:
+            class Client:
+                class Auth:
+                    default_max_results = 7
+
+                auth = Auth()
+
+                def close(self):
+                    pass
+
+            client = Client()
+
+            def list_repositories(self, **kwargs):
+                calls.append(("list", kwargs))
+                return {"ok": True}
+
+            def search_artifacts(self, query, **kwargs):
+                calls.append(("search", query, kwargs))
+                return {"ok": True}
+
+        monkeypatch.setattr(
+            arm_tools, "operations_from_configuration", lambda *_args, **_kwargs: Operations()
+        )
+
+        arm_tools.invoke("arm_list_repositories", {"max_results": 3}, object())
+        arm_tools.invoke(
+            "arm_search_artifacts",
+            {"query": 'items.find({})', "max_results": 4},
+            object(),
+        )
+
+        assert calls == [
+            ("list", {"repository_type": None, "package_type": None, "max_results": 3}),
+            ("search", 'items.find({})', {"max_results": 4}),
+        ]
 
 
 REPOSITORIES = [

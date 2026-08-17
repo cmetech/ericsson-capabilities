@@ -1669,6 +1669,17 @@ class GitLabOperations:
         )
         if not isinstance(payload, Mapping):
             raise GitLabError("invalid_remote_data")
+        approved = payload.get("approved")
+        approvals_required = payload.get("approvals_required")
+        approvals_left = payload.get("approvals_left")
+        if (
+            type(approved) is not bool
+            or type(approvals_required) is not int
+            or approvals_required < 0
+            or type(approvals_left) is not int
+            or approvals_left < 0
+        ):
+            raise GitLabError("invalid_remote_data")
         approvers = []
         raw_approved_by = payload.get("approved_by")
         if isinstance(raw_approved_by, list):
@@ -1684,9 +1695,9 @@ class GitLabOperations:
         return {
             "project": project_path,
             "iid": iid,
-            "approved": bool(payload.get("approved")),
-            "approvals_required": payload.get("approvals_required"),
-            "approvals_left": payload.get("approvals_left"),
+            "approved": approved,
+            "approvals_required": approvals_required,
+            "approvals_left": approvals_left,
             "approved_by": approvers,
         }
 

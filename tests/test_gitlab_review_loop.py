@@ -232,6 +232,26 @@ class TestApprovals:
             _ops(client).merge_request_approvals("g/p", 42)
         assert excinfo.value.category == "invalid_remote_data"
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("approved", "false"),
+            ("approvals_required", True),
+            ("approvals_left", 1.5),
+            ("approvals_required", -1),
+        ],
+    )
+    def test_malformed_approval_scalars_raise(self, field, value):
+        payload = {
+            "approved": False,
+            "approvals_required": 2,
+            "approvals_left": 1,
+        }
+        payload[field] = value
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(FakeClient([payload])).merge_request_approvals("g/p", 42)
+        assert excinfo.value.category == "invalid_remote_data"
+
 
 class TestApproveMergeRequest:
     def test_neither_flag_is_refused(self):

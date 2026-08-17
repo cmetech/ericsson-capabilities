@@ -76,7 +76,7 @@
       "default": 60,
       "help": "Hard deadline for each bounded Artifactory request. Higher than the other connectors because artefact operations move real bytes.",
       "advanced": true,
-      "validation": { "minimum": 1, "maximum": 600 }
+      "validation": { "minimum": 1, "maximum": 300 }
     },
     {
       "id": "default_max_results",

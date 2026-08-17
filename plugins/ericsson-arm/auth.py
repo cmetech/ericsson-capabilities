@@ -176,7 +176,7 @@ def authentication_from_configuration(configuration, *, now=None) -> ArmAuth:
         tls_context=context,
         certificate_not_after=not_after,
         request_timeout_seconds=_bounded_integer(
-            _setting(configuration, "request_timeout_seconds", 60), 1, 600
+            _setting(configuration, "request_timeout_seconds", 60), 1, 300
         ),
         default_max_results=_bounded_integer(
             _setting(configuration, "default_max_results", 25), 1, 100

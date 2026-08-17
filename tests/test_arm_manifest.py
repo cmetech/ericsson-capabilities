@@ -75,6 +75,15 @@ class TestManifest:
         assert fields["client_cert_path"]["storage"] == "setting"
         assert fields["client_key_path"]["storage"] == "setting"
 
+    def test_request_timeout_does_not_exceed_the_shared_client_limit(self):
+        schema = json.loads((PLUGIN / "config.schema.json").read_text())
+        timeout = next(
+            field
+            for field in schema["fields"]
+            if field["id"] == "request_timeout_seconds"
+        )
+        assert timeout["validation"]["maximum"] == 300
+
     def test_shared_code_is_vendored(self):
         assert (PLUGIN / "_common" / "client.py").is_file(), (
             "run: python scripts/sync_shared.py"

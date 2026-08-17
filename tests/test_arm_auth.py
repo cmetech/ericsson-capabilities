@@ -15,7 +15,9 @@ from auth import (  # noqa: E402
     authentication_from_configuration,
     certificate_not_after,
 )
+from client import ArmClient  # noqa: E402
 from models import ArmError  # noqa: E402
+from tools import check_available  # noqa: E402
 
 
 def _is_arm_module(module: object) -> bool:
@@ -290,6 +292,22 @@ class TestBounds:
             _config(settings={"max_deploy_megabytes": 10})
         )
         assert auth.max_deploy_bytes == 10 * 1024 * 1024
+
+    def test_request_timeout_matches_the_shared_client_limit(self):
+        accepted = _config(settings={"request_timeout_seconds": 300})
+        authentication = authentication_from_configuration(accepted)
+        client = ArmClient(authentication)
+        try:
+            assert authentication.request_timeout_seconds == 300
+            assert check_available(accepted) is True
+        finally:
+            client.close()
+
+        rejected = _config(settings={"request_timeout_seconds": 301})
+        with pytest.raises(ArmError) as excinfo:
+            authentication_from_configuration(rejected)
+        assert excinfo.value.category == "invalid_configuration"
+        assert check_available(rejected) is False
 
     def test_deploy_root_is_normalised(self, tmp_path):
         auth = authentication_from_configuration(

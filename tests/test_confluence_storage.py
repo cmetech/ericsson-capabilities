@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-confluence"
+sys.modules.pop("storage", None)
+for _path in list(sys.path):
+    if Path(_path).name in {"ericsson-confluence", "ericsson-gitlab"}:
+        sys.path.remove(_path)
 sys.path.insert(0, str(PLUGIN))
 
 from storage import markdown_to_storage, storage_to_markdown  # noqa: E402

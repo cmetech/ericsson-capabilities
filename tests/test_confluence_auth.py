@@ -6,6 +6,14 @@ from pathlib import Path
 import pytest
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-confluence"
+for _module_name in ("auth", "models"):
+    sys.modules.pop(_module_name, None)
+for _module_name in tuple(sys.modules):
+    if _module_name == "_common" or _module_name.startswith("_common."):
+        sys.modules.pop(_module_name, None)
+for _path in list(sys.path):
+    if Path(_path).name in {"ericsson-confluence", "ericsson-gitlab"}:
+        sys.path.remove(_path)
 sys.path.insert(0, str(PLUGIN))
 
 from auth import authentication_from_configuration, derive_api_base  # noqa: E402

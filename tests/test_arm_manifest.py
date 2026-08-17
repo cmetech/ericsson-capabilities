@@ -3,6 +3,7 @@
 import importlib.util
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import types
@@ -12,6 +13,29 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "ericsson-arm"
+
+
+def test_gitlab_first_then_all_arm_modules_collect_in_a_fresh_process():
+    """ARM standalone imports must not reuse GitLab's generic module cache."""
+    if os.environ.get("ARM_GITLAB_FIRST_COLLECTION_CHILD") == "1":
+        return
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_gitlab_client_shared.py",
+        *sorted(str(path) for path in (REPO / "tests").glob("test_arm_*.py")),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ARM_GITLAB_FIRST_COLLECTION_CHILD": "1"},
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def _load_models_module():

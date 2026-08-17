@@ -8,9 +8,6 @@ import pytest
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "ericsson-arm"
 sys.path.insert(0, str(PLUGIN))
 
-from aql import prepare  # noqa: E402
-from models import ArmError  # noqa: E402
-
 
 def _is_arm_module(module: object) -> bool:
     module_file = getattr(module, "__file__", None)
@@ -20,6 +17,49 @@ def _is_arm_module(module: object) -> bool:
         return Path(module_file).resolve().is_relative_to(PLUGIN.resolve())
     except (OSError, ValueError):
         return False
+
+
+def _displace_foreign_standalone_modules() -> dict[str, object]:
+    """Let this ARM test import its own generic modules without cache reuse."""
+    displaced = {}
+    for name in ("aql", "auth", "client", "models", "operations", "tools"):
+        module = sys.modules.get(name)
+        if module is not None and not _is_arm_module(module):
+            displaced[name] = sys.modules.pop(name)
+    for name in tuple(sys.modules):
+        module = sys.modules[name]
+        if (
+            (name == "_common" or name.startswith("_common."))
+            and not _is_arm_module(module)
+        ):
+            displaced[name] = sys.modules.pop(name)
+    return displaced
+
+
+def _restore_foreign_standalone_modules(displaced: dict[str, object]) -> None:
+    """Remove only ARM imports, then put displaced foreign modules back."""
+    for name in ("aql", "auth", "client", "models", "operations", "tools"):
+        module = sys.modules.get(name)
+        if _is_arm_module(module):
+            sys.modules.pop(name, None)
+    for name in tuple(sys.modules):
+        if (
+            (name == "_common" or name.startswith("_common."))
+            and _is_arm_module(sys.modules[name])
+        ):
+            sys.modules.pop(name, None)
+    for name, module in displaced.items():
+        current = sys.modules.get(name)
+        if current is None or _is_arm_module(current):
+            sys.modules[name] = module
+
+
+_DISPLACED_FOREIGN_MODULES = _displace_foreign_standalone_modules()
+try:
+    from aql import prepare  # noqa: E402
+    from models import ArmError  # noqa: E402
+finally:
+    _restore_foreign_standalone_modules(_DISPLACED_FOREIGN_MODULES)
 
 
 def _detach_arm_standalone_imports() -> None:

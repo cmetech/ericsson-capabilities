@@ -97,6 +97,27 @@ class TestErrors:
             "authentication", remediation="Update the Artifactory token."
         ).remediation == "Update the Artifactory token."
 
+    def test_client_static_remediations_preserve_only_exact_owned_literals(self):
+        models = _load_models_module()
+        access_guidance = (
+            "Access to this Artifactory was refused at the edge, before the request "
+            "reached Artifactory. This is normally an expired or missing mTLS client "
+            "certificate rather than a problem with the Artifactory token. Check the "
+            "client certificate and key configured for this profile."
+        )
+        assert models.ArmError(
+            "edge_authentication", remediation=access_guidance
+        ).remediation == access_guidance
+        assert models.ArmError(
+            "authentication", remediation=(
+                "The arm token is missing, expired, or invalid. Update the arm "
+                "personal access token in the connector's configuration."
+            ),
+        ).remediation
+        assert models.ArmError(
+            "edge_authentication", remediation=f"{access_guidance} token=secret"
+        ).remediation is None
+
     def test_certificate_expiry_remediation_accepts_only_a_strict_owned_date(self):
         models = _load_models_module()
         remediation = models.certificate_expiry_remediation("2026-03-21")

@@ -1,0 +1,210 @@
+"""Bounded Artifactory REST transport on the shared connector client."""
+
+from __future__ import annotations
+
+import json
+import time
+from contextlib import contextmanager
+from typing import Any, Callable, Mapping
+
+if __package__:
+    from ._common.client import BoundedClient
+    from ._common.errors import ConnectorError, category_for_status, remediation_for
+    from ._common.transport import HttpxTransport, Response
+    from .models import ArmAuth, ArmError
+else:
+    from _common.client import BoundedClient
+    from _common.errors import ConnectorError, category_for_status, remediation_for
+    from _common.transport import HttpxTransport, Response
+    from models import ArmAuth, ArmError
+
+
+_ACCESS_SCHEME = "cloudflare-access"
+_ACCESS_HOST = "cloudflareaccess.com"
+
+_ACCESS_REMEDIATION = (
+    "Access to this Artifactory was refused at the edge, before the request "
+    "reached Artifactory. This is normally an expired or missing mTLS client "
+    "certificate rather than a problem with the Artifactory token. Check the "
+    "client certificate and key configured for this profile."
+)
+
+
+@contextmanager
+def _as_arm_error():
+    """Translate shared errors at the connector boundary.
+
+    ConnectorError.detail may quote caller input; ArmError guarantees no
+    remote or secret text reaches the host.
+    """
+    try:
+        yield
+    except ConnectorError as exc:
+        raise ArmError(exc.category, remediation=exc.remediation) from None
+
+
+class ArmClient:
+    def __init__(
+        self,
+        authentication: ArmAuth,
+        *,
+        transport=None,
+        max_retries: int = 2,
+        cancel_check: Callable[[], bool] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        max_response_bytes: int = 8 * 1024 * 1024,
+    ) -> None:
+        self.auth = authentication
+        self.path_prefix = authentication.api_root
+        self.headers = {
+            authentication.auth_header_name: authentication.auth_header_value,
+            "Accept": "application/json",
+        }
+        if transport is None:
+            transport = HttpxTransport(
+                base_url=authentication.origin,
+                headers=self.headers,
+                path_prefix=self.path_prefix,
+                max_response_bytes=max_response_bytes,
+                connect_timeout_seconds=5.0,
+                tls_context=authentication.tls_context,
+            )
+        self._transport = transport
+        self._client = BoundedClient(
+            transport,
+            service="arm",
+            max_retries=max_retries,
+            total_timeout_seconds=float(authentication.request_timeout_seconds),
+            request_timeout_seconds=float(authentication.request_timeout_seconds),
+            cancel_check=cancel_check,
+            clock=clock,
+            sleep=sleep,
+        )
+
+    def __repr__(self) -> str:
+        return f"ArmClient(origin={self.auth.origin!r})"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+    def close(self) -> None:
+        self._client.close()
+
+    def operation_deadline(self) -> float:
+        return self._client.operation_deadline()
+
+    def _validate(self, path: str) -> None:
+        if not isinstance(path, str) or not path.startswith(self.path_prefix):
+            raise ArmError("invalid_input")
+
+    @staticmethod
+    def _is_access_challenge(response: Response) -> bool:
+        return (
+            _ACCESS_SCHEME in response.header("www-authenticate").lower()
+            or _ACCESS_HOST in response.header("location").lower()
+        )
+
+    def _classify(self, response: Response) -> Response:
+        """Raise for a non-2xx, naming the edge separately from the origin."""
+        if 200 <= response.status < 300:
+            return response
+        if self._is_access_challenge(response):
+            raise ArmError("edge_authentication", remediation=_ACCESS_REMEDIATION)
+        if 300 <= response.status < 400:
+            raise ArmError(
+                "invalid_remote_data",
+                remediation=(
+                    "Artifactory redirected the request instead of answering "
+                    "it. Check that the base URL names the Artifactory origin."
+                ),
+            )
+        category = category_for_status(response.status)
+        raise ArmError(category, remediation=remediation_for(category, "arm"))
+
+    def send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any | None = None,
+        content: Any | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        classify: bool = True,
+    ) -> Response:
+        """Issue one request, classifying the response unless asked not to."""
+        self._validate(path)
+        with _as_arm_error():
+            response = self._client.request(
+                method,
+                path,
+                params=params,
+                json_body=json_body,
+                content=content,
+                extra_headers=extra_headers,
+                deadline=deadline,
+                raise_on_status=False,
+            )
+        return self._classify(response) if classify else response
+
+    @staticmethod
+    def _decode(response: Response) -> Any:
+        if not response.body:
+            return None
+        if response.body.lstrip()[:1] == b"<":
+            raise ArmError(
+                "invalid_remote_data",
+                remediation=(
+                    "Artifactory returned HTML where JSON was expected, which "
+                    "normally means an authentication interstitial answered "
+                    "instead of the API."
+                ),
+            )
+        try:
+            return json.loads(response.body)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            raise ArmError("invalid_remote_data") from None
+
+    def request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any | None = None,
+        deadline: float | None = None,
+    ) -> Any:
+        return self._decode(
+            self.send(
+                method, path, params=params, json_body=json_body,
+                deadline=deadline,
+            )
+        )
+
+    def get_json(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        deadline: float | None = None,
+    ) -> Any:
+        return self.request_json("GET", path, params=params, deadline=deadline)
+
+    def post_text(
+        self, path: str, text: str, *, deadline: float | None = None
+    ) -> Any:
+        """POST a plain-text body for Artifactory Query Language."""
+        return self._decode(
+            self.send(
+                "POST",
+                path,
+                content=text.encode("utf-8"),
+                extra_headers={"Content-Type": "text/plain"},
+                deadline=deadline,
+            )
+        )

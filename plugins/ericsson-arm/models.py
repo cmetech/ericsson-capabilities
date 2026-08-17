@@ -36,7 +36,49 @@ SAFE_ERROR_MESSAGES = {
 
 # Exception-derived remediation is an output boundary. Only a connector-owned
 # literal can cross it; remote text and token-bearing values are always dropped.
-_SAFE_REMEDIATIONS = frozenset({"Update the Artifactory token."})
+_SAFE_REMEDIATIONS = frozenset({
+    "Update the Artifactory token.",
+    (
+        "The arm token is missing, expired, or invalid. Update the arm "
+        "personal access token in the connector's configuration."
+    ),
+    (
+        "The arm token is valid but lacks permission for this resource. "
+        "Check the token's scopes, or that your account can see the project "
+        "or space."
+    ),
+    (
+        "The arm resource does not exist, or the token cannot see it. Verify "
+        "the identifier, then verify the token's access."
+    ),
+    (
+        "The arm connector configuration is invalid. Re-check the base URL "
+        "and authentication mode."
+    ),
+    (
+        "arm is rate limiting this client. It will retry automatically; if it "
+        "persists, reduce how often this tool is called."
+    ),
+    (
+        "Repeated failures against arm have tripped this connector's circuit "
+        "breaker, so further calls are being refused locally. Check whether "
+        "arm is reachable and healthy, then retry."
+    ),
+    (
+        "Access to this Artifactory was refused at the edge, before the request "
+        "reached Artifactory. This is normally an expired or missing mTLS client "
+        "certificate rather than a problem with the Artifactory token. Check the "
+        "client certificate and key configured for this profile."
+    ),
+    (
+        "Artifactory redirected the request instead of answering it. Check that "
+        "the base URL names the Artifactory origin."
+    ),
+    (
+        "Artifactory returned HTML where JSON was expected, which normally means "
+        "an authentication interstitial answered instead of the API."
+    ),
+})
 _CERTIFICATE_EXPIRY_TEMPLATE = (
     "The client certificate expired on {expired_on}. Renew it and update "
     "the certificate and key paths in this profile. Until then every "

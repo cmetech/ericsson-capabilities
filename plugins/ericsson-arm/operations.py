@@ -407,20 +407,8 @@ class ArmOperations:
                 remediation="source_file must be an absolute path.",
             )
         real = os.path.realpath(source_file)
-        try:
-            expected = os.stat(real)
-        except OSError:
-            raise ArmError(
-                "not_found",
-                remediation="source_file does not name a readable file.",
-            ) from None
-        if not stat.S_ISREG(expected.st_mode):
-            raise ArmError(
-                "not_found",
-                remediation="source_file does not name a readable file.",
-            )
-
         root = getattr(self.client.auth, "deploy_root", None)
+        root_real = None
         if root:
             try:
                 root_real = os.path.realpath(root)
@@ -435,10 +423,24 @@ class ArmOperations:
                         "root."
                     ),
                 )
+            if not self._supports_secure_open():
+                raise ArmError("invalid_configuration")
+        try:
+            expected = os.stat(real)
+        except OSError:
+            raise ArmError(
+                "not_found",
+                remediation="source_file does not name a readable file.",
+            ) from None
+        if not stat.S_ISREG(expected.st_mode):
+            raise ArmError(
+                "not_found",
+                remediation="source_file does not name a readable file.",
+            )
 
         fd = None
         try:
-            anchor = root_real if root else "/"
+            anchor = root_real if root_real is not None else "/"
             fd = (
                 self._open_from_anchor(real, anchor)
                 if self._supports_secure_open()

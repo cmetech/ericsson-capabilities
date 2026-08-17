@@ -224,6 +224,31 @@ class TestChecksumDeploy:
 
 
 class TestDeploySource:
+    def test_confined_deploy_fails_closed_without_secure_descriptor_traversal(
+        self, monkeypatch, tmp_path
+    ):
+        root = tmp_path / "allowed"
+        root.mkdir()
+        source = root / "archive.tgz"
+        source.write_bytes(b"inside-root")
+        client = FakeClient(deploy_root=str(root))
+        monkeypatch.setattr(ArmOperations, "_supports_secure_open", staticmethod(lambda: False))
+        with pytest.raises(ArmError) as excinfo:
+            ArmOperations(client).deploy(
+                "generic-local", "Infra/a.tgz", str(source), confirm=True
+            )
+        assert excinfo.value.category in {"invalid_configuration", "permission"}
+        assert client.calls == []
+
+    def test_unconfined_deploy_keeps_the_portable_open_fallback(self, monkeypatch, artifact):
+        source, sums = artifact
+        client = FakeClient(raw_results=[_deployed(sums)])
+        monkeypatch.setattr(ArmOperations, "_supports_secure_open", staticmethod(lambda: False))
+        result = ArmOperations(client).deploy(
+            "generic-local", "Infra/a.tgz", str(source), confirm=True
+        )
+        assert result["ok"] is True
+
     def test_a_relative_path_is_rejected(self, artifact):
         client = FakeClient()
         with pytest.raises(ArmError) as excinfo:
@@ -340,12 +365,17 @@ class TestDeploySource:
         replacement.write_bytes(b"replacement")
         client = FakeClient(deploy_root=str(root))
         original_open = os.open
+        replaced = False
 
-        def replace_then_open(path, flags):
-            os.replace(replacement, source)
-            return original_open(path, flags)
+        def replace_then_open(path, flags, *args, **kwargs):
+            nonlocal replaced
+            if not replaced:
+                os.replace(replacement, source)
+                replaced = True
+            return original_open(path, flags, *args, **kwargs)
 
         monkeypatch.setattr(arm_operations.os, "open", replace_then_open)
+        monkeypatch.setattr(ArmOperations, "_supports_secure_open", staticmethod(lambda: True))
         with pytest.raises(ArmError) as excinfo:
             ArmOperations(client).deploy(
                 "generic-local", "Infra/a.tgz", str(source), confirm=True

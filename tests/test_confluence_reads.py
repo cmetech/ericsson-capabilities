@@ -293,6 +293,26 @@ class TestListSpaces:
         result = ConfluenceOperations(client).list_spaces()
         assert result["items"] == [] and result["returned"] == 0
 
+    @pytest.mark.parametrize("bad_limit", [0, 101, True, "25"])
+    def test_invalid_limits_are_rejected_without_a_request(self, bad_limit):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError):
+            ConfluenceOperations(client).list_spaces(max_results=bad_limit)
+        assert client.calls == []
+
+    def test_paging_uses_requested_limit_and_advances_by_remote_rows(self):
+        first = {"results": [{"key": str(i), "name": str(i)} for i in range(35)],
+                 "start": 0, "limit": 40, "size": 35, "totalSize": 40}
+        second = {"results": [{"key": str(i), "name": str(i)} for i in range(35, 40)],
+                  "start": 35, "limit": 40, "size": 5, "totalSize": 40}
+        client = FakeClient([first, second])
+
+        result = ConfluenceOperations(client).list_spaces(max_results=40)
+
+        assert result["returned"] == 40
+        assert [call[2]["limit"] for call in client.calls] == [40, 40]
+        assert [call[2]["start"] for call in client.calls] == [0, 35]
+
 
 class TestListChildren:
     def test_lists_child_pages(self):
@@ -316,6 +336,28 @@ class TestListChildren:
             "start": 0, "limit": 25, "size": 1,
         }])
         assert ConfluenceOperations(client).list_children("1")["content_warning"]
+
+    @pytest.mark.parametrize("bad_limit", [0, 101, True, "25"])
+    def test_invalid_limits_are_rejected_without_a_request(self, bad_limit):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError):
+            ConfluenceOperations(client).list_children("12345", max_results=bad_limit)
+        assert client.calls == []
+
+    def test_paging_uses_requested_limit_and_advances_by_remote_rows(self):
+        first = {"results": [{"id": str(i), "title": str(i), "type": "page"}
+                             for i in range(35)],
+                 "start": 0, "limit": 40, "size": 35, "totalSize": 40}
+        second = {"results": [{"id": str(i), "title": str(i), "type": "page"}
+                              for i in range(35, 40)],
+                  "start": 35, "limit": 40, "size": 5, "totalSize": 40}
+        client = FakeClient([first, second])
+
+        result = ConfluenceOperations(client).list_children("12345", max_results=40)
+
+        assert result["returned"] == 40
+        assert [call[2]["limit"] for call in client.calls] == [40, 40]
+        assert [call[2]["start"] for call in client.calls] == [0, 35]
 
 
 class TestListComments:

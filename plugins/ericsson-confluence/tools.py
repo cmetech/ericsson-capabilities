@@ -162,6 +162,7 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         raise ConfluenceError("invalid_input")
     operations = operations_from_configuration(configuration, **client_options)
     values = dict(args)
+    configured_limit = operations.client.auth.default_max_results
     if name == "confluence_get_page":
         return operations.get_page(values["content_id"])
     if name == "confluence_get_page_body":
@@ -172,20 +173,20 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
         )
     if name == "confluence_search":
         return operations.search(
-            values["cql"], max_results=values.get("max_results", 25)
+            values["cql"], max_results=values.get("max_results", configured_limit)
         )
     if name == "confluence_list_spaces":
         return operations.list_spaces(
             space_type=values.get("space_type"),
-            max_results=values.get("max_results", 25),
+            max_results=values.get("max_results", configured_limit),
         )
     if name == "confluence_list_children":
         return operations.list_children(
-            values["content_id"], max_results=values.get("max_results", 25)
+            values["content_id"], max_results=values.get("max_results", configured_limit)
         )
     if name == "confluence_list_comments":
         return operations.list_comments(
-            values["content_id"], max_results=values.get("max_results", 25)
+            values["content_id"], max_results=values.get("max_results", configured_limit)
         )
     if name == "confluence_create_page":
         return operations.create_page(

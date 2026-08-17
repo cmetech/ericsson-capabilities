@@ -4,18 +4,21 @@
       "aliases": [
         "Ericsson ARM",
         "Ericsson Artifactory",
-        "Artifactory connector scaffold"
+        "Artifactory connector",
+        "release artefact research"
       ],
-      "displayName": "Ericsson Artifactory/ARM Tools (Planned)",
+      "displayName": "Ericsson Artifactory/ARM Tools",
       "entry": "references/capabilities/artifactory-arm-tools.md",
       "goals": [
-        "Explain the current status of the Ericsson Artifactory/ARM connector scaffold.",
-        "Review the configuration that a future Artifactory connector will require.",
-        "Tell me whether Artifactory tools, reads, writes, or demonstrations are runnable today."
+        "List visible Artifactory repositories and inspect bounded artefact or folder metadata.",
+        "Search for release artefacts with bounded AQL and preserve truncation warnings.",
+        "Trace an artefact through build properties to the GitLab pipeline and commit that produced it.",
+        "Preview and perform an explicitly approved checksum-first deployment of one local file.",
+        "Preview and perform an explicitly approved deletion of one Artifactory path."
       ],
       "id": "artifactory-arm-tools",
-      "maturity": "planned-not-implemented",
-      "recommendationEligible": false
+      "maturity": "available",
+      "recommendationEligible": true
     },
     {
       "aliases": [

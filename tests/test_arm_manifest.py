@@ -97,6 +97,29 @@ class TestErrors:
             "authentication", remediation="Update the Artifactory token."
         ).remediation == "Update the Artifactory token."
 
+    def test_certificate_expiry_remediation_accepts_only_a_strict_owned_date(self):
+        models = _load_models_module()
+        remediation = models.certificate_expiry_remediation("2026-03-21")
+
+        assert models.ArmError(
+            "certificate_invalid", remediation=remediation
+        ).remediation == (
+            "The client certificate expired on 2026-03-21. Renew it and update "
+            "the certificate and key paths in this profile. Until then every "
+            "request is refused at the edge before it reaches Artifactory."
+        )
+        for unsafe_date in (
+            "2026-3-21",
+            "2026-03-21 token=remote-secret",
+            "../../2026-03-21",
+            "not-a-date",
+        ):
+            assert models.certificate_expiry_remediation(unsafe_date) is None
+        assert models.ArmError(
+            "certificate_invalid",
+            remediation="The client certificate expired on 2026-03-21 token=remote-secret.",
+        ).remediation is None
+
     def test_categories_the_shared_client_raises_are_all_known(self):
         """Unknown categories silently coerce to transient and lose their signal."""
         models = _load_models_module()

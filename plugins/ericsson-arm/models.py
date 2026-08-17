@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date
 from dataclasses import dataclass
+import re
 from typing import Any
 
 SAFE_ERROR_MESSAGES = {
@@ -35,13 +37,40 @@ SAFE_ERROR_MESSAGES = {
 # Exception-derived remediation is an output boundary. Only a connector-owned
 # literal can cross it; remote text and token-bearing values are always dropped.
 _SAFE_REMEDIATIONS = frozenset({"Update the Artifactory token."})
+_CERTIFICATE_EXPIRY_TEMPLATE = (
+    "The client certificate expired on {expired_on}. Renew it and update "
+    "the certificate and key paths in this profile. Until then every "
+    "request is refused at the edge before it reaches Artifactory."
+)
+_CERTIFICATE_EXPIRY_REMEDIATION = re.compile(
+    r"\AThe client certificate expired on (?P<expired_on>\d{4}-\d{2}-\d{2})\. "
+    r"Renew it and update the certificate and key paths in this profile\. "
+    r"Until then every request is refused at the edge before it reaches "
+    r"Artifactory\.\Z"
+)
+
+
+def certificate_expiry_remediation(expired_on: object) -> str | None:
+    """Return the only date-bearing remediation allowed across this boundary."""
+    if type(expired_on) is not str or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expired_on):
+        return None
+    try:
+        date.fromisoformat(expired_on)
+    except ValueError:
+        return None
+    return _CERTIFICATE_EXPIRY_TEMPLATE.format(expired_on=expired_on)
 
 
 def safe_remediation(value: object) -> str | None:
-    """Return only static, connector-owned remediation guidance."""
-    if type(value) is not str or value not in _SAFE_REMEDIATIONS:
+    """Return only connector-owned remediation guidance."""
+    if type(value) is not str:
         return None
-    return value
+    if value in _SAFE_REMEDIATIONS:
+        return value
+    match = _CERTIFICATE_EXPIRY_REMEDIATION.fullmatch(value)
+    if match is None:
+        return None
+    return certificate_expiry_remediation(match.group("expired_on"))
 
 
 class ArmError(RuntimeError):

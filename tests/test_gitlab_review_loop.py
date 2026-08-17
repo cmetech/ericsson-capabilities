@@ -42,10 +42,18 @@ class FakeClient:
             raise result
         return result
 
+    def request_json_response(self, method, path, *, params=None, json_body=None,
+                              deadline=None, raise_on_status=True):
+        self.calls.append((method, path, json_body))
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return 201, result, {}
+
 
 def _ops(client):
     operations = GitLabOperations(client)
-    operations.resolve_project = lambda project: {"id": 7, "path": "g/p"}
+    operations.resolve_project = lambda project, **_: {"id": 7, "path": "g/p"}
     return operations
 
 
@@ -93,8 +101,8 @@ class TestCreateMrNote:
         with pytest.raises(GitLabError):
             _ops(client).create_mr_note("g/p", 0, "body", confirm=True)
 
-    def test_response_without_an_id_raises(self):
+    def test_response_without_an_id_is_write_ambiguous(self):
         client = FakeClient([{"unexpected": True}])
         with pytest.raises(GitLabError) as excinfo:
             _ops(client).create_mr_note("g/p", 42, "body", confirm=True)
-        assert excinfo.value.category == "invalid_remote_data"
+        assert excinfo.value.category == "write_ambiguous"

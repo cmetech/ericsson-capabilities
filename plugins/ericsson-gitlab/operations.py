@@ -1440,7 +1440,8 @@ class GitLabOperations:
             )
         except ConnectorError as exc:
             raise GitLabError(exc.category) from None
-        resolved = self.resolve_project(project)
+        deadline = self.client.operation_deadline()
+        resolved = self.resolve_project(project, deadline=deadline)
         project_path = resolved.get("path", resolved.get("path_with_namespace"))
         if not isinstance(project_path, str):
             raise GitLabError("invalid_remote_data")
@@ -1453,21 +1454,33 @@ class GitLabOperations:
                 "body": body,
                 "note_id": None,
             }
-        payload = self.client.request_json(
+        status, payload = self._write_json(
             "POST",
             f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/notes",
-            json_body={"body": body},
+            {"body": body},
+            deadline=deadline,
         )
-        if not isinstance(payload, Mapping) or type(payload.get("id")) is not int:
-            raise GitLabError("invalid_remote_data")
-        return {
-            "ok": True,
-            "dry_run": False,
-            "project": project_path,
-            "iid": iid,
-            "body": body,
-            "note_id": payload["id"],
-        }
+        if status >= 400:
+            raise self.client._error_for_status(status)
+
+        def finish_note_write():
+            if status != 201:
+                raise GitLabError("invalid_remote_data")
+            if (
+                not isinstance(payload, Mapping)
+                or type(payload.get("id")) is not int
+            ):
+                raise GitLabError("invalid_remote_data")
+            return {
+                "ok": True,
+                "dry_run": False,
+                "project": project_path,
+                "iid": iid,
+                "body": body,
+                "note_id": payload["id"],
+            }
+
+        return self._usable_write_result(finish_note_write)
 
     def _list_named_refs(
         self, project_id: int, kind: str, *, deadline: float

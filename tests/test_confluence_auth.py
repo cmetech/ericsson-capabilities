@@ -11,6 +11,15 @@ sys.path.insert(0, str(PLUGIN))
 from auth import authentication_from_configuration, derive_api_base  # noqa: E402
 from models import ConfluenceError  # noqa: E402
 
+# Keep this test module's already-bound objects usable without leaking the
+# connector's generic top-level imports into later plugin test modules.
+try:
+    sys.path.remove(str(PLUGIN))
+except ValueError:
+    pass
+for _module_name in ("auth", "models"):
+    sys.modules.pop(_module_name, None)
+
 
 class FakeConfig:
     def __init__(self, settings, secrets):

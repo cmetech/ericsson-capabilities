@@ -13,6 +13,18 @@ from _common.transport import Response  # noqa: E402
 from client import ConfluenceClient  # noqa: E402
 from models import ConfluenceAuth, ConfluenceError  # noqa: E402
 
+# Keep this test module's already-bound objects usable without leaking the
+# connector's generic top-level imports into later plugin test modules.
+try:
+    sys.path.remove(str(PLUGIN))
+except ValueError:
+    pass
+for _module_name in ("client", "models"):
+    sys.modules.pop(_module_name, None)
+for _module_name in tuple(sys.modules):
+    if _module_name == "_common" or _module_name.startswith("_common."):
+        sys.modules.pop(_module_name, None)
+
 
 class FakeTransport:
     def __init__(self, script):

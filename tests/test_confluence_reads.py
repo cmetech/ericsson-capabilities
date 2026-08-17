@@ -11,6 +11,18 @@ sys.path.insert(0, str(PLUGIN))
 from models import ConfluenceError  # noqa: E402
 from operations import EXPAND_LIST, EXPAND_PAGE, ConfluenceOperations  # noqa: E402
 
+# Keep this test module's already-bound objects usable without leaking the
+# connector's generic top-level imports into later plugin test modules.
+try:
+    sys.path.remove(str(PLUGIN))
+except ValueError:
+    pass
+for _module_name in ("operations", "models", "storage"):
+    sys.modules.pop(_module_name, None)
+for _module_name in tuple(sys.modules):
+    if _module_name == "_common" or _module_name.startswith("_common."):
+        sys.modules.pop(_module_name, None)
+
 
 class FakeClient:
     def __init__(self, results):

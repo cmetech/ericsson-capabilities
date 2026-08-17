@@ -12,6 +12,14 @@ sys.path.insert(0, str(PLUGIN))
 
 from storage import markdown_to_storage, storage_to_markdown  # noqa: E402
 
+# Keep this test module's already-bound objects usable without leaking the
+# connector's generic top-level imports into later plugin test modules.
+try:
+    sys.path.remove(str(PLUGIN))
+except ValueError:
+    pass
+sys.modules.pop("storage", None)
+
 
 class TestMarkdownToStorage:
     def test_paragraphs(self):

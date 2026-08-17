@@ -39,7 +39,7 @@ _MAX_PROPERTY_VALUES = 32
 _MAX_PROPERTY_CHARS = 1024
 _CHECKSUM_CHUNK = 1024 * 1024
 _MAX_PATH_DECODE_PASSES = 4
-_ENCODED_PATH_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
+_ENCODED_PATH_ROUTING_DELIMITER = re.compile(r"%(?:2f|3b|5c)", re.IGNORECASE)
 
 
 def _bounded_string(value: Any, maximum: int) -> str | None:
@@ -61,15 +61,16 @@ def _has_unsafe_url_routing(value: str) -> bool:
     """Detect encoded values that URL parsing could turn into routing syntax.
 
     The shared transport decodes paths up to this same bound. Rejecting query
-    syntax and encoded separators here keeps a delete approval's path from
-    being reinterpreted when the request URL is built.
+    syntax, matrix parameters, and encoded separators here keeps a delete
+    approval's path from being reinterpreted when the request URL is built.
     """
     current = value
     for _ in range(_MAX_PATH_DECODE_PASSES):
         if (
             "?" in current
             or "#" in current
-            or _ENCODED_PATH_SEPARATOR.search(current) is not None
+            or ";" in current
+            or _ENCODED_PATH_ROUTING_DELIMITER.search(current) is not None
         ):
             return True
         try:
@@ -83,7 +84,8 @@ def _has_unsafe_url_routing(value: str) -> bool:
     return (
         "?" in current
         or "#" in current
-        or _ENCODED_PATH_SEPARATOR.search(current) is not None
+        or ";" in current
+        or _ENCODED_PATH_ROUTING_DELIMITER.search(current) is not None
     )
 
 

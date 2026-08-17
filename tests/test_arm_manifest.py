@@ -1,7 +1,9 @@
 """The ARM connector must be registered and loadable."""
 
 import importlib.util
+import hashlib
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -258,3 +260,151 @@ def test_empty_write_approval_hook_ignores_untrusted_arguments():
 
     assert ctx.event_name == "pre_tool_call"
     assert ctx.hook("future_arm_write", recursive) is None
+
+
+def test_delete_approval_digest_binds_a_bounded_probe_source_file():
+    """A generic write preview can include deploy's bounded source field."""
+    plugin = _load_plugin_module()
+    ctx = _HookContext()
+    plugin.register(ctx)
+
+    first = ctx.hook("arm_delete", {"repo": "r1", "path": "p1", "source_file": "/a"})
+    second = ctx.hook("arm_delete", {"repo": "r2", "path": "p2", "source_file": "/b"})
+
+    assert first["action"] == second["action"] == "approve"
+    assert first["rule_key"] != second["rule_key"]
+
+
+def test_delete_approval_digest_blocks_unsafe_optional_source_file():
+    """Only bounded non-empty strings may enter a generic approval digest."""
+    plugin = _load_plugin_module()
+    ctx = _HookContext()
+    plugin.register(ctx)
+
+    for source_file in ("", "x" * 4097, 1):
+        outcome = ctx.hook(
+            "arm_delete",
+            {"repo": "r1", "path": "p1", "source_file": source_file},
+        )
+        assert outcome["action"] == "block"
+
+
+class _SkillContext:
+    def __init__(self):
+        self.skills = []
+
+    def register_hook(self, _event_name, _hook):
+        pass
+
+    def register_tool(self, **_kwargs):
+        pass
+
+    def register_skill(self, name, path, description):
+        self.skills.append((name, path, description))
+
+
+def _load_skill_plugin_module():
+    """Load the plugin as a package, keeping its relative imports isolated."""
+    module_name = "ericsson_arm_skill_plugin"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        PLUGIN / "__init__.py",
+        submodule_search_locations=[str(PLUGIN)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_register_exposes_the_artifact_research_skill():
+    """The plugin advertises the workflow that joins releases to GitLab."""
+    plugin = _load_skill_plugin_module()
+    ctx = _SkillContext()
+
+    plugin.register(ctx)
+
+    assert ctx.skills == [
+        (
+            "artifact-research",
+            PLUGIN / "skills" / "artifact-research" / "SKILL.md",
+            "Trace a release artefact back to the build that made it.",
+        )
+    ]
+
+
+def test_catalog_validator_recognizes_all_arm_tool_handlers():
+    """ARM's direct schema binding remains visible to catalog validation."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "skills/ericsson/onboard-ericsson-capabilities/scripts/validate_catalog.py",
+            "--repo",
+            str(REPO),
+        ],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    problems = set(payload["problems"])
+    arm_handler_problems = {
+        problem
+        for problem in problems
+        if "plugins/ericsson-arm" in problem
+    }
+    expected_onboarding_gap = {
+        f"unrepresented plugin tool: {name}"
+        for name in (
+            "arm_artifact_info",
+            "arm_delete",
+            "arm_deploy",
+            "arm_get_properties",
+            "arm_list_repositories",
+            "arm_search_artifacts",
+        )
+    }
+
+    assert arm_handler_problems == set()
+    assert problems <= expected_onboarding_gap
+
+
+def test_standalone_loader_keeps_foreign_generic_modules_intact(monkeypatch):
+    """Synthetic ARM package imports must not replace generic siblings."""
+    foreign_tools = types.ModuleType("tools")
+    foreign_models = types.ModuleType("models")
+    foreign_common = types.ModuleType("_common")
+    monkeypatch.setitem(sys.modules, "tools", foreign_tools)
+    monkeypatch.setitem(sys.modules, "models", foreign_models)
+    monkeypatch.setitem(sys.modules, "_common", foreign_common)
+
+    first = _load_plugin_module()
+    second = _load_plugin_module()
+
+    assert first is not second
+    assert first.arm_tools.__name__ != "tools"
+    assert second.arm_tools.__name__ != "tools"
+    assert sys.modules["tools"] is foreign_tools
+    assert sys.modules["models"] is foreign_models
+    assert sys.modules["_common"] is foreign_common
+
+
+def test_standalone_loader_does_not_reuse_a_foreign_synthetic_namespace(monkeypatch):
+    """A collision receives a fresh ARM-owned namespace instead of reuse."""
+    root = str(PLUGIN.resolve())
+    namespace = "_ericsson_arm_standalone_" + hashlib.sha256(
+        root.encode()
+    ).hexdigest()[:16]
+    foreign = types.ModuleType(namespace)
+    foreign.__path__ = ["/foreign"]
+    monkeypatch.setitem(sys.modules, namespace, foreign)
+
+    plugin = _load_plugin_module()
+
+    assert sys.modules[namespace] is foreign
+    assert plugin.__package__ != namespace
+    package = sys.modules[plugin.__package__]
+    assert package._ericsson_arm_root == root

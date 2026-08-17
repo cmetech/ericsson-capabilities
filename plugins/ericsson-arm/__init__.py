@@ -4,6 +4,43 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+import sys
+import types
+
+
+if not __package__ or not hasattr(sys.modules.get(__package__), "__path__"):
+    # Tests and narrow host probes can execute this file by path, which leaves
+    # __package__ empty. Give ARM's direct relative imports one unique package
+    # namespace instead of falling back to generic top-level tools/models/
+    # _common modules that another standalone connector may already own.
+    _standalone_root = str(Path(__file__).parent.resolve())
+    _standalone_base = (
+        "_ericsson_arm_standalone_"
+        f"{hashlib.sha256(_standalone_root.encode()).hexdigest()[:16]}"
+    )
+    _STANDALONE_PACKAGE = _standalone_base
+    _suffix = 0
+    while True:
+        _standalone_package = sys.modules.get(_STANDALONE_PACKAGE)
+        if _standalone_package is None:
+            _standalone_package = types.ModuleType(_STANDALONE_PACKAGE)
+            _standalone_package.__path__ = [_standalone_root]
+            _standalone_package.__package__ = _STANDALONE_PACKAGE
+            _standalone_package._ericsson_arm_root = _standalone_root
+            sys.modules[_STANDALONE_PACKAGE] = _standalone_package
+            break
+        if getattr(_standalone_package, "_ericsson_arm_root", None) == _standalone_root:
+            break
+        _suffix += 1
+        _STANDALONE_PACKAGE = f"{_standalone_base}_{_suffix}"
+    # A file-path loader may give this module a non-package spec parent. The
+    # explicit package namespace above is authoritative for relative imports.
+    __spec__ = None
+    __package__ = _STANDALONE_PACKAGE
+
+from . import tools as arm_tools  # noqa: E402
+from .models import ArmError, SAFE_ERROR_MESSAGES, safe_remediation  # noqa: E402
 
 _WRITE_TOOLS = frozenset({"arm_deploy", "arm_delete"})
 _APPROVAL_STRING_LIMITS = {"repo": 128, "path": 1024, "source_file": 4096}
@@ -18,21 +55,30 @@ def _approval_rule_digest(tool_name: object, args: object) -> str | None:
     required_strings = _APPROVAL_REQUIRED_STRINGS.get(tool_name)
     if type(args) is not dict or required_strings is None:
         return None
-    allowed = set(required_strings) | {"dry_run", "confirm"}
+    # Generic write previews may carry the other write schema's source_file.
+    # It is still bounded, validated, and included in the exact rule key; the
+    # tool schema rejects it for arm_delete before any write is attempted.
+    allowed = set(_APPROVAL_STRING_LIMITS) | {"dry_run", "confirm"}
     if (
         not required_strings.issubset(args)
         or not set(args).issubset(allowed)
         or any(
-            type(args.get(name)) is not str
+            type(args[name]) is not str
             or not args[name]
             or len(args[name]) > _APPROVAL_STRING_LIMITS[name]
-            for name in required_strings
+            for name in set(args) & set(_APPROVAL_STRING_LIMITS)
         )
-        or any(type(args[name]) is not bool for name in ("dry_run", "confirm") if name in args)
+        or any(
+            type(args[name]) is not bool
+            for name in ("dry_run", "confirm")
+            if name in args
+        )
     ):
         return None
     try:
-        canonical = json.dumps(args, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        canonical = json.dumps(
+            args, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+        )
     except (TypeError, ValueError):
         return None
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -61,25 +107,13 @@ WRITE_APPROVALS = {
     ),
 }
 
+_PLUGIN_SKILLS = (
+    ("artifact-research", "Trace a release artefact back to the build that made it."),
+)
+
 
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def _tool_bindings():
-    """Load package bindings only when the host can register tools.
-
-    The narrow legacy manifest test loads this file as a standalone module to
-    inspect its inert hook. Delaying imports preserves that harmless probe;
-    production plugin loading uses the normal package-relative imports.
-    """
-    if __package__:
-        from . import tools as arm_tools
-        from .models import ArmError, SAFE_ERROR_MESSAGES, safe_remediation
-    else:
-        import tools as arm_tools
-        from models import ArmError, SAFE_ERROR_MESSAGES, safe_remediation
-    return arm_tools, ArmError, SAFE_ERROR_MESSAGES, safe_remediation
 
 
 def _interrupt_authority():
@@ -122,10 +156,8 @@ def register(ctx: object) -> None:
 
     ctx.register_hook("pre_tool_call", require_write_approval)
 
-    register_tool = getattr(ctx, "register_tool", None)
-    if register_tool is None:
+    if getattr(ctx, "register_tool", None) is None:
         return
-    arm_tools, ArmError, SAFE_ERROR_MESSAGES, safe_remediation = _tool_bindings()
 
     def available() -> bool:
         try:
@@ -200,7 +232,7 @@ def register(ctx: object) -> None:
         return invoke
 
     for name, schema in arm_tools.SCHEMAS.items():
-        register_tool(
+        ctx.register_tool(
             name=name,
             toolset="ericsson-arm",
             schema=schema,
@@ -208,3 +240,9 @@ def register(ctx: object) -> None:
             check_fn=available,
             emoji="📦",
         )
+
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is not None:
+        skill_root = Path(__file__).parent / "skills"
+        for name, description in _PLUGIN_SKILLS:
+            register_skill(name, skill_root / name / "SKILL.md", description)

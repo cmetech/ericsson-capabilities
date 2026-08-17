@@ -65,6 +65,7 @@ _MAX_MR_TITLE_INPUT = 1024
 _MAX_MR_DESCRIPTION = 64 * 1024
 _MAX_NOTE_BYTES = 100_000
 _DUPLICATE_MR_MESSAGE = "another open merge request already exists"
+_DISCUSSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 class _YamlCapacityError(Exception):
@@ -355,6 +356,12 @@ class GitLabOperations:
             or not value.strip()
             or len(value.encode("utf-8")) > _MAX_NOTE_BYTES
         ):
+            raise GitLabError("invalid_input")
+        return value
+
+    @staticmethod
+    def _discussion_id(value: Any) -> str:
+        if not isinstance(value, str) or _DISCUSSION_ID.fullmatch(value) is None:
             raise GitLabError("invalid_input")
         return value
 
@@ -1481,6 +1488,149 @@ class GitLabOperations:
             }
 
         return self._usable_write_result(finish_note_write)
+
+    def reply_to_discussion(
+        self,
+        project: str | int,
+        iid: int,
+        discussion_id: str,
+        body: str,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Reply within an existing merge-request discussion thread."""
+        iid = self._iid(iid)
+        discussion_id = self._discussion_id(discussion_id)
+        body = self._note_body(body)
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"discussion {discussion_id} on !{iid}",
+            )
+        except ConnectorError as exc:
+            raise GitLabError(exc.category) from None
+        deadline = self.client.operation_deadline()
+        project_info = self.resolve_project(project, deadline=deadline)
+        project_path = project_info.get(
+            "path", project_info.get("path_with_namespace")
+        )
+        if not isinstance(project_path, str):
+            raise GitLabError("invalid_remote_data")
+        base = (
+            f"/api/v4/projects/{project_info['id']}/merge_requests/{iid}"
+            f"/discussions/{discussion_id}"
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "project": project_path,
+                "iid": iid,
+                "discussion_id": discussion_id,
+                "body": body,
+                "note_id": None,
+            }
+        status, payload = self._write_json(
+            "POST", f"{base}/notes", {"body": body}, deadline=deadline
+        )
+        if status >= 400:
+            raise self.client._error_for_status(status)
+
+        def finish_discussion_reply():
+            if status != 201:
+                raise GitLabError("invalid_remote_data")
+            if (
+                not isinstance(payload, Mapping)
+                or type(payload.get("id")) is not int
+            ):
+                raise GitLabError("invalid_remote_data")
+            return {
+                "ok": True,
+                "dry_run": False,
+                "project": project_path,
+                "iid": iid,
+                "discussion_id": discussion_id,
+                "body": body,
+                "note_id": payload["id"],
+            }
+
+        return self._usable_write_result(finish_discussion_reply)
+
+    def resolve_discussion(
+        self,
+        project: str | int,
+        iid: int,
+        discussion_id: str,
+        *,
+        resolved: bool = True,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Mark a discussion resolved, or reopen it.
+
+        This remains separate from ``reply_to_discussion``: marking a thread
+        settled is a judgement and must never be a side effect of replying.
+        """
+        iid = self._iid(iid)
+        discussion_id = self._discussion_id(discussion_id)
+        if type(resolved) is not bool:
+            raise GitLabError("invalid_input")
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"discussion {discussion_id} on !{iid}",
+            )
+        except ConnectorError as exc:
+            raise GitLabError(exc.category) from None
+        deadline = self.client.operation_deadline()
+        project_info = self.resolve_project(project, deadline=deadline)
+        project_path = project_info.get(
+            "path", project_info.get("path_with_namespace")
+        )
+        if not isinstance(project_path, str):
+            raise GitLabError("invalid_remote_data")
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "project": project_path,
+                "iid": iid,
+                "discussion_id": discussion_id,
+                "resolved": resolved,
+            }
+        status, payload = self._write_json(
+            "PUT",
+            f"/api/v4/projects/{project_info['id']}/merge_requests/{iid}"
+            f"/discussions/{discussion_id}",
+            {"resolved": resolved},
+            deadline=deadline,
+        )
+        if status >= 400:
+            raise self.client._error_for_status(status)
+
+        def finish_discussion_resolution():
+            if status != 200:
+                raise GitLabError("invalid_remote_data")
+            if (
+                not isinstance(payload, Mapping)
+                or payload.get("id") != discussion_id
+                or type(payload.get("resolved")) is not bool
+                or payload["resolved"] is not resolved
+            ):
+                raise GitLabError("invalid_remote_data")
+            return {
+                "ok": True,
+                "dry_run": False,
+                "project": project_path,
+                "iid": iid,
+                "discussion_id": discussion_id,
+                "resolved": payload["resolved"],
+            }
+
+        return self._usable_write_result(finish_discussion_resolution)
 
     def _list_named_refs(
         self, project_id: int, kind: str, *, deadline: float

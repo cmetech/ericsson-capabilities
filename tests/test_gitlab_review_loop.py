@@ -48,7 +48,7 @@ class FakeClient:
         result = self.results.pop(0)
         if isinstance(result, Exception):
             raise result
-        return 201, result, {}
+        return (200 if method == "PUT" else 201), result, {}
 
 
 def _ops(client):
@@ -105,4 +105,83 @@ class TestCreateMrNote:
         client = FakeClient([{"unexpected": True}])
         with pytest.raises(GitLabError) as excinfo:
             _ops(client).create_mr_note("g/p", 42, "body", confirm=True)
+        assert excinfo.value.category == "write_ambiguous"
+
+
+class TestReplyToDiscussion:
+    def test_confirm_posts_to_the_discussion(self):
+        client = FakeClient([{"id": 555}])
+        result = _ops(client).reply_to_discussion(
+            "g/p", 42, "abc123", "Addressed", confirm=True
+        )
+        method, path, body = client.calls[0]
+        assert method == "POST"
+        assert path == (
+            "/api/v4/projects/7/merge_requests/42/discussions/abc123/notes"
+        )
+        assert body == {"body": "Addressed"}
+        assert result["note_id"] == 555
+
+    def test_neither_flag_is_refused(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).reply_to_discussion("g/p", 42, "abc123", "x")
+        assert excinfo.value.category == "confirmation_required"
+
+    def test_malformed_discussion_id_rejected(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError):
+            _ops(client).reply_to_discussion(
+                "g/p", 42, "../../admin", "x", confirm=True
+            )
+        assert client.calls == []
+
+    def test_response_without_an_id_is_write_ambiguous(self):
+        client = FakeClient([{"unexpected": True}])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).reply_to_discussion(
+                "g/p", 42, "abc123", "x", confirm=True
+            )
+        assert excinfo.value.category == "write_ambiguous"
+
+
+class TestResolveDiscussion:
+    def test_confirm_resolves(self):
+        client = FakeClient([{"id": "abc123", "resolved": True}])
+        result = _ops(client).resolve_discussion(
+            "g/p", 42, "abc123", confirm=True
+        )
+        method, path, body = client.calls[0]
+        assert method == "PUT"
+        assert path == "/api/v4/projects/7/merge_requests/42/discussions/abc123"
+        assert body == {"resolved": True}
+        assert result["resolved"] is True
+
+    def test_unresolve_sends_false(self):
+        client = FakeClient([{"id": "abc123", "resolved": False}])
+        result = _ops(client).resolve_discussion(
+            "g/p", 42, "abc123", resolved=False, confirm=True
+        )
+        assert client.calls[0][2] == {"resolved": False}
+        assert result["resolved"] is False
+
+    def test_dry_run_previews(self):
+        client = FakeClient()
+        result = _ops(client).resolve_discussion(
+            "g/p", 42, "abc123", dry_run=True
+        )
+        assert result["dry_run"] is True
+        assert client.calls == []
+
+    def test_non_boolean_resolved_rejected(self):
+        client = FakeClient()
+        with pytest.raises(GitLabError):
+            _ops(client).resolve_discussion(
+                "g/p", 42, "abc123", resolved="yes", confirm=True
+            )
+
+    def test_response_without_resolved_is_write_ambiguous(self):
+        client = FakeClient([{"id": "abc123"}])
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(client).resolve_discussion("g/p", 42, "abc123", confirm=True)
         assert excinfo.value.category == "write_ambiguous"

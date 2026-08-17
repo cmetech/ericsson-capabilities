@@ -24,5 +24,7 @@ provides_tools:
   - gitlab_commit_changes
   - gitlab_create_merge_request
   - gitlab_create_mr_note
+  - gitlab_reply_to_discussion
+  - gitlab_resolve_discussion
 provides_hooks:
   - pre_tool_call

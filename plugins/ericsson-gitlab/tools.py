@@ -376,6 +376,47 @@ SCHEMAS = {
         },
         ["project", "iid", "body"],
     ),
+    "gitlab_reply_to_discussion": _schema(
+        "gitlab_reply_to_discussion",
+        "Reply inside one GitLab merge-request discussion thread. Get "
+        "discussion_id from gitlab_list_merge_request_discussions. Requires "
+        "dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1},
+            "discussion_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+            },
+            "body": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100000,
+            },
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "iid", "discussion_id", "body"],
+    ),
+    "gitlab_resolve_discussion": _schema(
+        "gitlab_resolve_discussion",
+        "Mark one GitLab merge-request discussion resolved, or reopen it with "
+        "resolved false. Requires dry_run or confirm.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1},
+            "discussion_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+            },
+            "resolved": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "iid", "discussion_id"],
+    ),
 }
 
 
@@ -547,6 +588,24 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 values["project"],
                 values["iid"],
                 values["body"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "gitlab_reply_to_discussion":
+            return operations.reply_to_discussion(
+                values["project"],
+                values["iid"],
+                values["discussion_id"],
+                values["body"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
+            )
+        if name == "gitlab_resolve_discussion":
+            return operations.resolve_discussion(
+                values["project"],
+                values["iid"],
+                values["discussion_id"],
+                resolved=values.get("resolved", True),
                 dry_run=values.get("dry_run", False),
                 confirm=values.get("confirm", False),
             )

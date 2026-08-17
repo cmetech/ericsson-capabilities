@@ -390,7 +390,7 @@ _MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _MD_LIST = re.compile(r"^([ \t]*)([-*]|\d+[.)])\s+(.*)$")
 _MD_FENCE = re.compile(r"^```([A-Za-z0-9_+-]*)\s*$")
 _MD_LINK = re.compile(r"\[([^\]]{1,512})\]\(([^)\s]{1,2048})\)")
-_SAFE_LINK_SCHEME = re.compile(r"^(?:https?://|/)", re.IGNORECASE)
+_SAFE_LINK_SCHEME = re.compile(r"^(?:https?://|/(?!/))", re.IGNORECASE)
 
 
 def _inline(text: str) -> str:

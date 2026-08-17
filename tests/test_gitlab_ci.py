@@ -1068,7 +1068,7 @@ class TestRetryPipeline:
         client = FakeClient(
             json_results=[
                 (
-                    200,
+                    201,
                     {"id": 500, "project_id": 7, "status": "pending"},
                     {},
                 )
@@ -1104,12 +1104,12 @@ class TestRetryPipeline:
     @pytest.mark.parametrize(
         "response",
         [
-            (201, {"id": 500, "project_id": 7, "status": "pending"}, {}),
-            (200, {"id": 501, "project_id": 7, "status": "pending"}, {}),
-            (200, {"id": 500, "project_id": 8, "status": "pending"}, {}),
-            (200, {"id": 500, "project_id": 7, "status": "success"}, {}),
-            (200, {"id": 500, "project_id": 7, "status": "pending\x00"}, {}),
-            (200, {}, {}),
+            (200, {"id": 500, "project_id": 7, "status": "pending"}, {}),
+            (201, {"id": 501, "project_id": 7, "status": "pending"}, {}),
+            (201, {"id": 500, "project_id": 8, "status": "pending"}, {}),
+            (201, {"id": 500, "project_id": 7, "status": "success"}, {}),
+            (201, {"id": 500, "project_id": 7, "status": "pending\x00"}, {}),
+            (201, {}, {}),
         ],
     )
     def test_unusable_success_evidence_is_ambiguous_after_one_attempt(
@@ -1130,7 +1130,7 @@ class TestRetryPipeline:
     [
         ("retry_job", 42, "jobs/42/retry", 201),
         ("play_job", 42, "jobs/42/play", 200),
-        ("retry_pipeline", 500, "pipelines/500/retry", 200),
+        ("retry_pipeline", 500, "pipelines/500/retry", 201),
     ],
 )
 def test_ci_write_unusable_real_http_success_is_ambiguous_without_retry(

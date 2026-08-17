@@ -591,7 +591,7 @@ class GitLabOperations:
             return base
 
         def finish_retry_pipeline():
-            if status != 200 or not isinstance(payload, Mapping):
+            if status != 201 or not isinstance(payload, Mapping):
                 raise GitLabError("invalid_remote_data")
             if (
                 type(payload.get("id")) is not int

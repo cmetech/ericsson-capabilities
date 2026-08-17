@@ -272,3 +272,53 @@ class TestUpdatePage:
         )
         value = client.calls[1][2]["body"]["storage"]["value"]
         assert "<ac:structured-macro" not in value
+
+
+class TestAddComment:
+    def test_neither_flag_is_refused(self):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).add_comment("12345", "Noted")
+        assert excinfo.value.category == "confirmation_required"
+        assert client.calls == []
+
+    def test_confirm_posts_a_comment_container(self):
+        client = FakeClient([{"id": "888"}])
+        result = ConfluenceOperations(client).add_comment(
+            "12345", "Noted", confirm=True
+        )
+        method, path, body = client.calls[0]
+        assert (method, path) == ("POST", "/rest/api/content")
+        assert body["type"] == "comment"
+        assert body["container"] == {"id": "12345", "type": "page"}
+        assert result["id"] == "888"
+
+    def test_markdown_is_converted(self):
+        client = FakeClient([{"id": "1"}])
+        ConfluenceOperations(client).add_comment(
+            "12345", "- point one\n- point two", confirm=True
+        )
+        value = client.calls[0][2]["body"]["storage"]["value"]
+        assert "<li>point one</li>" in value
+
+    def test_dry_run_previews(self):
+        client = FakeClient([])
+        result = ConfluenceOperations(client).add_comment(
+            "12345", "Noted", dry_run=True
+        )
+        assert result["dry_run"] is True
+        assert client.calls == []
+
+    def test_blank_comment_rejected(self):
+        with pytest.raises(ConfluenceError):
+            ConfluenceOperations(FakeClient([])).add_comment(
+                "12345", "   ", confirm=True
+            )
+
+    def test_macro_markup_is_escaped(self):
+        client = FakeClient([{"id": "1"}])
+        ConfluenceOperations(client).add_comment(
+            "12345", "<ac:structured-macro/>", confirm=True
+        )
+        value = client.calls[0][2]["body"]["storage"]["value"]
+        assert "<ac:structured-macro" not in value

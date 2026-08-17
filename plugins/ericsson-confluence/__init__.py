@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 
-_WRITE_TOOLS = frozenset({"confluence_create_page", "confluence_update_page"})
+_WRITE_TOOLS = frozenset({
+    "confluence_create_page", "confluence_update_page", "confluence_add_comment",
+})
 
 
 def _arg(args: dict, name: str) -> str:
@@ -25,6 +27,9 @@ WRITE_APPROVALS = {
     "confluence_update_page": lambda a: (
         f"Page: {_arg(a, 'content_id')}\nNew title: {_arg(a, 'title')}\n"
         f"New body: {_arg(a, 'markdown')}"
+    ),
+    "confluence_add_comment": lambda a: (
+        f"Page: {_arg(a, 'content_id')}\nComment: {_arg(a, 'markdown')}"
     ),
 }
 

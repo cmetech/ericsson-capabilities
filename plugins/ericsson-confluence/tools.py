@@ -117,6 +117,18 @@ SCHEMAS = {
         },
         ["content_id"],
     ),
+    "confluence_add_comment": _schema(
+        "confluence_add_comment",
+        "Add one comment to a Confluence page. Body is Markdown; raw markup "
+        "is escaped. Requires dry_run or confirm.",
+        {
+            "content_id": _CONTENT_ID_SCHEMA,
+            "markdown": {"type": "string", "minLength": 1, "maxLength": 65536},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["content_id", "markdown"],
+    ),
 }
 
 
@@ -189,6 +201,13 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             values["content_id"],
             title=values.get("title"),
             markdown=values.get("markdown"),
+            dry_run=values.get("dry_run", False),
+            confirm=values.get("confirm", False),
+        )
+    if name == "confluence_add_comment":
+        return operations.add_comment(
+            values["content_id"],
+            values["markdown"],
             dry_run=values.get("dry_run", False),
             confirm=values.get("confirm", False),
         )

@@ -390,6 +390,60 @@ class ConfluenceOperations:
             "parent_id": parent_id,
         }
 
+    def add_comment(
+        self,
+        content_id: str,
+        markdown: str,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Add one comment to a page, from Markdown."""
+        content_id = self._content_id(content_id)
+        if not isinstance(markdown, str) or not markdown.strip():
+            raise ConfluenceError("invalid_input")
+        storage_value = self._body_storage(markdown)
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise ConfluenceError("invalid_input")
+        if dry_run and confirm:
+            raise ConfluenceError("invalid_input")
+        if not dry_run and not confirm:
+            raise ConfluenceError("confirmation_required")
+
+        execute = require_explicit_intent(
+            dry_run=dry_run, confirm=confirm, action=f"Confluence page {content_id}"
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "id": None,
+                "content_id": content_id,
+                "markdown": markdown,
+            }
+        payload = {
+            "type": "comment",
+            "container": {"id": content_id, "type": "page"},
+            "body": {
+                "storage": {"value": storage_value, "representation": "storage"}
+            },
+        }
+        response = self._mapping(
+            self.client.request_json(
+                "POST", f"{self.base}/content", json_body=payload
+            )
+        )
+        comment_id = _bounded_string(response.get("id"), 64)
+        if not comment_id:
+            raise ConfluenceError("invalid_remote_data")
+        return {
+            "ok": True,
+            "dry_run": False,
+            "id": comment_id,
+            "content_id": content_id,
+            "markdown": markdown,
+        }
+
     def update_page(
         self,
         content_id: str,

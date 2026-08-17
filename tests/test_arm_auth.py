@@ -98,6 +98,13 @@ class TestAuthHeader:
             )
         assert excinfo.value.category == "invalid_configuration"
 
+    def test_unhashable_auth_mode_is_rejected_as_invalid_configuration(self):
+        with pytest.raises(ArmError) as excinfo:
+            authentication_from_configuration(
+                _config(settings={"auth_mode": []})
+            )
+        assert excinfo.value.category == "invalid_configuration"
+
     def test_missing_token_is_rejected(self):
         with pytest.raises(ArmError):
             authentication_from_configuration(_config(secrets={"token": ""}))
@@ -260,3 +267,10 @@ class TestBounds:
             _config(settings={"deploy_root": str(tmp_path) + "/"})
         )
         assert auth.deploy_root == str(tmp_path.resolve())
+
+    def test_nul_bearing_deploy_root_is_rejected_as_invalid_configuration(self):
+        with pytest.raises(ArmError) as excinfo:
+            authentication_from_configuration(
+                _config(settings={"deploy_root": "/tmp/arm\x00root"})
+            )
+        assert excinfo.value.category == "invalid_configuration"

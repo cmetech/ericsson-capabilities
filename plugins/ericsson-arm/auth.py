@@ -99,7 +99,7 @@ def _path_setting(configuration, field_id: str) -> str | None:
     value = _setting(configuration, field_id, None)
     if value is None or value == "":
         return None
-    if not isinstance(value, str) or len(value) > _MAX_PATH:
+    if not isinstance(value, str) or len(value) > _MAX_PATH or "\x00" in value:
         raise ArmError("invalid_configuration")
     return value
 
@@ -148,7 +148,7 @@ def authentication_from_configuration(configuration, *, now=None) -> ArmAuth:
     origin = _origin(_setting(configuration, "base_url", None))
 
     auth_mode = _setting(configuration, "auth_mode", "bearer")
-    if auth_mode not in _AUTH_HEADERS:
+    if type(auth_mode) is not str or auth_mode not in _AUTH_HEADERS:
         raise ArmError("invalid_configuration")
 
     token = _secret(configuration, "token")

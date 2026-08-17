@@ -932,6 +932,31 @@ class TestJobLog:
         ops = _project_resolved(GitLabOperations(client))
         assert "secret-pat-value" not in ops.job_log("g/p", 42)["log"]
 
+    @pytest.mark.parametrize("boundary_offset", [1, 12, 24])
+    def test_pat_crossing_presentation_boundary_leaks_no_fragment(
+        self, boundary_offset
+    ):
+        secret = "credential-boundary-token"
+        prefix = "HEAD-" * 20
+        suffix = "-TAIL" * 20
+        raw = (prefix + secret + suffix).encode()
+        boundary = len(prefix.encode()) + boundary_offset
+        max_bytes = len(raw) - boundary
+        client = FakeClient(raw_results=[Response(200, {}, raw)])
+        client.auth.pat = secret
+        ops = _project_resolved(GitLabOperations(client))
+
+        result = ops.job_log("g/p", 42, max_bytes=max_bytes)
+
+        assert result["truncated"] is True
+        assert result["returned_bytes"] <= max_bytes
+        assert "-TAIL" in result["log"]
+        assert secret[boundary_offset:] not in result["log"]
+        assert all(
+            secret[index : index + 4] not in result["log"]
+            for index in range(len(secret) - 3)
+        )
+
     def test_returned_log_stays_byte_capped_after_redaction(self):
         client = FakeClient(raw_results=[Response(200, {}, b"abcd")])
         client.auth.pat = "abcd"

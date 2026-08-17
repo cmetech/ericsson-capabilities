@@ -73,6 +73,99 @@ def _http_ops():
     return _ops(client)
 
 
+_HIDDEN_QUICK_ACTIONS = [
+    "/close",
+    "ordinary text\n/approve",
+    "ordinary text\n   /merge",
+    f"{'x' * 513}\n/run_pipeline",
+]
+
+
+def _write_text(operations, surface, text):
+    if surface == "top-level note":
+        return operations.create_mr_note("g/p", 42, text, confirm=True)
+    if surface == "discussion reply":
+        return operations.reply_to_discussion(
+            "g/p", 42, "abc123", text, confirm=True
+        )
+    if surface == "merge-request update":
+        return operations.update_merge_request(
+            "g/p", 42, description=text, confirm=True
+        )
+    if surface == "merge-request creation":
+        return operations.create_merge_request(
+            "g/p", source_branch="feature/safe", description=text
+        )
+    raise AssertionError(f"unknown write surface: {surface}")
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "top-level note",
+        "discussion reply",
+        "merge-request update",
+        "merge-request creation",
+    ],
+)
+@pytest.mark.parametrize("text", _HIDDEN_QUICK_ACTIONS)
+def test_hidden_quick_actions_are_rejected_before_transport(surface, text):
+    client = FakeClient()
+    with pytest.raises(GitLabError) as excinfo:
+        _write_text(_ops(client), surface, text)
+    assert excinfo.value.category == "invalid_input"
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "top-level note",
+        "discussion reply",
+        "merge-request update",
+        "merge-request creation",
+    ],
+)
+def test_normal_slashes_mid_line_remain_valid(surface):
+    results = []
+    if surface == "merge-request creation":
+        results.append(
+            {
+                "id": 7,
+                "name": "p",
+                "path_with_namespace": "g/p",
+                "default_branch": "main",
+                "web_url": "https://gitlab.test/g/p",
+                "namespace": {"kind": "group", "full_path": "g"},
+            }
+        )
+    client = FakeClient(results)
+    operations = _ops(client)
+    text = "See https://gitlab.test/g/p and path/to/file"
+    if surface == "top-level note":
+        result = operations.create_mr_note("g/p", 42, text, dry_run=True)
+        assert result["body"] == text
+    elif surface == "discussion reply":
+        result = operations.reply_to_discussion(
+            "g/p", 42, "abc123", text, dry_run=True
+        )
+        assert result["body"] == text
+    elif surface == "merge-request update":
+        result = operations.update_merge_request(
+            "g/p", 42, description=text, dry_run=True
+        )
+        assert result["requested"]["description"] == text
+    else:
+        result = operations.create_merge_request(
+            "g/p",
+            source_branch="feature/safe",
+            description=text,
+            dry_run=True,
+        )
+        assert result["description_present"] is True
+    assert all(call[0] == "GET" for call in client.calls)
+
+
 class TestCreateMrNote:
     def test_neither_flag_is_refused_without_a_request(self):
         client = FakeClient()
@@ -144,6 +237,22 @@ class TestReplyToDiscussion:
             _ops(client).reply_to_discussion("g/p", 42, "abc123", "x")
         assert excinfo.value.category == "confirmation_required"
 
+    def test_dry_run_previews_without_dispatch(self):
+        client = FakeClient()
+        result = _ops(client).reply_to_discussion(
+            "g/p", 42, "abc123", "Addressed", dry_run=True
+        )
+        assert result == {
+            "ok": True,
+            "dry_run": True,
+            "project": "g/p",
+            "iid": 42,
+            "discussion_id": "abc123",
+            "body": "Addressed",
+            "note_id": None,
+        }
+        assert client.calls == []
+
     def test_malformed_discussion_id_rejected(self):
         client = FakeClient()
         with pytest.raises(GitLabError):
@@ -159,6 +268,34 @@ class TestReplyToDiscussion:
                 "g/p", 42, "abc123", "x", confirm=True
             )
         assert excinfo.value.category == "write_ambiguous"
+
+
+@pytest.mark.parametrize("surface", ["top-level note", "discussion reply"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"id": 0},
+        {"id": -1},
+        {"id": True},
+        {"id": False},
+        {"id": "555"},
+        {"id": 555.0},
+        {"id": None},
+    ],
+)
+def test_note_writes_require_remote_positive_integer_identity(surface, payload):
+    client = FakeClient([payload])
+    operations = _ops(client)
+    with pytest.raises(GitLabError) as excinfo:
+        if surface == "top-level note":
+            operations.create_mr_note("g/p", 42, "body", confirm=True)
+        else:
+            operations.reply_to_discussion(
+                "g/p", 42, "abc123", "body", confirm=True
+            )
+    assert excinfo.value.category == "write_ambiguous"
+    assert len(client.calls) == 1
 
 
 class TestResolveDiscussion:
@@ -241,11 +378,22 @@ class TestApprovals:
         assert result["approvals_required"] == 2
         assert result["approvals_left"] == 1
         assert result["approved_by"] == ["alice"]
+        assert result["approved_by_truncated"] is False
 
     def test_malformed_approval_payload_raises(self):
         client = FakeClient([["not", "a", "mapping"]])
         with pytest.raises(GitLabError) as excinfo:
             _ops(client).merge_request_approvals("g/p", 42)
+        assert excinfo.value.category == "invalid_remote_data"
+
+    def test_missing_approved_by_raises(self):
+        payload = {
+            "approved": False,
+            "approvals_required": 2,
+            "approvals_left": 1,
+        }
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(FakeClient([payload])).merge_request_approvals("g/p", 42)
         assert excinfo.value.category == "invalid_remote_data"
 
     @pytest.mark.parametrize(
@@ -267,6 +415,66 @@ class TestApprovals:
         with pytest.raises(GitLabError) as excinfo:
             _ops(FakeClient([payload])).merge_request_approvals("g/p", 42)
         assert excinfo.value.category == "invalid_remote_data"
+
+    @pytest.mark.parametrize(
+        "approved_by",
+        [
+            None,
+            {},
+            [None],
+            [{}],
+            [{"user": None}],
+            [{"user": {}}],
+            [{"user": {"username": None}}],
+            [{"user": {"username": ""}}],
+            [{"user": {"username": " alice"}}],
+            [{"user": {"username": "alice\x00"}}],
+            [{"user": {"username": "a" * 256}}],
+        ],
+    )
+    def test_malformed_approved_by_entries_raise(self, approved_by):
+        payload = {
+            "approved": False,
+            "approvals_required": 2,
+            "approvals_left": 1,
+            "approved_by": approved_by,
+        }
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(FakeClient([payload])).merge_request_approvals("g/p", 42)
+        assert excinfo.value.category == "invalid_remote_data"
+
+    def test_every_approver_is_validated_before_bounded_projection(self):
+        approved_by = [
+            {"user": {"username": f"user-{index:03d}"}}
+            for index in range(100)
+        ]
+        approved_by.append({"user": {"username": None}})
+        payload = {
+            "approved": True,
+            "approvals_required": 1,
+            "approvals_left": 0,
+            "approved_by": approved_by,
+        }
+        with pytest.raises(GitLabError) as excinfo:
+            _ops(FakeClient([payload])).merge_request_approvals("g/p", 42)
+        assert excinfo.value.category == "invalid_remote_data"
+
+    def test_approvers_over_100_are_truthfully_truncated_after_validation(self):
+        approved_by = [
+            {"user": {"username": f"user-{index:03d}"}}
+            for index in range(102)
+        ]
+        payload = {
+            "approved": True,
+            "approvals_required": 1,
+            "approvals_left": 0,
+            "approved_by": approved_by,
+        }
+        result = _ops(FakeClient([payload])).merge_request_approvals("g/p", 42)
+        assert result["approved_by"] == [
+            f"user-{index:03d}" for index in range(100)
+        ]
+        assert result["approved_by_truncated"] is True
 
 
 class TestApproveMergeRequest:

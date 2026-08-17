@@ -123,6 +123,13 @@ def _bounded_string(value: Any, maximum: int, *, allow_empty: bool = False) -> s
     return value
 
 
+def _reject_hidden_quick_actions(value: str) -> str:
+    """Reject GitLab quick actions on every line of user-authored text."""
+    if any(line.lstrip().startswith("/") for line in value.splitlines()):
+        raise GitLabError("invalid_input")
+    return value
+
+
 def _validate_path(path: str, *, allow_empty: bool = True) -> str:
     path = _bounded_string(path, _MAX_PATH, allow_empty=allow_empty)
     if path.startswith("/") or any(part in {".", ".."} for part in path.split("/")):
@@ -373,7 +380,7 @@ class GitLabOperations:
             or len(value.encode("utf-8")) > _MAX_NOTE_BYTES
         ):
             raise GitLabError("invalid_input")
-        return value
+        return _reject_hidden_quick_actions(value)
 
     @staticmethod
     def _discussion_id(value: Any) -> str:
@@ -407,12 +414,16 @@ class GitLabOperations:
         raw = response.body
         total = len(raw)
         source_truncated = total > max_bytes
-        tail = raw[-max_bytes:] if source_truncated else raw
-        text = self._redact_text(tail.decode("utf-8", errors="replace"))
-        encoded = text.encode("utf-8")
+        # Redact the complete transport-bounded response before choosing the
+        # presentation tail. Otherwise a tail boundary inside the PAT turns
+        # the secret into an unrecognisable fragment that evades replacement.
+        redacted = self._redact_text(raw.decode("utf-8", errors="replace"))
+        encoded = redacted.encode("utf-8")
         presentation_truncated = len(encoded) > max_bytes
         if presentation_truncated:
             text = encoded[-max_bytes:].decode("utf-8", errors="ignore")
+        else:
+            text = redacted
         truncated = source_truncated or presentation_truncated
         result: dict[str, Any] = {
             "job_id": job_id,
@@ -1663,18 +1674,16 @@ class GitLabOperations:
         def finish_note_write():
             if status != 201:
                 raise GitLabError("invalid_remote_data")
-            if (
-                not isinstance(payload, Mapping)
-                or type(payload.get("id")) is not int
-            ):
+            if not isinstance(payload, Mapping):
                 raise GitLabError("invalid_remote_data")
+            note_id = _remote_positive_int(payload.get("id"))
             return {
                 "ok": True,
                 "dry_run": False,
                 "project": project_path,
                 "iid": iid,
                 "body": body,
-                "note_id": payload["id"],
+                "note_id": note_id,
             }
 
         return self._usable_write_result(finish_note_write)
@@ -1731,11 +1740,9 @@ class GitLabOperations:
         def finish_discussion_reply():
             if status != 201:
                 raise GitLabError("invalid_remote_data")
-            if (
-                not isinstance(payload, Mapping)
-                or type(payload.get("id")) is not int
-            ):
+            if not isinstance(payload, Mapping):
                 raise GitLabError("invalid_remote_data")
+            note_id = _remote_positive_int(payload.get("id"))
             return {
                 "ok": True,
                 "dry_run": False,
@@ -1743,7 +1750,7 @@ class GitLabOperations:
                 "iid": iid,
                 "discussion_id": discussion_id,
                 "body": body,
-                "note_id": payload["id"],
+                "note_id": note_id,
             }
 
         return self._usable_write_result(finish_discussion_reply)
@@ -1863,25 +1870,29 @@ class GitLabOperations:
             or approvals_left < 0
         ):
             raise GitLabError("invalid_remote_data")
+        raw_approved_by = _as_list(payload.get("approved_by"))
         approvers = []
-        raw_approved_by = payload.get("approved_by")
-        if isinstance(raw_approved_by, list):
-            for entry in raw_approved_by[:100]:
-                if not isinstance(entry, Mapping):
-                    continue
-                user = entry.get("user")
-                if not isinstance(user, Mapping):
-                    continue
-                username = user.get("username")
-                if isinstance(username, str) and username:
-                    approvers.append(self._redact_text(username[:255]))
+        for raw_entry in raw_approved_by:
+            entry = _as_object(raw_entry)
+            user = _as_object(entry.get("user"))
+            username = user.get("username")
+            if (
+                not isinstance(username, str)
+                or not username
+                or username != username.strip()
+                or len(username) > 255
+                or "\x00" in username
+            ):
+                raise GitLabError("invalid_remote_data")
+            approvers.append(self._redact_text(username))
         return {
             "project": project_path,
             "iid": iid,
             "approved": approved,
             "approvals_required": approvals_required,
             "approvals_left": approvals_left,
-            "approved_by": approvers,
+            "approved_by": approvers[:100],
+            "approved_by_truncated": len(approvers) > 100,
         }
 
     def approve_merge_request(
@@ -2085,7 +2096,7 @@ class GitLabOperations:
                 or "\x00" in description
             ):
                 raise GitLabError("invalid_input")
-            body["description"] = description
+            body["description"] = _reject_hidden_quick_actions(description)
 
         normalized_labels: dict[str, list[str]] = {}
         for key, labels in (
@@ -3369,6 +3380,7 @@ class GitLabOperations:
         description = _bounded_string(
             description, _MAX_MR_DESCRIPTION, allow_empty=True
         )
+        description = _reject_hidden_quick_actions(description)
         if not all(
             isinstance(value, bool) for value in (remove_source_branch, squash, dry_run)
         ):

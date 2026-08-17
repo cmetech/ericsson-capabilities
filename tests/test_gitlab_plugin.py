@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "gitlab_create_branch",
     "gitlab_commit_changes",
     "gitlab_create_merge_request",
+    "gitlab_create_mr_note",
 }
 
 
@@ -155,6 +156,7 @@ def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
             "gitlab_create_branch",
             "gitlab_commit_changes",
             "gitlab_create_merge_request",
+            "gitlab_create_mr_note",
         }:
             kwargs["tool_admission"] = types.SimpleNamespace(
                 approved=True,

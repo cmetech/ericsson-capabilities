@@ -363,6 +363,19 @@ SCHEMAS = {
         },
         ["project", "source_branch"],
     ),
+    "gitlab_create_mr_note": _schema(
+        "gitlab_create_mr_note",
+        "Post one note on a GitLab merge request. Requires dry_run or "
+        "confirm.",
+        {
+            "project": _PROJECT,
+            "iid": {"type": "integer", "minimum": 1},
+            "body": {"type": "string", "minLength": 1, "maxLength": 100000},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["project", "iid", "body"],
+    ),
 }
 
 
@@ -528,6 +541,14 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
                 remove_source_branch=values.get("remove_source_branch", True),
                 squash=values.get("squash", False),
                 dry_run=values.get("dry_run", False),
+            )
+        if name == "gitlab_create_mr_note":
+            return operations.create_mr_note(
+                values["project"],
+                values["iid"],
+                values["body"],
+                dry_run=values.get("dry_run", False),
+                confirm=values.get("confirm", False),
             )
         return operations.list_pipelines(
             values["project"],

@@ -15,6 +15,7 @@ _WRITE_TOOLS = frozenset(
         "gitlab_create_branch",
         "gitlab_commit_changes",
         "gitlab_create_merge_request",
+        "gitlab_create_mr_note",
     }
 )
 
@@ -36,6 +37,10 @@ WRITE_APPROVALS = {
     "gitlab_create_merge_request": lambda a: (
         f"Project: {_arg(a, 'project')}\n"
         f"Source: {_arg(a, 'source_branch')} -> {_arg(a, 'target_branch')}"
+    ),
+    "gitlab_create_mr_note": lambda a: (
+        f"Project: {_arg(a, 'project')}\nMR: !{_arg(a, 'iid')}\n"
+        f"Note: {_arg(a, 'body')}"
     ),
 }
 _PLUGIN_SKILLS = (

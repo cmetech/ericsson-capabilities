@@ -23,5 +23,6 @@ provides_tools:
   - gitlab_create_branch
   - gitlab_commit_changes
   - gitlab_create_merge_request
+  - gitlab_create_mr_note
 provides_hooks:
   - pre_tool_call

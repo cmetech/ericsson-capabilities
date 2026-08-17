@@ -17,10 +17,14 @@ import httpx
 if __package__:
     from .client import GitLabClient
     from ._common.envelope import UNTRUSTED_CONTENT_WARNING
+    from ._common.errors import ConnectorError
+    from ._common.guardrails import require_explicit_intent
     from .models import GitLabError, PageResult
 else:  # Standalone source tests import modules directly from the plugin root.
     from client import GitLabClient
     from _common.envelope import UNTRUSTED_CONTENT_WARNING
+    from _common.errors import ConnectorError
+    from _common.guardrails import require_explicit_intent
     from models import GitLabError, PageResult
 
 
@@ -59,6 +63,7 @@ _MAX_COMMIT_MESSAGE = 4096
 _MAX_MR_TITLE = 255
 _MAX_MR_TITLE_INPUT = 1024
 _MAX_MR_DESCRIPTION = 64 * 1024
+_MAX_NOTE_BYTES = 100_000
 _DUPLICATE_MR_MESSAGE = "another open merge request already exists"
 
 
@@ -335,6 +340,22 @@ class GitLabOperations:
         secret = getattr(self.client.auth, "pat", "")
         if isinstance(secret, str) and len(secret) >= 4:
             value = value.replace(secret, "<redacted>")
+        return value
+
+    @staticmethod
+    def _iid(value: Any) -> int:
+        if type(value) is not int or value < 1:
+            raise GitLabError("invalid_input")
+        return value
+
+    @staticmethod
+    def _note_body(value: Any) -> str:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value.encode("utf-8")) > _MAX_NOTE_BYTES
+        ):
+            raise GitLabError("invalid_input")
         return value
 
     def job_log(
@@ -1397,6 +1418,55 @@ class GitLabOperations:
             and not any(value["notes_truncated"] for value in discussions),
             "truncated": pages.truncated,
             "continuation": self._continuation(pages),
+        }
+
+    def create_mr_note(
+        self,
+        project: str | int,
+        iid: int,
+        body: str,
+        *,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Post one top-level note on a merge request."""
+        iid = self._iid(iid)
+        body = self._note_body(body)
+        try:
+            execute = require_explicit_intent(
+                dry_run=dry_run,
+                confirm=confirm,
+                action=f"merge request !{iid}",
+            )
+        except ConnectorError as exc:
+            raise GitLabError(exc.category) from None
+        resolved = self.resolve_project(project)
+        project_path = resolved.get("path", resolved.get("path_with_namespace"))
+        if not isinstance(project_path, str):
+            raise GitLabError("invalid_remote_data")
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "project": project_path,
+                "iid": iid,
+                "body": body,
+                "note_id": None,
+            }
+        payload = self.client.request_json(
+            "POST",
+            f"/api/v4/projects/{resolved['id']}/merge_requests/{iid}/notes",
+            json_body={"body": body},
+        )
+        if not isinstance(payload, Mapping) or type(payload.get("id")) is not int:
+            raise GitLabError("invalid_remote_data")
+        return {
+            "ok": True,
+            "dry_run": False,
+            "project": project_path,
+            "iid": iid,
+            "body": body,
+            "note_id": payload["id"],
         }
 
     def _list_named_refs(

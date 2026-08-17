@@ -143,3 +143,93 @@ class TestCreatePage:
             ConfluenceOperations(client).create_page("OPS", "T", "B", confirm=True)
         assert excinfo.value.category == "write_ambiguous"
         assert len(client.calls) == 1
+
+
+CURRENT = {
+    "id": "12345", "type": "page", "title": "Runbook",
+    "version": {"number": 7},
+    "body": {"storage": {"value": "<p>Old</p>"}},
+}
+
+
+class TestUpdatePage:
+    def test_neither_flag_is_refused_without_any_request(self):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).update_page("12345", title="New")
+        assert excinfo.value.category == "confirmation_required"
+        assert client.calls == []
+
+    def test_no_change_requested_is_rejected(self):
+        client = FakeClient([])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).update_page("12345", confirm=True)
+        assert excinfo.value.category == "invalid_input"
+        assert client.calls == []
+
+    def test_reads_current_version_then_increments_it(self):
+        client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])
+        result = ConfluenceOperations(client).update_page(
+            "12345", markdown="New body", confirm=True
+        )
+        assert client.calls[0][0] == "GET"
+        method, path, sent = client.calls[1]
+        assert (method, path) == ("PUT", "/rest/api/content/12345")
+        assert sent["version"] == {"number": 8}
+        assert result["version"] == 8
+
+    def test_title_is_carried_over_when_only_body_changes(self):
+        client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])
+        ConfluenceOperations(client).update_page(
+            "12345", markdown="New body", confirm=True
+        )
+        assert client.calls[1][2]["title"] == "Runbook"
+
+    def test_body_is_carried_over_when_only_title_changes(self):
+        client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])
+        ConfluenceOperations(client).update_page(
+            "12345", title="Renamed", confirm=True
+        )
+        assert client.calls[1][2]["body"]["storage"]["value"] == "<p>Old</p>"
+        assert client.calls[1][2]["title"] == "Renamed"
+
+    def test_markdown_structure_is_converted(self):
+        client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])
+        ConfluenceOperations(client).update_page(
+            "12345", markdown="# Title\n\n- item", confirm=True
+        )
+        value = client.calls[1][2]["body"]["storage"]["value"]
+        assert "<h1>Title</h1>" in value and "<li>item</li>" in value
+
+    def test_dry_run_reads_but_does_not_write(self):
+        client = FakeClient([CURRENT])
+        result = ConfluenceOperations(client).update_page(
+            "12345", markdown="New", dry_run=True
+        )
+        assert result["dry_run"] is True
+        assert result["current_version"] == 7
+        assert [c[0] for c in client.calls] == ["GET"]
+
+    def test_conflict_propagates_with_its_own_category(self):
+        client = FakeClient([CURRENT, ConfluenceError("conflict")])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).update_page(
+                "12345", markdown="New", confirm=True
+            )
+        assert excinfo.value.category == "conflict"
+
+    def test_missing_current_version_raises(self):
+        client = FakeClient([{"id": "12345", "title": "T"}])
+        with pytest.raises(ConfluenceError) as excinfo:
+            ConfluenceOperations(client).update_page(
+                "12345", markdown="New", confirm=True
+            )
+        assert excinfo.value.category == "invalid_remote_data"
+
+    def test_macro_markup_is_escaped(self):
+        client = FakeClient([CURRENT, {"id": "12345", "version": {"number": 8}}])
+        ConfluenceOperations(client).update_page(
+            "12345", markdown="<ac:structured-macro/>", confirm=True
+        )
+        value = client.calls[1][2]["body"]["storage"]["value"]
+        assert "<ac:structured-macro" not in value

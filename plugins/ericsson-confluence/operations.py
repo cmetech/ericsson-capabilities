@@ -389,3 +389,79 @@ class ConfluenceOperations:
             "title": title,
             "parent_id": parent_id,
         }
+
+    def update_page(
+        self,
+        content_id: str,
+        *,
+        title: str | None = None,
+        markdown: str | None = None,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Edit a page's title, body, or both with optimistic concurrency."""
+        content_id = self._content_id(content_id)
+        if title is None and markdown is None:
+            raise ConfluenceError("invalid_input")
+        if title is not None:
+            title = self._title(title)
+        new_storage = self._body_storage(markdown) if markdown is not None else None
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise ConfluenceError("invalid_input")
+        if dry_run and confirm:
+            raise ConfluenceError("invalid_input")
+        if not dry_run and not confirm:
+            raise ConfluenceError("confirmation_required")
+
+        execute = require_explicit_intent(
+            dry_run=dry_run,
+            confirm=confirm,
+            action=f"Confluence page {content_id}",
+        )
+
+        current = self._mapping(
+            self.client.get_json(
+                f"{self.base}/content/{content_id}",
+                params={"expand": "body.storage,version"},
+            )
+        )
+        current_version = self._version(current)
+        if current_version is None:
+            raise ConfluenceError("invalid_remote_data")
+        next_title = title if title is not None else (
+            _bounded_string(current.get("title"), _MAX_TITLE_CHARS) or ""
+        )
+        next_storage = (
+            new_storage if new_storage is not None else self._storage_value(current)
+        )
+
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "id": content_id,
+                "current_version": current_version,
+                "title": next_title,
+            }
+
+        payload = {
+            "id": content_id,
+            "type": _bounded_string(current.get("type"), 64) or "page",
+            "title": next_title,
+            "version": {"number": current_version + 1},
+            "body": {
+                "storage": {"value": next_storage, "representation": "storage"}
+            },
+        }
+        response = self._mapping(
+            self.client.request_json(
+                "PUT", f"{self.base}/content/{content_id}", json_body=payload
+            )
+        )
+        return {
+            "ok": True,
+            "dry_run": False,
+            "id": content_id,
+            "version": self._version(response) or current_version + 1,
+            "title": next_title,
+        }

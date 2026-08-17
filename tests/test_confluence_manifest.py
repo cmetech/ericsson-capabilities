@@ -191,6 +191,7 @@ def test_write_contracts_match_the_declared_mutating_tools():
     assert writes == set(plugin.WRITE_APPROVALS)
     assert writes <= declared
     assert "confluence_create_page" in writes
+    assert "confluence_update_page" in writes
 
     mutating = {
         name
@@ -265,5 +266,43 @@ def test_create_handler_requires_an_exact_host_admission(monkeypatch):
         assert payload == {"success": True, "result": {"ok": True}}
         assert len(invoked) == 1
         assert ctx.configuration_calls == 1
+    finally:
+        _unload_package(module_name)
+
+
+def test_update_handler_rejects_admission_for_another_write(monkeypatch):
+    module_name, plugin = _load_plugin_package()
+    try:
+        ctx = _ToolContext()
+        plugin.register(ctx)
+        invoked = []
+        tools = sys.modules[module_name + ".tools"]
+        monkeypatch.setattr(
+            tools,
+            "invoke",
+            lambda *args: invoked.append(args) or {"ok": True},
+        )
+        handler = ctx.tools["confluence_update_page"]
+        arguments = {"content_id": "12345", "markdown": "B", "confirm": True}
+
+        wrong = types.SimpleNamespace(
+            approved=True,
+            policy="plugin_approve",
+            tool_name="confluence_create_page",
+        )
+        payload = json.loads(handler(arguments, tool_admission=wrong))
+        assert payload["success"] is False
+        assert payload["error"]["category"] == "permission"
+        assert invoked == []
+        assert ctx.configuration_calls == 0
+
+        allowed = types.SimpleNamespace(
+            approved=True,
+            policy="plugin_approve",
+            tool_name="confluence_update_page",
+        )
+        payload = json.loads(handler(arguments, tool_admission=allowed))
+        assert payload == {"success": True, "result": {"ok": True}}
+        assert len(invoked) == 1
     finally:
         _unload_package(module_name)

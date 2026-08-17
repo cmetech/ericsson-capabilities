@@ -102,6 +102,21 @@ SCHEMAS = {
         },
         ["space_key", "title", "markdown"],
     ),
+    "confluence_update_page": _schema(
+        "confluence_update_page",
+        "Edit one Confluence page's title, body, or both. Body is Markdown. "
+        "The current version is read automatically; if someone else edits "
+        "the page in between, the write fails with a conflict rather than "
+        "overwriting them. Requires dry_run or confirm.",
+        {
+            "content_id": _CONTENT_ID_SCHEMA,
+            "title": {"type": "string", "minLength": 1, "maxLength": 255},
+            "markdown": {"type": "string", "maxLength": 65536},
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["content_id"],
+    ),
 }
 
 
@@ -166,6 +181,14 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
             values["title"],
             values["markdown"],
             parent_id=values.get("parent_id"),
+            dry_run=values.get("dry_run", False),
+            confirm=values.get("confirm", False),
+        )
+    if name == "confluence_update_page":
+        return operations.update_page(
+            values["content_id"],
+            title=values.get("title"),
+            markdown=values.get("markdown"),
             dry_run=values.get("dry_run", False),
             confirm=values.get("confirm", False),
         )

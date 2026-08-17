@@ -82,8 +82,9 @@
         "Inspect recent commits, commit details, comments, and discussions.",
         "Discover merge requests and inspect their commits and discussions.",
         "Research a GitLab repository or merge request with bounded evidence.",
-        "Inspect GitLab pipelines and CI configuration without reading variable values.",
-        "Preview and perform an explicitly approved GitLab branch, commit, or merge request write."
+        "Inspect GitLab pipelines, job logs, and CI configuration without reading variable values.",
+        "Reply to and resolve merge request discussions, inspect approvals, approve, and SHA-pin a merge.",
+        "Preview and perform explicitly approved GitLab repository, review, and CI recovery writes."
       ],
       "id": "gitlab-tools",
       "maturity": "available",

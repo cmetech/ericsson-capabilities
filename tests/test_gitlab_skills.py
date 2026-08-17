@@ -37,8 +37,16 @@ PLUGIN_SKILLS = {
             "gitlab_list_merge_requests",
             "gitlab_list_merge_request_commits",
             "gitlab_list_merge_request_discussions",
+            "gitlab_merge_request_approvals",
         },
-        "write": set(),
+        "write": {
+            "gitlab_create_mr_note",
+            "gitlab_reply_to_discussion",
+            "gitlab_resolve_discussion",
+            "gitlab_approve_merge_request",
+            "gitlab_merge_merge_request",
+            "gitlab_update_merge_request",
+        },
     },
     "gitlab-activity-digest": {
         "read": {
@@ -115,7 +123,7 @@ def test_plugin_skills_are_trigger_valid_semantic_and_bounded(skill_name: str) -
 
 
 @pytest.mark.parametrize("skill_name", sorted(PLUGIN_SKILLS))
-def test_plugin_skills_declare_only_their_exact_read_only_tool_contract(
+def test_plugin_skills_declare_only_their_exact_tool_contract(
     skill_name: str,
 ) -> None:
     # GL-READ-07/08, GL-REVIEW-01/02, GL-CI-03/06/07/09/11.
@@ -126,7 +134,10 @@ def test_plugin_skills_declare_only_their_exact_read_only_tool_contract(
     lowered = body.lower()
     assert "bounded" in lowered
     assert "warning" in lowered or "truncat" in lowered
-    assert "read-only" in lowered
+    if skill_name == "merge-request-review":
+        assert "host approval" in lowered
+    else:
+        assert "read-only" in lowered
 
 
 def test_repository_research_requires_identity_before_bounded_evidence_reads() -> None:
@@ -145,7 +156,7 @@ def test_repository_research_requires_identity_before_bounded_evidence_reads() -
     assert "pipelines are not commit history" in lowered
 
 
-def test_merge_request_review_uses_active_agent_and_never_claims_write_authority() -> (
+def test_merge_request_review_uses_active_agent_and_closes_the_approved_loop() -> (
     None
 ):
     # GL-REVIEW-01/02/03: replace CodeReviewRunner with one active-agent review.
@@ -154,12 +165,25 @@ def test_merge_request_review_uses_active_agent_and_never_claims_write_authority
     )
     lowered = body.lower()
     assert "active agent" in lowered
-    assert "separately requests" in lowered
+    assert "explicitly asks" in lowered
     assert "host approval" in lowered
     assert "confidence score" not in lowered
     assert "created" in lowered and "updated" in lowered
     assert "new" in lowered and "active" in lowered
     assert "discussion" in lowered and "commit" in lowered
+    assert "dry_run=true" in body and "confirm=true" in body
+    assert "write_ambiguous" in body and "blindly retry" in lowered
+    ordered_loop = (
+        "gitlab_list_merge_request_discussions",
+        "gitlab_reply_to_discussion",
+        "gitlab_resolve_discussion",
+        "gitlab_merge_request_approvals",
+        "gitlab_approve_merge_request",
+        "gitlab_merge_merge_request",
+    )
+    positions = [body.index(tool) for tool in ordered_loop]
+    assert positions == sorted(positions)
+    assert "exact reviewed head SHA" in body
 
 
 def test_activity_digest_supports_natural_language_one_time_and_recurring_runs() -> None:

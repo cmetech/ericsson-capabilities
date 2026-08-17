@@ -25,6 +25,25 @@ def _load_models_module():
     return module
 
 
+def _load_tools_module():
+    module_name = "ericsson_confluence_manifest_tools"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        PLUGIN / "tools.py",
+        submodule_search_locations=[str(PLUGIN)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        for loaded_name in tuple(sys.modules):
+            if loaded_name == module_name or loaded_name.startswith(module_name + "."):
+                sys.modules.pop(loaded_name, None)
+    return module
+
+
 class TestManifest:
     def test_plugin_directory_exists(self):
         assert PLUGIN.is_dir()
@@ -142,8 +161,19 @@ def test_empty_write_approval_hook_ignores_untrusted_arguments():
     assert ctx.hook("future_confluence_write", recursive) is None
 
 
-def test_write_contracts_are_empty_until_tools_exist():
+def test_write_contracts_match_the_declared_mutating_tools():
     plugin = _load_plugin_module()
+    tools = _load_tools_module()
+    declared = set(yaml.safe_load((PLUGIN / "plugin.yaml").read_text())["provides_tools"])
 
-    assert plugin._WRITE_TOOLS == frozenset()
-    assert plugin.WRITE_APPROVALS == {}
+    writes = plugin._WRITE_TOOLS
+    assert writes == set(plugin.WRITE_APPROVALS)
+    assert writes <= declared
+    assert "confluence_create_page" in writes
+
+    mutating = {
+        name
+        for name, schema in tools.SCHEMAS.items()
+        if "confirm" in schema["parameters"]["properties"]
+    }
+    assert mutating <= writes

@@ -87,6 +87,21 @@ SCHEMAS = {
         {"content_id": _CONTENT_ID_SCHEMA, "max_results": _LIMIT},
         ["content_id"],
     ),
+    "confluence_create_page": _schema(
+        "confluence_create_page",
+        "Create one Confluence page from Markdown. Headings, lists, links "
+        "and fenced code blocks are converted; any raw markup in the text is "
+        "escaped rather than interpreted. Requires dry_run or confirm.",
+        {
+            "space_key": {"type": "string", "minLength": 1, "maxLength": 255},
+            "title": {"type": "string", "minLength": 1, "maxLength": 255},
+            "markdown": {"type": "string", "maxLength": 65536},
+            "parent_id": _CONTENT_ID_SCHEMA,
+            "dry_run": {"type": "boolean"},
+            "confirm": {"type": "boolean"},
+        },
+        ["space_key", "title", "markdown"],
+    ),
 }
 
 
@@ -144,5 +159,14 @@ def invoke(name: str, args: Mapping[str, Any], configuration, **client_options):
     if name == "confluence_list_comments":
         return operations.list_comments(
             values["content_id"], max_results=values.get("max_results", 25)
+        )
+    if name == "confluence_create_page":
+        return operations.create_page(
+            values["space_key"],
+            values["title"],
+            values["markdown"],
+            parent_id=values.get("parent_id"),
+            dry_run=values.get("dry_run", False),
+            confirm=values.get("confirm", False),
         )
     raise ConfluenceError("invalid_input")

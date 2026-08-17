@@ -2,23 +2,56 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
-# Task 1 registers the hook shape before write tools exist. Keep both write
-# collections empty until bounded, argument-scoped approval summaries exist.
-_WRITE_TOOLS: frozenset[str] = frozenset()
-WRITE_APPROVALS: dict[str, object] = {}
+_WRITE_TOOLS = frozenset({"confluence_create_page"})
+
+
+def _arg(args: dict, name: str) -> str:
+    """Render one argument for an approval prompt, safely and bounded."""
+    value = args.get(name) if isinstance(args, dict) else None
+    try:
+        return json.dumps(value, ensure_ascii=True)[:512]
+    except (TypeError, ValueError):
+        return '"<unrepresentable>"'
+
+
+WRITE_APPROVALS = {
+    "confluence_create_page": lambda a: (
+        f"Space: {_arg(a, 'space_key')}\nTitle: {_arg(a, 'title')}\n"
+        f"Parent: {_arg(a, 'parent_id')}\nBody: {_arg(a, 'markdown')}"
+    ),
+}
 
 
 def register(ctx: object) -> None:
     """Register bounded Confluence reads and the future write hook."""
 
-    def require_write_approval(
-        _tool_name: object, _args: object, **_kwargs: object
-    ) -> None:
-        # No Task 1 tool writes, so no untrusted argument is inspected,
-        # serialized, or rendered in an approval prompt.
-        return None
+    def require_write_approval(tool_name: str, args: dict, **_kwargs: object):
+        summarise = WRITE_APPROVALS.get(tool_name)
+        if summarise is None:
+            return None
+        try:
+            canonical_args = json.dumps(
+                args if isinstance(args, dict) else {},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError):
+            return {"action": "block", "message": "Confluence write arguments cannot be safely approved"}
+        return {
+            "action": "approve",
+            "message": (
+                f"Approve Ericsson Confluence change: {tool_name}\n"
+                f"{summarise(args if isinstance(args, dict) else {})}"
+            ),
+            "rule_key": (
+                f"{tool_name}:"
+                f"{hashlib.sha256(canonical_args.encode('utf-8')).hexdigest()}"
+            ),
+        }
 
     ctx.register_hook("pre_tool_call", require_write_approval)
 

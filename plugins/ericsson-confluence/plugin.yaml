@@ -4,4 +4,4 @@ description: "Ericsson Confluence tools — CQL search, Markdown page reads, spa
 author: Ericsson (cmetech)
 kind: standalone
 config_schema: config.schema.json
-provides_tools: [confluence_get_page, confluence_get_page_body, confluence_search, confluence_list_spaces, confluence_list_children, confluence_list_comments]
+provides_tools: [confluence_get_page, confluence_get_page_body, confluence_search, confluence_list_spaces, confluence_list_children, confluence_list_comments, confluence_create_page]

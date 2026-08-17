@@ -7,21 +7,26 @@ from typing import Any, Mapping
 
 if __package__:
     from ._common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
+    from ._common.guardrails import require_explicit_intent
     from .models import ConfluenceError
-    from .storage import storage_to_markdown
+    from .storage import markdown_to_storage, storage_to_markdown
 else:
     from _common.envelope import UNTRUSTED_CONTENT_WARNING, result_envelope
+    from _common.guardrails import require_explicit_intent
     from models import ConfluenceError
-    from storage import storage_to_markdown
+    from storage import markdown_to_storage, storage_to_markdown
 
 
 EXPAND_PAGE = "body.storage,version,space,ancestors,metadata.labels,history.lastUpdated"
 EXPAND_LIST = "version,space,ancestors"
 
 _CONTENT_ID = re.compile(r"^[0-9]{1,19}$")
+_SPACE_KEY = re.compile(r"^[A-Za-z0-9._~-]{1,255}$")
 _SPACE_TYPES = {"global", "personal"}
 _MAX_BODY_CHARS = 100_000
 _MAX_CQL_CHARS = 4096
+_MAX_TITLE_CHARS = 255
+_MAX_WRITE_BODY_CHARS = 65_536
 
 
 def _bounded_string(value: Any, maximum: int) -> str | None:
@@ -54,6 +59,29 @@ class ConfluenceOperations:
         if not isinstance(value, str) or _CONTENT_ID.fullmatch(value) is None:
             raise ConfluenceError("invalid_input")
         return value
+
+    @staticmethod
+    def _space_key(value: Any) -> str:
+        if not isinstance(value, str) or _SPACE_KEY.fullmatch(value) is None:
+            raise ConfluenceError("invalid_input")
+        return value
+
+    @staticmethod
+    def _title(value: Any) -> str:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > _MAX_TITLE_CHARS
+        ):
+            raise ConfluenceError("invalid_input")
+        return value
+
+    @staticmethod
+    def _body_storage(markdown: Any) -> str:
+        """Convert caller Markdown to storage format, escaping all text."""
+        if not isinstance(markdown, str) or len(markdown) > _MAX_WRITE_BODY_CHARS:
+            raise ConfluenceError("invalid_input")
+        return markdown_to_storage(markdown)
 
     @staticmethod
     def _mapping(payload: Any) -> Mapping[str, Any]:
@@ -299,3 +327,65 @@ class ConfluenceOperations:
         if raw_storage:
             result["raw_storage"] = self._redact(storage_value) or ""
         return result
+
+    def create_page(
+        self,
+        space_key: str,
+        title: str,
+        markdown: str,
+        *,
+        parent_id: str | None = None,
+        dry_run: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Create one page from Markdown without retrying ambiguous writes."""
+        space_key = self._space_key(space_key)
+        title = self._title(title)
+        storage_value = self._body_storage(markdown)
+        if parent_id is not None:
+            parent_id = self._content_id(parent_id)
+        if type(dry_run) is not bool or type(confirm) is not bool:
+            raise ConfluenceError("invalid_input")
+        if dry_run and confirm:
+            raise ConfluenceError("invalid_input")
+        if not dry_run and not confirm:
+            raise ConfluenceError("confirmation_required")
+
+        execute = require_explicit_intent(
+            dry_run=dry_run,
+            confirm=confirm,
+            action=f"a new page '{title}' in space {space_key}",
+        )
+        payload: dict[str, Any] = {
+            "type": "page",
+            "title": title,
+            "space": {"key": space_key},
+            "body": {
+                "storage": {"value": storage_value, "representation": "storage"}
+            },
+        }
+        if parent_id is not None:
+            payload["ancestors"] = [{"id": parent_id}]
+        if not execute:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "id": None,
+                "space_key": space_key,
+                "title": title,
+                "parent_id": parent_id,
+            }
+        response = self._mapping(
+            self.client.request_json("POST", f"{self.base}/content", json_body=payload)
+        )
+        created_id = _bounded_string(response.get("id"), 64)
+        if not created_id:
+            raise ConfluenceError("invalid_remote_data")
+        return {
+            "ok": True,
+            "dry_run": False,
+            "id": created_id,
+            "space_key": space_key,
+            "title": title,
+            "parent_id": parent_id,
+        }

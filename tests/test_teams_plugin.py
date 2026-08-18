@@ -2,7 +2,6 @@ import os
 import stat
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -50,45 +49,180 @@ class _ChangedCache:
         return self.serialized
 
 
-class _FakeWindowsAcl:
-    def __init__(self, events=None, *, insecure=None, fail=None, on_call=None):
-        self.events = events if events is not None else []
-        self.insecure = insecure
-        self.fail = fail
-        self.on_call = on_call
-        self._counts = {}
-
-    def _record(self, name, path):
-        path = Path(path)
-        self.events.append((name, path))
-        self._counts[name] = self._counts.get(name, 0) + 1
-        occurrence = self._counts[name]
-        if self.fail == (name, occurrence):
-            raise RuntimeError("must-not-leak-host-failure")
-        if self.on_call is not None:
-            self.on_call(name, path, occurrence)
-        return SimpleNamespace(
-            secure=self.insecure != (name, occurrence),
-            detail=("must-not-leak-acl-detail" if self.insecure == (name, occurrence)
-                    else None),
-        )
-
-    def restrict_directory_to_current_user(self, path):
-        self._record("restrict_directory", path)
-
-    def inspect_directory_acl(self, path):
-        return self._record("inspect_directory", path)
-
-    def restrict_file_to_current_user(self, path):
-        self._record("restrict_file", path)
-
-    def inspect_file_acl(self, path):
-        return self._record("inspect_file", path)
-
-
 def _install_windows_acl(monkeypatch, fake):
     monkeypatch.setattr(graph_auth, "_platform_name", lambda: "nt", raising=False)
     monkeypatch.setattr(graph_auth, "_windows_acl_api", lambda: fake, raising=False)
+
+
+class _HandleBoundWindowsHost:
+    """Portable model of the host's held-handle private-file contract."""
+
+    def __init__(self, *, on_event=None, fail_event=None):
+        self.on_event = on_event
+        self.fail_event = fail_event
+        self.events = []
+
+    def _event(self, name, artifact):
+        self.events.append((name, artifact))
+        if self.on_event is not None:
+            self.on_event(name, artifact)
+        if self.fail_event == name:
+            raise OSError("must-not-leak-handle-host-failure")
+
+    def open_private_directory(self, path):
+        flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        directory = _HandleBoundDirectory(self, Path(path), descriptor)
+        try:
+            self._event("parent", directory)
+        except Exception:
+            directory.close()
+            raise
+        return directory
+
+
+class _HandleBoundDirectory:
+    def __init__(self, host, path, descriptor):
+        self.host = host
+        self.path = path
+        self.descriptor = descriptor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
+
+    def open_file(self, name):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=self.descriptor)
+        except FileNotFoundError:
+            return None
+        private_file = _HandleBoundFile(
+            self.host,
+            self,
+            name,
+            descriptor,
+            delete_armed=False,
+        )
+        try:
+            self.host._event("cache", private_file)
+        except Exception:
+            private_file.close()
+            raise
+        return private_file
+
+    def create_file(self, name):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        descriptor = os.open(name, flags, 0o600, dir_fd=self.descriptor)
+        private_file = _HandleBoundFile(
+            self.host,
+            self,
+            name,
+            descriptor,
+            delete_armed=True,
+        )
+        try:
+            self.host._event("temp", private_file)
+        except Exception:
+            private_file.close()
+            raise
+        return private_file
+
+    def close(self):
+        descriptor = self.descriptor
+        if descriptor is None:
+            return
+        self.descriptor = None
+        os.close(descriptor)
+
+
+class _HandleBoundFile:
+    def __init__(self, host, parent, name, descriptor, *, delete_armed):
+        self.host = host
+        self.parent = parent
+        self.name = name
+        self.descriptor = descriptor
+        self.delete_armed = delete_armed
+        self.identity = os.fstat(descriptor)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
+
+    def read_all(self, *, max_bytes):
+        self.host._event("read", self)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(self.descriptor, 64 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError("private cache is too large")
+            chunks.append(chunk)
+
+    def write_all(self, data):
+        view = memoryview(data)
+        while view:
+            written = os.write(self.descriptor, view)
+            if written <= 0:
+                raise OSError("short private cache write")
+            view = view[written:]
+        self.host._event("write", self)
+
+    def flush(self):
+        os.fsync(self.descriptor)
+        self.host._event("flush", self)
+
+    def publish(self, name):
+        self.host._event("before_publish", self)
+        os.replace(
+            self.name,
+            name,
+            src_dir_fd=self.parent.descriptor,
+            dst_dir_fd=self.parent.descriptor,
+        )
+        self.name = name
+        self.host._event("final", self)
+        self.delete_armed = False
+
+    def _linked_name(self):
+        for name in os.listdir(self.parent.descriptor):
+            opened = os.stat(name, dir_fd=self.parent.descriptor, follow_symlinks=False)
+            if os.path.samestat(self.identity, opened):
+                return name
+        return None
+
+    def close(self):
+        descriptor = self.descriptor
+        if descriptor is None:
+            return
+        cleanup_error = None
+        if self.delete_armed:
+            try:
+                linked_name = self._linked_name()
+                if linked_name is not None:
+                    os.unlink(linked_name, dir_fd=self.parent.descriptor)
+            except OSError as error:
+                cleanup_error = error
+        self.descriptor = None
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        try:
+            self.host._event("close", self)
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def _temporary_cache_files():
@@ -96,117 +230,239 @@ def _temporary_cache_files():
     return list(cache.parent.glob(f".{cache.name}.*.tmp"))
 
 
+def test_windows_read_parent_aba_uses_the_host_held_directory(home, monkeypatch):
+    cache = graph_auth.cache_path()
+    cache.parent.mkdir(parents=True)
+    cache.write_text("protected-cache", encoding="utf-8")
+    parked = home / "parked-parent"
+    attacker = home / "attacker-parent"
+    attacker.mkdir()
+    (attacker / cache.name).write_text("attacker-cache", encoding="utf-8")
+    swapped = False
+
+    def parent_aba(name, artifact):
+        nonlocal swapped
+        if name != "parent" or swapped:
+            return
+        cache.parent.rename(parked)
+        attacker.rename(cache.parent)
+        cache.parent.rename(attacker)
+        parked.rename(cache.parent)
+        swapped = True
+
+    host = _HandleBoundWindowsHost(on_event=parent_aba)
+    _install_windows_acl(monkeypatch, host)
+
+    assert graph_auth._read_cache_text() == "protected-cache"
+    assert swapped is True
+
+
+def test_windows_read_cache_aba_reads_the_acl_held_file(home, monkeypatch):
+    cache = graph_auth.cache_path()
+    cache.parent.mkdir(parents=True)
+    cache.write_text("protected-cache", encoding="utf-8")
+    attacker = cache.parent / "attacker-cache"
+    attacker.write_text("attacker-cache", encoding="utf-8")
+    parked = cache.parent / "parked-cache"
+    swapped = False
+
+    def cache_aba(name, artifact):
+        nonlocal swapped
+        if name != "cache" or swapped:
+            return
+        cache.rename(parked)
+        attacker.rename(cache)
+        cache.rename(attacker)
+        parked.rename(cache)
+        swapped = True
+
+    host = _HandleBoundWindowsHost(on_event=cache_aba)
+    _install_windows_acl(monkeypatch, host)
+
+    assert graph_auth._read_cache_text() == "protected-cache"
+    assert swapped is True
+
+
+def test_windows_persist_temp_aba_writes_the_acl_held_file(home, monkeypatch):
+    swapped = False
+
+    def temp_aba(name, artifact):
+        nonlocal swapped
+        if name != "temp" or swapped:
+            return
+        temporary = artifact.parent.path / artifact.name
+        parked = artifact.parent.path / "parked-temp"
+        attacker = artifact.parent.path / "attacker-temp"
+        attacker.write_bytes(b"attacker-cache")
+        temporary.rename(parked)
+        attacker.rename(temporary)
+        temporary.rename(attacker)
+        parked.rename(temporary)
+        swapped = True
+
+    host = _HandleBoundWindowsHost(on_event=temp_aba)
+    _install_windows_acl(monkeypatch, host)
+
+    graph_auth._persist(_ChangedCache("synthetic-token-cache"))
+
+    assert (
+        graph_auth.cache_path().read_text(encoding="utf-8") == "synthetic-token-cache"
+    )
+    assert swapped is True
+
+
+def test_windows_persist_final_aba_keeps_the_acl_held_publication(home, monkeypatch):
+    swapped = False
+
+    def final_aba(name, artifact):
+        nonlocal swapped
+        if name != "final" or swapped:
+            return
+        final = artifact.parent.path / artifact.name
+        parked = artifact.parent.path / "parked-final"
+        attacker = artifact.parent.path / "attacker-final"
+        attacker.write_bytes(b"attacker-cache")
+        final.rename(parked)
+        attacker.rename(final)
+        final.rename(attacker)
+        parked.rename(final)
+        swapped = True
+
+    host = _HandleBoundWindowsHost(on_event=final_aba)
+    _install_windows_acl(monkeypatch, host)
+
+    graph_auth._persist(_ChangedCache("synthetic-token-cache"))
+
+    assert (
+        graph_auth.cache_path().read_text(encoding="utf-8") == "synthetic-token-cache"
+    )
+    assert swapped is True
+
+
+def test_windows_failure_cleanup_deletes_moved_real_temp_not_name_replacement(
+    home, monkeypatch
+):
+    state = {}
+
+    def move_and_replace(name, artifact):
+        if name != "write" or state:
+            return
+        original = artifact.parent.path / artifact.name
+        moved = artifact.parent.path / "moved-sensitive-temp"
+        original.rename(moved)
+        original.write_bytes(b"attacker-replacement")
+        state.update(original=original, moved=moved)
+
+    host = _HandleBoundWindowsHost(on_event=move_and_replace, fail_event="write")
+    _install_windows_acl(monkeypatch, host)
+
+    with pytest.raises(
+        graph_auth.AuthRequired, match="could not store.*securely"
+    ) as caught:
+        graph_auth._persist(_ChangedCache("synthetic-token-cache"))
+
+    assert state["moved"].exists() is False
+    assert state["original"].read_bytes() == b"attacker-replacement"
+    assert "synthetic-token-cache" not in str(caught.value)
+    assert "must-not-leak" not in str(caught.value)
+
+
+def test_windows_failure_cleanup_never_deletes_replacement_after_temp_unlink(
+    home, monkeypatch
+):
+    state = {}
+
+    def unlink_and_replace(name, artifact):
+        if name != "write" or state:
+            return
+        original = artifact.parent.path / artifact.name
+        original.unlink()
+        original.write_bytes(b"attacker-replacement")
+        state["replacement"] = original
+
+    host = _HandleBoundWindowsHost(on_event=unlink_and_replace, fail_event="write")
+    _install_windows_acl(monkeypatch, host)
+
+    with pytest.raises(
+        graph_auth.AuthRequired, match="could not store.*securely"
+    ) as caught:
+        graph_auth._persist(_ChangedCache("synthetic-token-cache"))
+
+    assert state["replacement"].read_bytes() == b"attacker-replacement"
+    assert "synthetic-token-cache" not in str(caught.value)
+    assert "must-not-leak" not in str(caught.value)
+
+
 def test_windows_persist_protects_parent_and_temp_before_first_cache_byte(
-        home, monkeypatch):
-    events = []
-    fake = _FakeWindowsAcl(events)
-    _install_windows_acl(monkeypatch, fake)
-    real_open = graph_auth.os.open
-    real_write = graph_auth.os.write
-
-    def recording_open(path, *args, **kwargs):
-        events.append(("open", Path(path)))
-        return real_open(path, *args, **kwargs)
-
-    def recording_write(descriptor, data):
-        events.append(("write", bytes(data)))
-        return real_write(descriptor, data)
-
-    monkeypatch.setattr(graph_auth.os, "open", recording_open)
-    monkeypatch.setattr(graph_auth.os, "write", recording_write)
+    home, monkeypatch
+):
+    host = _HandleBoundWindowsHost()
+    _install_windows_acl(monkeypatch, host)
 
     graph_auth._persist(_ChangedCache("secret-refresh-token"))
 
     cache = graph_auth.cache_path()
-    temp = next(path for name, path in events if name == "open")
-    assert events.index(("restrict_directory", cache.parent)) < events.index(("open", temp))
-    assert events.index(("inspect_directory", cache.parent)) < events.index(("open", temp))
-    assert events.index(("restrict_file", temp)) < next(
-        index for index, event in enumerate(events) if event[0] == "write"
-    )
-    assert events.index(("inspect_file", temp)) < next(
-        index for index, event in enumerate(events) if event[0] == "write"
-    )
+    names = [name for name, _artifact in host.events]
+    assert names.index("parent") < names.index("temp") < names.index("write")
     assert cache.read_text(encoding="utf-8") == "secret-refresh-token"
 
 
-def test_windows_persist_protects_final_destination_after_atomic_replace(home, monkeypatch):
-    events = []
-    fake = _FakeWindowsAcl(events)
-    _install_windows_acl(monkeypatch, fake)
-    real_replace = graph_auth.os.replace
-
-    def recording_replace(source, destination):
-        events.append(("replace", (Path(source), Path(destination))))
-        return real_replace(source, destination)
-
-    monkeypatch.setattr(graph_auth.os, "replace", recording_replace)
+def test_windows_persist_protects_final_destination_after_atomic_replace(
+    home, monkeypatch
+):
+    host = _HandleBoundWindowsHost()
+    _install_windows_acl(monkeypatch, host)
 
     graph_auth._persist(_ChangedCache("new-token"))
 
-    cache = graph_auth.cache_path()
-    replace_index = next(index for index, event in enumerate(events) if event[0] == "replace")
-    final_restrict = max(
-        index for index, event in enumerate(events)
-        if event == ("restrict_file", cache)
-    )
-    final_inspect = max(
-        index for index, event in enumerate(events)
-        if event == ("inspect_file", cache)
-    )
-    assert replace_index < final_restrict < final_inspect
+    names = [name for name, _artifact in host.events]
+    assert names.index("before_publish") < names.index("final")
+    assert graph_auth.cache_path().read_text(encoding="utf-8") == "new-token"
 
 
 def test_windows_read_protects_parent_and_file_before_first_read(home, monkeypatch):
     cache = graph_auth.cache_path()
     cache.parent.mkdir(parents=True)
     cache.write_text("existing-token", encoding="utf-8")
-    events = []
-    fake = _FakeWindowsAcl(events)
-    _install_windows_acl(monkeypatch, fake)
-    real_read = graph_auth.os.read
-
-    def recording_read(descriptor, size):
-        events.append(("read", size))
-        return real_read(descriptor, size)
-
-    monkeypatch.setattr(graph_auth.os, "read", recording_read)
+    host = _HandleBoundWindowsHost()
+    _install_windows_acl(monkeypatch, host)
 
     assert graph_auth._read_cache_text() == "existing-token"
 
-    first_read = next(index for index, event in enumerate(events) if event[0] == "read")
-    assert events.index(("restrict_directory", cache.parent)) < first_read
-    assert events.index(("inspect_directory", cache.parent)) < first_read
-    assert events.index(("restrict_file", cache)) < first_read
-    assert events.index(("inspect_file", cache)) < first_read
+    names = [name for name, _artifact in host.events]
+    assert names.index("parent") < names.index("cache") < names.index("read")
 
 
 def test_windows_read_rejects_cache_larger_than_16_mib(home, monkeypatch):
     cache = graph_auth.cache_path()
     cache.parent.mkdir(parents=True)
     cache.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
+    _install_windows_acl(monkeypatch, _HandleBoundWindowsHost())
 
     with pytest.raises(graph_auth.AuthRequired, match="could not read.*securely"):
         graph_auth._read_cache_text()
 
 
 @pytest.mark.parametrize(
-    ("operation", "insecure"),
+    ("operation", "failure_event"),
     [
-        ("persist", ("inspect_directory", 1)),
-        ("persist", ("inspect_file", 1)),
-        ("read", ("inspect_directory", 1)),
-        ("read", ("inspect_file", 1)),
+        ("persist", "parent"),
+        ("persist", "temp"),
+        ("read", "parent"),
+        ("read", "cache"),
     ],
 )
-def test_windows_insecure_acl_is_redacted_auth_required(
-        home, monkeypatch, operation, insecure):
+def test_windows_host_acl_failure_is_redacted_auth_required(
+    home, monkeypatch, operation, failure_event
+):
     cache = graph_auth.cache_path()
     cache.parent.mkdir(parents=True)
     if operation == "read":
         cache.write_text("secret-refresh-token", encoding="utf-8")
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl(insecure=insecure))
+    _install_windows_acl(
+        monkeypatch,
+        _HandleBoundWindowsHost(fail_event=failure_event),
+    )
 
     with pytest.raises(graph_auth.AuthRequired, match="securely") as caught:
         if operation == "persist":
@@ -215,13 +471,14 @@ def test_windows_insecure_acl_is_redacted_auth_required(
             graph_auth._read_cache_text()
 
     assert "secret-refresh-token" not in str(caught.value)
-    assert "must-not-leak-acl-detail" not in str(caught.value)
+    assert "must-not-leak-handle-host-failure" not in str(caught.value)
     assert _temporary_cache_files() == []
 
 
 @pytest.mark.parametrize("operation", ["persist", "read"])
 def test_windows_missing_host_acl_api_is_redacted_auth_required(
-        home, monkeypatch, operation):
+    home, monkeypatch, operation
+):
     cache = graph_auth.cache_path()
     cache.parent.mkdir(parents=True)
     if operation == "read":
@@ -247,7 +504,7 @@ def test_windows_missing_host_acl_api_is_redacted_auth_required(
 def test_windows_persist_rejects_wrong_destination_type(home, monkeypatch):
     cache = graph_auth.cache_path()
     cache.mkdir(parents=True)
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
+    _install_windows_acl(monkeypatch, _HandleBoundWindowsHost())
 
     with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely"):
         graph_auth._persist(_ChangedCache("secret-refresh-token"))
@@ -256,61 +513,45 @@ def test_windows_persist_rejects_wrong_destination_type(home, monkeypatch):
     assert _temporary_cache_files() == []
 
 
-def test_windows_read_rejects_reparse_point_before_acl_or_content_read(home, monkeypatch):
+def test_windows_read_rejects_reparse_point_before_acl_or_content_read(
+    home, monkeypatch
+):
     cache = graph_auth.cache_path()
     cache.parent.mkdir(parents=True)
-    cache.write_text("secret-refresh-token", encoding="utf-8")
-    fake = _FakeWindowsAcl()
-    _install_windows_acl(monkeypatch, fake)
-    real_lstat = Path.lstat
+    victim = home / "victim-cache"
+    victim.write_text("secret-refresh-token", encoding="utf-8")
+    cache.symlink_to(victim)
+    host = _HandleBoundWindowsHost()
+    _install_windows_acl(monkeypatch, host)
 
-    def reparse_lstat(path):
-        if path == cache:
-            return SimpleNamespace(
-                st_mode=stat.S_IFREG | 0o600,
-                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
-            )
-        return real_lstat(path)
-
-    monkeypatch.setattr(Path, "lstat", reparse_lstat)
-
-    with pytest.raises(graph_auth.AuthRequired, match="could not read.*securely") as caught:
+    with pytest.raises(
+        graph_auth.AuthRequired, match="could not read.*securely"
+    ) as caught:
         graph_auth._read_cache_text()
 
-    assert fake.events == [
-        ("restrict_directory", cache.parent),
-        ("inspect_directory", cache.parent),
-    ]
+    assert [name for name, _artifact in host.events] == ["parent"]
     assert "secret-refresh-token" not in str(caught.value)
 
 
 @pytest.mark.parametrize(
-    "failure",
+    "failure_event",
     [
-        ("restrict_file", 1),
-        ("inspect_file", 1),
-        ("write", 1),
-        ("replace", 1),
+        "temp",
+        "write",
+        "before_publish",
     ],
 )
 def test_windows_persist_removes_unpublished_temp_and_redacts_failures(
-        home, monkeypatch, failure):
-    fake_failure = failure if failure[0] in {"restrict_file", "inspect_file"} else None
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl(fail=fake_failure))
-    if failure[0] == "write":
-        monkeypatch.setattr(
-            graph_auth.os,
-            "write",
-            lambda *_args: (_ for _ in ()).throw(OSError("must-not-leak-write-failure")),
-        )
-    if failure[0] == "replace":
-        monkeypatch.setattr(
-            graph_auth.os,
-            "replace",
-            lambda *_args: (_ for _ in ()).throw(OSError("must-not-leak-replace-failure")),
-        )
+    home, monkeypatch, failure_event
+):
+    _install_windows_acl(
+        monkeypatch,
+        _HandleBoundWindowsHost(fail_event=failure_event),
+    )
 
-    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
+    with pytest.raises(
+        graph_auth.AuthRequired, match="could not store.*securely"
+    ) as caught:
         graph_auth._persist(_ChangedCache("secret-refresh-token"))
 
     assert _temporary_cache_files() == []
@@ -319,185 +560,39 @@ def test_windows_persist_removes_unpublished_temp_and_redacts_failures(
 
 
 def test_windows_persist_final_acl_failure_is_redacted_and_leaves_no_temp(
-        home, monkeypatch):
-    fake = _FakeWindowsAcl(fail=("inspect_file", 2))
-    _install_windows_acl(monkeypatch, fake)
+    home, monkeypatch
+):
+    _install_windows_acl(monkeypatch, _HandleBoundWindowsHost(fail_event="final"))
 
-    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
+    with pytest.raises(
+        graph_auth.AuthRequired, match="could not store.*securely"
+    ) as caught:
         graph_auth._persist(_ChangedCache("secret-refresh-token"))
 
-    assert graph_auth.cache_path().read_text(encoding="utf-8") == "secret-refresh-token"
+    assert graph_auth.cache_path().exists() is False
     assert _temporary_cache_files() == []
     assert "secret-refresh-token" not in str(caught.value)
     assert "must-not-leak-host-failure" not in str(caught.value)
 
 
-def test_windows_persist_rejects_parent_swap_during_temp_open(home, monkeypatch):
-    cache = graph_auth.cache_path()
-    replaced_parent = home / "replaced-ericsson-parent"
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
-    real_open = graph_auth.os.open
-    swapped = False
-
-    def swapping_open(path, *args, **kwargs):
-        nonlocal swapped
-        if not swapped and Path(path).parent == cache.parent:
-            swapped = True
-            cache.parent.rename(replaced_parent)
-            cache.parent.mkdir()
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(graph_auth.os, "open", swapping_open)
-
-    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
-        graph_auth._persist(_ChangedCache("secret-refresh-token"))
-
-    assert swapped is True
-    assert not cache.exists()
-    assert _temporary_cache_files() == []
-    assert "secret-refresh-token" not in str(caught.value)
-
-
-def test_windows_persist_rejects_temp_path_swap_before_first_write(home, monkeypatch):
-    swapped = False
-
-    def swap_temp(name, path, occurrence):
-        nonlocal swapped
-        if name == "inspect_file" and occurrence == 1:
-            replacement = path.parent / "attacker-temp-replacement"
-            replacement.write_text("attacker-cache", encoding="utf-8")
-            os.replace(replacement, path)
-            swapped = True
-
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl(on_call=swap_temp))
-    real_write = graph_auth.os.write
-    writes = []
-
-    def recording_write(descriptor, data):
-        writes.append(bytes(data))
-        return real_write(descriptor, data)
-
-    monkeypatch.setattr(graph_auth.os, "write", recording_write)
-
-    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
-        graph_auth._persist(_ChangedCache("secret-refresh-token"))
-
-    assert swapped is True
-    assert writes == []
-    assert _temporary_cache_files() == []
-    assert "secret-refresh-token" not in str(caught.value)
-
-
-def test_windows_read_rejects_protected_target_swap_before_open(home, monkeypatch):
-    cache = graph_auth.cache_path()
-    cache.parent.mkdir(parents=True)
-    cache.write_text("protected-cache", encoding="utf-8")
-    attacker = cache.parent / "attacker-cache"
-    attacker.write_text("attacker-cache", encoding="utf-8")
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
-    real_open = graph_auth.os.open
-    real_read = graph_auth.os.read
-    reads = []
-    swapped = False
-
-    def swapping_open(path, *args, **kwargs):
-        nonlocal swapped
-        if not swapped and Path(path) == cache:
-            os.replace(attacker, cache)
-            swapped = True
-        return real_open(path, *args, **kwargs)
-
-    def recording_read(descriptor, size):
-        reads.append(size)
-        return real_read(descriptor, size)
-
-    monkeypatch.setattr(graph_auth.os, "open", swapping_open)
-    monkeypatch.setattr(graph_auth.os, "read", recording_read)
-
-    with pytest.raises(graph_auth.AuthRequired, match="could not read.*securely") as caught:
-        graph_auth._read_cache_text()
-
-    assert swapped is True
-    assert reads == []
-    assert "attacker-cache" not in str(caught.value)
-
-
-def test_windows_read_rejects_parent_swap_even_when_target_identity_matches(
-        home, monkeypatch):
-    cache = graph_auth.cache_path()
-    cache.parent.mkdir(parents=True)
-    cache.write_text("protected-cache", encoding="utf-8")
-    replaced_parent = home / "replaced-ericsson-parent"
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
-    real_open = graph_auth.os.open
-    swapped = False
-
-    def swapping_open(path, *args, **kwargs):
-        nonlocal swapped
-        if not swapped and Path(path) == cache:
-            swapped = True
-            cache.parent.rename(replaced_parent)
-            cache.parent.mkdir()
-            os.link(replaced_parent / cache.name, cache)
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(graph_auth.os, "open", swapping_open)
-
-    with pytest.raises(graph_auth.AuthRequired, match="could not read.*securely"):
-        graph_auth._read_cache_text()
-
-    assert swapped is True
-
-
-def test_windows_persist_rejects_final_target_swap_after_replace(home, monkeypatch):
-    cache = graph_auth.cache_path()
-    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
-    real_replace = graph_auth.os.replace
-    swapped = False
-
-    def swapping_replace(source, destination):
-        nonlocal swapped
-        real_replace(source, destination)
-        attacker = cache.parent / "attacker-final"
-        attacker.write_text("attacker-cache", encoding="utf-8")
-        real_replace(attacker, destination)
-        swapped = True
-
-    monkeypatch.setattr(graph_auth.os, "replace", swapping_replace)
-
-    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
-        graph_auth._persist(_ChangedCache("secret-refresh-token"))
-
-    assert swapped is True
-    assert cache.read_text(encoding="utf-8") == "attacker-cache"
-    assert _temporary_cache_files() == []
-    assert "secret-refresh-token" not in str(caught.value)
-
-
-def test_windows_persist_unlinks_temp_when_close_reports_failure(home, monkeypatch):
-    _install_windows_acl(
-        monkeypatch,
-        _FakeWindowsAcl(fail=("restrict_file", 1)),
-    )
-    real_close = graph_auth.os.close
-    close_failed = False
-
-    def close_then_fail(descriptor):
-        nonlocal close_failed
-        real_close(descriptor)
-        if not close_failed:
-            close_failed = True
+def test_windows_cleanup_failure_is_redacted_after_handle_bound_deletion(
+    home, monkeypatch
+):
+    def fail_close(name, artifact):
+        if name == "close":
             raise OSError("must-not-leak-close-failure")
 
-    monkeypatch.setattr(graph_auth.os, "close", close_then_fail)
+    host = _HandleBoundWindowsHost(on_event=fail_close, fail_event="write")
+    _install_windows_acl(monkeypatch, host)
 
-    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
-        graph_auth._persist(_ChangedCache("secret-refresh-token"))
+    with pytest.raises(
+        graph_auth.AuthRequired, match="could not store.*securely"
+    ) as caught:
+        graph_auth._persist(_ChangedCache("synthetic-token-cache"))
 
-    assert close_failed is True
     assert _temporary_cache_files() == []
     assert "must-not-leak-close-failure" not in str(caught.value)
-    assert "secret-refresh-token" not in str(caught.value)
+    assert "synthetic-token-cache" not in str(caught.value)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")

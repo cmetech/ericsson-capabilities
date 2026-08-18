@@ -12,6 +12,32 @@
 
 **Repo:** `ericsson-capabilities` (this repo), post-Wave-3 `main`.
 
+## Reconciliation Note — 2026-08-18
+
+The post-Wave-3 gate found 58 existing operation ids, but three approved public
+signatures were stale: merge-request listing requires a project,
+`gitlab_inspect_ci` has no pipeline id and is a broad CI inspection, and
+`gitlab_create_branch` derives a ticket branch rather than accepting an
+explicit branch name. Four existing dry-run-shaped admitted writes expose
+`dry_run` but no connector-schema `confirm` field.
+
+The approved resolution preserves all existing capability and adds two bounded
+GitLab operations in Task 1A: `gitlab_read_pipeline` for one pipeline's
+normalized metadata and `gitlab_create_named_branch` for an explicit branch and
+ref. The existing CI inspection and ticket-derived branch creation receive
+accurate public paths, and merge-request listing makes project positional. The
+facade therefore starts in Task 1B against 60 operations: Jira 15, GitLab 30,
+Confluence 9, and ARM 6.
+
+Direct write intent remains exact and fail-closed at the CLI. The owning
+provider validates a genuine Wave 4A invocation before translating host mode to
+the connector's argument shape. Dry-run mode applies `dry_run=True`; confirmed
+mode applies `confirm=True` where the schema supports it, or `dry_run=False` for
+the reviewed dry-run-shaped writes. This avoids a broad connector-schema
+retrofit while keeping model `PluginToolAdmission` and direct application
+authority separate. Any schema drift beyond this documented reconciliation is
+still a stop condition.
+
 ## Global Constraints
 
 - **Wave gate:** do not start until Jira, GitLab, Confluence, and ARM Wave 2-3 work is merged to source `main`, its full test gate is green, Hermes credential storage is merged to neutral `base`, and Wave 4A's application-command port is merged and green on neutral `base`.
@@ -23,7 +49,7 @@
 - **Authority separation:** model writes still require genuine `PluginToolAdmission`; shell writes arrive only as genuine Wave 4A application-command invocations. Neither adapter may construct or accept the other's authority.
 - **Fresh ownership:** the connector provider resolves `ctx.configuration()` inside every invocation. The facade never sees a configuration object, secret, client, or connector module.
 - **Writes require exactly one intent:** every mutating leaf parser uses a required mutually exclusive group containing only `--dry-run` and `--confirm`. Omission and both-flags fail with exit 2 before file reads, configuration, provider lookup, or network activity.
-- **No write without preview:** expose a write only if its connector operation already implements both `dry_run` and `confirm` through `require_explicit_intent`.
+- **No write without preview:** expose a write only when the connector has both a reviewed non-mutating preview and confirmed execution path. The CLI always requires exactly one intent. The provider validates the genuine host invocation before applying `dry_run=True`, `confirm=True`, or the documented dry-run-shaped confirmed normalization `dry_run=False`; no connector-level `confirm` retrofit is required for that bounded set.
 - **Ambiguity survives:** `write_ambiguous` maps to exit 5 with reconciliation guidance. `--confirm` never enables retry of an uncertain write.
 - **No secrets on argv:** do not accept tokens, passwords, certificate contents, or connector origins as command options. The active Hermes profile is authoritative. Bodies use bounded files or stdin; ARM deploy passes a local path to the connector without reading bytes in the facade.
 - **Curated UX, schema-checked:** descriptors explicitly list every command path and binding. A test compares each descriptor's operation and target argument set against the final live `SCHEMAS`; stale/missing/extra bindings fail.
@@ -37,7 +63,7 @@
 |---|---|---|
 | D1 | One backend facade owns all four top-level names | Help remains visible while standalone connectors are disabled, and command collisions fail atomically. |
 | D2 | Add connector-local `application.py` modules | Pulls common execution/error behavior behind both adapters without moving domain code into the facade or Hermes core. |
-| D3 | Canonical operation ids remain existing tool names | Schemas, provider registration, model handlers, CLI descriptors, and mapping rows can be mechanically reconciled without inventing a second internal namespace. |
+| D3 | Canonical operation ids remain connector tool names | Task 1A adds the two approved missing GitLab names before facade work; schemas, provider registration, model handlers, CLI descriptors, and mapping rows then reconcile mechanically without a second internal namespace. |
 | D4 | Public command paths retain SuperCLI's domain nouns where safe | Migration muscle memory matters. Differences are documented rather than hidden behind an artificial compatibility claim. |
 | D5 | Positional identifiers, options for filters/settings | `issue get ERIC-123` and `mr show group/project 42` are concise; optional filters remain explicit and shell-discoverable. |
 | D6 | No `--profile` flag | Existing brand profile selection is the single authority; adding another selector creates cross-profile secret and freshness risks. |
@@ -45,9 +71,11 @@
 | D8 | JSON error envelopes are emitted even on nonzero exit | Scripts receive stable category/remediation while the exit code remains useful to shell control flow. |
 | D9 | Migration mapping covers the complete pinned inventory, not only implemented commands | A migration document is trustworthy only when absence is explicit. |
 
-## Initial Public Command Map
+## Reconciled Public Command Map
 
 Each row is a curated descriptor. Identifiers shown in angle brackets are positional. All remaining final schema properties are explicit long options with hyphens replacing underscores; required schema properties remain required. `--json` is output selection and never enters connector arguments. Writes also add the required intent group.
+
+The table has exactly 60 rows: Jira 15, GitLab 30, Confluence 9, and ARM 6.
 
 | Public path | Canonical operation |
 |---|---|
@@ -72,15 +100,17 @@ Each row is a curated descriptor. Identifiers shown in angle brackets are positi
 | `gitlab commit show <project> <sha>` | `gitlab_read_commit` |
 | `gitlab commit comment-list <project> <sha>` | `gitlab_list_commit_comments` |
 | `gitlab commit discussion-list <project> <sha>` | `gitlab_list_commit_discussions` |
-| `gitlab mr list [project]` | `gitlab_list_merge_requests` |
+| `gitlab mr list <project>` | `gitlab_list_merge_requests` |
 | `gitlab mr commit-list <project> <iid>` | `gitlab_list_merge_request_commits` |
 | `gitlab mr discussion-list <project> <iid>` | `gitlab_list_merge_request_discussions` |
 | `gitlab repository tree <project>` | `gitlab_list_repository_tree` |
 | `gitlab file show <project> <path>` | `gitlab_read_file` |
 | `gitlab mr show <project> <iid>` | `gitlab_read_merge_request` |
 | `gitlab pipeline list <project>` | `gitlab_list_pipelines` |
-| `gitlab pipeline inspect <project> <pipeline-id>` | `gitlab_inspect_ci` |
-| `gitlab branch create <project> <branch> <ref>` | `gitlab_create_branch` |
+| `gitlab pipeline view <project> <pipeline-id>` | `gitlab_read_pipeline` |
+| `gitlab ci inspect <project>` | `gitlab_inspect_ci` |
+| `gitlab branch create <project> <branch> <ref>` | `gitlab_create_named_branch` |
+| `gitlab branch create-ticket <project> <ticket-key> --summary <text>` | `gitlab_create_branch` |
 | `gitlab commit create <project> <branch>` | `gitlab_commit_changes` |
 | `gitlab mr create <project> <source-branch> <target-branch> --title <text>` | `gitlab_create_merge_request` |
 | `gitlab job log <project> <job-id>` | `gitlab_job_log` |
@@ -110,7 +140,12 @@ Each row is a curated descriptor. Identifiers shown in angle brackets are positi
 | `arm artifact deploy <repo> <path> --file <local-path>` | `arm_deploy` |
 | `arm artifact delete <repo> <path>` | `arm_delete` |
 
-If the post-Wave-3 schema contains an operation not in this table, stop and amend this approved plan/spec before implementation. Do not silently auto-expose it. If a listed operation is absent, the Wave 3 gate has failed.
+Before Task 1A, the live post-Wave-3 schemas must contain the 58 existing
+operations in this table and must not contain either approved prerequisite
+operation yet. Task 1A adds `gitlab_read_pipeline` and
+`gitlab_create_named_branch`; after it commits, all 60 rows must match the live
+schemas exactly. Any difference other than those two documented additions is a
+stop condition: do not silently expose, remove, or rename another operation.
 
 ## Stable Output and Exit Contract
 
@@ -154,6 +189,7 @@ Exit codes: `0` success/preview/completed write; `2` CLI, schema, input, file, o
 | **Create** `plugins/ericsson-connector-cli/mappings/supercli-0.14.1.yaml` | Complete machine-readable migration authority with provenance. |
 | **Create** `plugins/ericsson-connector-cli/scripts/build_migration_docs.py` | Deterministic human guide generator/checker. |
 | **Create** `docs/cli-migration/supercli-0.14.1.md` | Generated migration guide. |
+| **Modify** `plugins/ericsson-gitlab/{tools.py,operations.py,__init__.py,plugin.yaml}` | Add the reconciled pipeline-read and explicit named-branch operations before facade descriptors. |
 | **Create** `plugins/ericsson-{jira,gitlab,confluence,arm}/application.py` | Connector-local shared application execution/error envelope. |
 | **Modify** each connector `__init__.py` | Model adapter calls application executor; register application-command provider. |
 | **Modify** `sets/ericsson.json` | Add backend facade string, preserve standalone lifecycle objects. |
@@ -162,7 +198,129 @@ Exit codes: `0` success/preview/completed write; `2` CLI, schema, input, file, o
 
 ---
 
-### Task 1: Scaffold the always-visible facade and descriptor contract
+### Task 1: Complete GitLab compatibility, then scaffold the facade
+
+Task 1 has two ordered TDD commits. Task 1A completes the owning connector's
+public contract; Task 1B builds facade descriptors only after the live schemas
+contain all 60 approved operations.
+
+#### Task 1A: Add the two reconciled GitLab capabilities
+
+**Files:**
+- Modify: `plugins/ericsson-gitlab/tools.py`
+- Modify: `plugins/ericsson-gitlab/operations.py`
+- Modify: `plugins/ericsson-gitlab/__init__.py`
+- Modify: `plugins/ericsson-gitlab/plugin.yaml`
+- Modify: `tests/test_gitlab_reads.py`
+- Modify: `tests/test_gitlab_writes.py`
+- Modify: `tests/test_gitlab_plugin.py`
+- Modify: `tests/test_gitlab_approval.py`
+
+**Interfaces:**
+- read operation `gitlab_read_pipeline(project, pipeline_id)`;
+- write operation `gitlab_create_named_branch(project, branch, ref, dry_run=False)`;
+- both operations are declared in `SCHEMAS` and `plugin.yaml`;
+- the named-branch operation joins `_WRITE_TOOLS` and `WRITE_APPROVALS` and
+  continues to require genuine model admission on the model-tool surface.
+
+- [ ] **Step 1: Write failing focused GitLab tests**
+
+For `gitlab_read_pipeline`, test schema bounds, tool dispatch, exact project
+resolution and pipeline endpoint, and this exact bounded normalized result:
+
+- `project`: canonical mapping with required positive integer `id` and required
+  bounded string `path`;
+- `pipeline_id`: required positive integer exactly equal to the requested id;
+- `status`, `ref`, `sha`, and `source`: required bounded strings;
+- `web_url`: required bounded same-origin string; and
+- `created_at`, `updated_at`, `started_at`, and `finished_at`: required keys
+  whose values are either null or bounded timestamp strings.
+
+Reject missing, wrongly typed, over-bounded, cross-origin, or inconsistent
+remote data. Do not expose the raw payload, user objects, variables, jobs, or
+unlisted fields.
+
+For `gitlab_create_named_branch`, test schema bounds, ref/branch validation,
+project resolution, requested-ref resolution to an exact commit identity, and
+a truthful dry-run that may perform those bounded reads plus target-branch
+lookup but issues no mutating request. Pin exact-identity existing-branch reuse;
+pre-existing identity mismatch as safe `conflict` with no mutation; successful
+creation; already-exists/post-dispatch reconciliation that succeeds only when
+the target branch is proved to match the resolved requested identity; and
+`write_ambiguous` whenever that exact identity cannot be proved after dispatch.
+Also pin safe classified errors and uncertain-write preservation. Assert the
+approval text identifies project, branch, and ref; the operation is in
+`_WRITE_TOOLS`; and an admitted model write still cannot bypass genuine
+`PluginToolAdmission`.
+
+- [ ] **Step 2: Confirm the expected RED state**
+
+```bash
+. .venv/bin/activate
+pytest \
+  tests/test_gitlab_reads.py \
+  tests/test_gitlab_writes.py \
+  tests/test_gitlab_plugin.py \
+  tests/test_gitlab_approval.py -q
+```
+
+Expected: FAIL only because `gitlab_read_pipeline` and
+`gitlab_create_named_branch` are absent.
+
+- [ ] **Step 3: Implement the minimum connector capability**
+
+Add both canonical schemas and bounded `tools.invoke` dispatch. Implement the
+single-pipeline read with the existing client, project resolution, deadline,
+remote-shape validation, canonical URL handling, and result bounds.
+
+Extract or reuse the current branch validation and reconciliation path so the
+new named-branch write does not duplicate transport, ambiguity, or error
+policy. It accepts an explicit validated `branch` and `ref`, resolves the ref to
+an exact commit identity, and may perform bounded project/ref/target-branch
+reads during dry-run while issuing no mutating request. Reuse a pre-existing
+branch only when its commit matches the resolved identity; return safe
+`conflict` without mutation on a pre-existing mismatch. Its confirmed path
+passes the resolved commit identity—not the potentially movable ref name—as the
+creation ref. After a mutating dispatch or already-exists race, return
+success/reuse only when a bounded read proves the target branch has the exact
+requested commit; otherwise return `write_ambiguous`. Keep the new operation's
+compatible dry-run-shaped connector arguments; Wave 4A host confirmation is
+normalized by the direct provider only after genuine invocation validation.
+
+Register the read/write in `plugin.yaml`, add the write to `_WRITE_TOOLS`, and
+add bounded approval rendering. Do not add SuperCLI-derived behavior or
+credentials/options to either domain operation.
+
+- [ ] **Step 4: Run focused and complete GitLab parity tests**
+
+```bash
+pytest \
+  tests/test_gitlab_reads.py \
+  tests/test_gitlab_writes.py \
+  tests/test_gitlab_plugin.py \
+  tests/test_gitlab_approval.py -q
+pytest tests/test_gitlab_*.py -q
+```
+
+Expected: PASS. Confirm `SCHEMAS` now contains exactly 30 GitLab operations and
+the repository contains exactly 60 operations across the four connectors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add \
+  plugins/ericsson-gitlab/tools.py \
+  plugins/ericsson-gitlab/operations.py \
+  plugins/ericsson-gitlab/__init__.py \
+  plugins/ericsson-gitlab/plugin.yaml \
+  tests/test_gitlab_reads.py \
+  tests/test_gitlab_writes.py \
+  tests/test_gitlab_plugin.py \
+  tests/test_gitlab_approval.py
+git commit -m "feat: add missing GitLab CLI capabilities"
+```
+
+#### Task 1B: Scaffold the always-visible facade and descriptor contract
 
 **Files:**
 - Create: `plugins/ericsson-connector-cli/{plugin.yaml,__init__.py,descriptors.py}`
@@ -174,7 +332,7 @@ Exit codes: `0` success/preview/completed write; `2` CLI, schema, input, file, o
 - plugin id `ericsson-connector-cli`, `kind: backend`, `provides_tools: []`
 - manifest entry is the string `plugins/ericsson-connector-cli`
 - immutable `CommandDescriptor` and `ArgumentBinding` values
-- `DESCRIPTORS` contains exactly the rows in **Initial Public Command Map**
+- `DESCRIPTORS` contains exactly the 60 rows in **Reconciled Public Command Map**
 
 - [ ] **Step 1: Write failing manifest and descriptor tests**
 
@@ -185,7 +343,8 @@ Tests must assert:
 - command paths and canonical operations are globally unique;
 - top-level domains are exactly `jira`, `gitlab`, `confluence`, `arm`;
 - every descriptor declares connector id, path tokens, operation, read/write, positional bindings, option bindings, file bindings, and human render hint;
-- every operation in the approved table appears exactly once;
+- every one of the 60 operations in the approved table appears exactly once,
+  with family counts Jira 15, GitLab 30, Confluence 9, and ARM 6;
 - descriptor arguments target exactly the live final schema properties after removing `dry_run` and `confirm` from writes;
 - descriptor read/write classification exactly matches the connector `_WRITE_TOOLS` set;
 - facade source imports no connector, transport, client, auth, operations, `httpx`, `requests`, or `urllib` module.
@@ -248,7 +407,13 @@ Cover a representative read, dry-run write, confirmed write, invalid input, conf
 
 - the model handler still refuses a write without genuine `PluginToolAdmission`;
 - a provider callback accepts only a genuine host application invocation;
-- direct mode injects exactly one of `dry_run=True` or `confirm=True` after argument binding;
+- direct dry-run applies `dry_run=True` only after genuine invocation
+  validation; direct confirmation applies `confirm=True` where the schema owns
+  that field, while existing dry-run-shaped `jira_add_comment` applies
+  `dry_run=False` only after genuine confirmed host mode;
+- neither adapter constructs, accepts, aliases, or serializes the other's
+  authority, and both converge on `application.execute` only after their
+  separate checks;
 - application execution resolves `ctx.configuration()` once per call, not registration;
 - both adapters call the same `application.execute(...)` spy and return byte-equivalent JSON-decoded envelopes;
 - no configuration object or admission/invocation object appears in results.
@@ -309,6 +474,18 @@ git commit -m "refactor: share Jira execution across model and CLI adapters"
 - Create: `tests/test_connector_cli_gitlab_port.py`
 
 Repeat Task 2's red-green cycle for GitLab. The error boundary must remain connector-local: `GitLabError` is translated in `application.execute`; `ConnectorError` never escapes or appears in the public envelope. Pin representative read, dry-run, confirmed write, approval refusal, configuration failure, `write_ambiguous`, and unexpected error cases.
+
+GitLab parity must cover both connector intent shapes. Operations with
+`dry_run` and `confirm` receive the matching field only after a genuine Wave 4A
+invocation is validated. The existing dry-run-shaped writes
+`gitlab_create_branch`, `gitlab_commit_changes`, and
+`gitlab_create_merge_request`, plus the new compatible dry-run-shaped
+`gitlab_create_named_branch`, receive `dry_run=True` for host dry-run and
+`dry_run=False` for genuine host confirm.
+The confirmed false value is never accepted as standalone direct authority;
+the provider owns this normalization. Model writes still require genuine
+`PluginToolAdmission`, and neither adapter accepts or constructs the other's
+authority.
 
 Run:
 
@@ -531,6 +708,12 @@ Populate every row. Important deliberate differences include:
 - ARM download -> no equivalent; use metadata/checksum and explain why;
 - unimplemented boards/sprints, GitLab releases/tags/webhooks/variables/todos/code search, Confluence labels/attachments/versions/move/delete/append, ARM properties writes/copy/move/Xray/storage/permissions -> explicit unsupported/no-equivalent dispositions according to approved connector plans;
 - `write_ambiguous` is an added safety difference on every write.
+- the pinned SuperCLI `gitlab pipeline view` row maps to
+  `{brand} gitlab pipeline view <project> <pipeline-id>` and
+  `gitlab_read_pipeline`, with only the evidenced project/pipeline inputs and
+  bounded normalized output;
+- `gitlab_create_named_branch` is marked as a new capability unless an exact
+  pinned evidence row exists; do not infer or invent a SuperCLI command for it.
 
 - [ ] **Step 4: Generate and verify the human guide**
 
@@ -639,7 +822,11 @@ Expected: PASS.
 ./bootstrap.sh
 ```
 
-Expected: PASS. If it fails, prove any claimed baseline failure against the parent post-Wave-3 `main` commit by running the same failing test there. Do not classify a recently introduced regression as pre-existing without that check.
+Expected: PASS. If it fails, prove any claimed baseline failure in a separate,
+untouched worktree checked out at the exact current `origin/main` commit, using
+the same environment and test command. Never use `main~1` or a dirty/current
+feature checkout as baseline evidence. Do not classify a recently introduced
+regression as pre-existing without that exact-commit reproduction.
 
 - [ ] **Step 4: Re-run generated and architecture checks**
 
@@ -658,7 +845,8 @@ Expected: generated artifacts current, no whitespace errors, clean worktree, foc
 
 Push `feat/ericsson-connector-cli`. Report:
 
-- command families and supported operation counts;
+- command families and supported operation counts (Jira 15, GitLab 30,
+  Confluence 9, ARM 6; total 60);
 - focused/full test results;
 - exact JSON schema and exit codes;
 - SuperCLI inventory row counts by disposition;

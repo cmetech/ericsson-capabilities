@@ -1,7 +1,8 @@
 # Ericsson connector command-line interface
 
-**Status:** Approved for Wave 4. No implementation work may start until the
-existing connector waves have satisfied the gates in this document.
+**Status:** Approved for Wave 4, reconciled with the live post-Wave-3 connector
+contracts on 2026-08-18. No implementation work may start until the existing
+connector waves have satisfied the gates in this document.
 
 **Audience:** Engineers implementing or reviewing Ericsson connector command
 surfaces in OTTO, LOOP24, and neutral Hermes Agent.
@@ -27,6 +28,47 @@ The goal is familiarity with a documented migration mapping, not drop-in
 SuperCLI compatibility. OTTO and LOOP24 keep their stronger bounds, safer input
 shapes, profile-scoped configuration, explicit mutation intent, and ambiguous
 write handling even when those differ from SuperCLI.
+
+### 1.1 Post-Wave-3 reconciliation (2026-08-18)
+
+The implementation gate found 58 live connector operations, but three approved
+public signatures no longer matched their schemas: GitLab merge-request listing
+requires a project, `gitlab_inspect_ci` is a broad CI inspection rather than a
+single-pipeline lookup, and `gitlab_create_branch` creates a ticket-derived
+branch rather than an explicitly named branch. Four existing dry-run-shaped
+admitted writes also express confirmed execution as `dry_run=false` instead of
+exposing a connector schema `confirm` field.
+
+The approved resolution preserves all 58 operations and adds two localized
+GitLab operations before facade scaffolding:
+
+- `gitlab_read_pipeline`, exposed as
+  `gitlab pipeline view <project> <pipeline-id>`, returns bounded normalized
+  metadata for one pipeline. Its exact result contains `project` with a
+  positive integer `id` and bounded string `path`; the exact positive integer
+  `pipeline_id`; bounded string `status`, `ref`, `sha`, `source`, and
+  same-origin `web_url`; and present-but-nullable bounded timestamp strings
+  `created_at`, `updated_at`, `started_at`, and `finished_at`. Raw payloads,
+  users, variables, and jobs are excluded;
+- `gitlab_create_named_branch`, exposed as
+  `gitlab branch create <project> <branch> <ref>`, reuses the connector's
+  existing ref validation, project resolution, branch reconciliation, error
+  classification, and ambiguous-write policy. It resolves the requested ref to
+  an exact commit identity. A pre-existing named branch is reusable only when
+  its commit matches that identity; a mismatch returns safe `conflict` without
+  mutation. Creation sends the resolved commit identity, not a movable ref
+  name. After a mutating dispatch or already-exists race, failure to prove that
+  exact identity returns `write_ambiguous`;
+- `gitlab_inspect_ci` is exposed accurately as
+  `gitlab ci inspect <project>`; and
+- the existing ticket-derived `gitlab_create_branch` is exposed as
+  `gitlab branch create-ticket <project> <ticket-key> --summary <text>`.
+
+The merge-request list path is corrected to require `<project>`. The resulting
+surface contains 60 operations: Jira 15, GitLab 30, Confluence 9, and ARM 6.
+This is an approved compatibility prerequisite, not schema drift that should
+stop Wave 4B. Any other added, removed, or renamed operation remains a stop
+condition.
 
 ## 2. Goals and non-goals
 
@@ -136,6 +178,10 @@ otto jira issue comment ERIC-123 --body-file comment.md --dry-run
 otto jira issue comment ERIC-123 --body-file comment.md --confirm
 
 loop24 gitlab mr show group/project 42
+loop24 gitlab pipeline view group/project 918
+loop24 gitlab ci inspect group/project --branch-spec RECENT
+loop24 gitlab branch create-ticket group/project ERIC-123 --summary 'repair login' --dry-run
+loop24 gitlab branch create group/project release/1.2 main --dry-run
 loop24 gitlab pipeline retry group/project 918 --confirm
 
 otto confluence page update 12345 --body-file page.md --dry-run
@@ -195,9 +241,11 @@ Each leaf command has a declarative descriptor containing:
 - migration-map identity; and
 - support status.
 
-Canonical operation identities are the existing public connector tool names
-(`jira_get_issue`, `gitlab_read_merge_request`, and so on). This avoids a
-second internal namespace and lets descriptor/schema drift fail mechanically.
+Canonical operation identities are public connector tool names
+(`jira_get_issue`, `gitlab_read_merge_request`, `gitlab_read_pipeline`, and so
+on). Task 1A adds the two reconciled GitLab names to the connector before the
+facade descriptors are created. This avoids a second internal namespace and
+lets descriptor/schema drift fail mechanically.
 
 Descriptors are curated because a good domain CLI cannot be generated blindly
 from JSON Schema. Source validators nevertheless compare descriptors with the
@@ -247,9 +295,11 @@ lookup is order-independent: if no enabled executor is registered, the facade
 reports the connector as disabled or unavailable.
 
 The model-tool adapter proves host approval where required. The direct command
-adapter proves explicit local CLI intent. Neither adapter can supply a plain
-JSON field that impersonates the other's authority. The direct CLI must not
-manufacture or reuse a model-tool admission token.
+adapter proves explicit local CLI intent through a genuine active Wave 4A
+invocation. Neither adapter can supply a plain JSON field that impersonates the
+other's authority. The direct CLI must not manufacture or reuse a model-tool
+admission token, and the model adapter must not construct or accept an
+application-command invocation.
 
 Planning evidence confirmed that the existing plugin CLI registration surface
 can build the argparse trees but cannot preserve these cross-plugin authority
@@ -260,6 +310,20 @@ fingerprint, invocation identity, and single-use command mode. It is separate
 from model-tool admission and does not make that private token constructible.
 Wave 4B consumes only this public port. Connector-specific code must not reach
 into private Hermes admission internals as a shortcut.
+
+At the direct adapter boundary, the host mode is normalized into the owning
+connector's existing argument contract only after the genuine invocation has
+been validated. Reads add no write intent. Dry-run mode sets `dry_run=true`.
+Confirmed mode sets `confirm=true` when the connector schema owns both intent
+fields. For the existing dry-run-shaped admitted writes `jira_add_comment`,
+`gitlab_create_branch`, `gitlab_commit_changes`, and
+`gitlab_create_merge_request`, and for the new compatible dry-run-shaped
+`gitlab_create_named_branch`, confirmed mode sets `dry_run=false` only after
+the owner-bound, caller/provider/operation/arguments/profile-bound, single-use
+host confirmation authority has been proved. This normalization does not alias
+the two Hermes authority types or weaken the CLI's exactly-one-intent rule.
+Both adapters converge on the connector application executor only after their
+separate checks.
 
 ### 5.4 TUI extension hooks are complementary
 
@@ -283,6 +347,11 @@ activity.
 - may perform bounded reads needed to render a truthful preview; and
 - exits successfully only when the preview is complete.
 
+For named-branch preview, those bounded reads include project resolution,
+requested-ref-to-commit resolution, and target-branch lookup. The preview must
+distinguish create, exact-identity reuse, and pre-existing identity conflict
+without issuing a mutating request.
+
 `--confirm`:
 
 - authorizes exactly one connector, operation, active profile generation, and
@@ -294,7 +363,11 @@ activity.
 
 There is no `--yes` alias, environment-variable confirmation, configuration
 default, or interactive fallback after omission. A CLI-exposed write must
-support both reviewed dry-run and confirmed execution paths. Otherwise it is
+support both reviewed dry-run and confirmed execution paths. This does not
+require retrofitting a connector-level `confirm` field where a dry-run-shaped
+write represents those paths as `dry_run=true` and `dry_run=false`:
+the genuine Wave 4A mode is the confirmation authority, and only the provider
+adapter performs that normalization. A write without both behavioral paths is
 listed in the migration map as not yet supported.
 
 The direct CLI preserves `write_ambiguous` as a distinct terminal outcome. It
@@ -387,7 +460,8 @@ ambiguous-outcome refusal.
 3. All protected values come from the active profile's opaque secret authority.
 4. Help, local validation, and missing-intent failures perform no network I/O.
 5. Every write requires exactly one explicit intent flag.
-6. CLI authority is argument-bound and cannot impersonate model-tool approval.
+6. CLI authority is genuine, active, single-use, and argument-bound; it cannot
+   impersonate model-tool approval or be serialized into arguments/results.
 7. Dry-run cannot mutate; confirm cannot retry an ambiguous write.
 8. Large content is bounded and acquired from reviewed file/stdin inputs.
 9. Human rendering removes terminal control sequences; JSON stdout remains
@@ -406,10 +480,12 @@ Wave 4 must include:
 - help and remediation tests while each connector is disabled;
 - descriptor-to-tool-schema and write-coverage drift tests;
 - parity tests proving equivalent CLI and model-tool inputs reach the same
-  normalized application request and result;
+  normalized application request and result after separate authority checks;
 - tests that neither/both write flags fail before configuration and network
   access;
-- dry-run no-mutation tests and argument-bound, single-use confirm tests;
+- dry-run no-mutation tests, argument-bound single-use confirm tests, and
+  dry-run-shaped `dry_run=false` normalization tests that require genuine host
+  mode;
 - ambiguous-write, cancellation, deadline, retry, and capacity regressions;
 - JSON schema snapshots, stdout/stderr separation, exit-code mapping, and
   terminal-control sanitization;

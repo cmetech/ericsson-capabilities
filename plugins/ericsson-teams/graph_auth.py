@@ -14,6 +14,7 @@ import os
 import secrets
 import stat
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 CLIENT_ID = os.environ.get("ERICSSON_GRAPH_CLIENT_ID",
                            "04b07795-8ddb-461a-bbee-02f9e1bf7b46")  # Azure CLI public client
@@ -21,6 +22,14 @@ AUTHORITY = "https://login.microsoftonline.com/organizations"
 SCOPES = ["https://graph.microsoft.com/.default"]
 
 _PENDING_FLOW = None
+_MAX_CACHE_BYTES = 16 * 1024 * 1024
+
+
+class _WindowsAclApi(NamedTuple):
+    restrict_directory_to_current_user: Callable[[Path], object]
+    inspect_directory_acl: Callable[[Path], object]
+    restrict_file_to_current_user: Callable[[Path], object]
+    inspect_file_acl: Callable[[Path], object]
 
 
 class AuthRequired(RuntimeError):
@@ -30,6 +39,26 @@ class AuthRequired(RuntimeError):
 def cache_path() -> Path:
     home = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
     return home / "ericsson" / "msal_token_cache.json"
+
+
+def _platform_name() -> str:
+    return os.name
+
+
+def _windows_acl_api() -> _WindowsAclApi:
+    from hermes_cli.windows_permissions import (
+        inspect_directory_acl,
+        inspect_file_acl,
+        restrict_directory_to_current_user,
+        restrict_file_to_current_user,
+    )
+
+    return _WindowsAclApi(
+        restrict_directory_to_current_user=restrict_directory_to_current_user,
+        inspect_directory_acl=inspect_directory_acl,
+        restrict_file_to_current_user=restrict_file_to_current_user,
+        inspect_file_acl=inspect_file_acl,
+    )
 
 
 def _app():
@@ -45,8 +74,11 @@ def _app():
 
 def _read_cache_text() -> str | None:
     try:
-        if os.name == "posix":
+        platform = _platform_name()
+        if platform == "posix":
             return _read_cache_posix()
+        if platform == "nt":
+            return _read_cache_windows()
         path = cache_path()
         try:
             return path.read_text(encoding="utf-8")
@@ -56,6 +88,85 @@ def _read_cache_text() -> str | None:
         raise AuthRequired(
             "could not read the Microsoft Graph sign-in cache securely"
         ) from None
+
+
+def _load_windows_acl_api() -> _WindowsAclApi:
+    try:
+        return _windows_acl_api()
+    except Exception as error:
+        raise OSError("Windows ACL host API is unavailable") from error
+
+
+def _validate_windows_path(path: Path, opened, *, directory: bool) -> None:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    attributes = getattr(opened, "st_file_attributes", 0)
+    if stat.S_ISLNK(opened.st_mode) or attributes & reparse_flag:
+        raise OSError("cache path is a reparse point")
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(opened.st_mode):
+        kind = "directory" if directory else "regular file"
+        raise OSError(f"cache path is not a {kind}")
+
+
+def _protect_windows_directory(api: _WindowsAclApi, path: Path) -> None:
+    _validate_windows_path(path, path.lstat(), directory=True)
+    try:
+        api.restrict_directory_to_current_user(path)
+        inspection = api.inspect_directory_acl(path)
+        if not inspection.secure:
+            raise OSError("cache directory ACL is not private")
+    except Exception as error:
+        raise OSError("could not protect cache directory") from error
+
+
+def _protect_windows_file(api: _WindowsAclApi, path: Path) -> None:
+    _validate_windows_path(path, path.lstat(), directory=False)
+    try:
+        api.restrict_file_to_current_user(path)
+        inspection = api.inspect_file_acl(path)
+        if not inspection.secure:
+            raise OSError("cache file ACL is not private")
+    except Exception as error:
+        raise OSError("could not protect cache file") from error
+
+
+def _read_cache_windows() -> str | None:
+    path = cache_path()
+    try:
+        path.parent.lstat()
+    except FileNotFoundError:
+        return None
+    api = _load_windows_acl_api()
+    _protect_windows_directory(api, path.parent)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    _protect_windows_file(api, path)
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("opened cache is not a regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_CACHE_BYTES:
+                raise ValueError("cache is too large")
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _read_cache_posix() -> str | None:
@@ -99,7 +210,7 @@ def _read_cache_posix() -> str | None:
             if not chunk:
                 break
             total += len(chunk)
-            if total > 16 * 1024 * 1024:
+            if total > _MAX_CACHE_BYTES:
                 raise ValueError("cache is too large")
             chunks.append(chunk)
         return b"".join(chunks).decode("utf-8")
@@ -114,14 +225,71 @@ def _persist(cache) -> None:
         return
     try:
         serialized = cache.serialize().encode("utf-8")
-        if os.name == "posix":
+        platform = _platform_name()
+        if platform == "posix":
             _persist_posix(serialized)
+        elif platform == "nt":
+            _persist_windows(serialized)
         else:
             _persist_portable(serialized)
     except (OSError, UnicodeError, TypeError, ValueError):
         raise AuthRequired(
             "could not store the Microsoft Graph sign-in cache securely"
         ) from None
+
+
+def _persist_windows(serialized: bytes) -> None:
+    """Atomically publish a cache protected by the host's Windows ACL API."""
+    path = cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    api = _load_windows_acl_api()
+    _protect_windows_directory(api, path.parent)
+    try:
+        destination = path.lstat()
+    except FileNotFoundError:
+        destination = None
+    if destination is not None:
+        _validate_windows_path(path, destination, directory=False)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    temporary: Path | None = None
+    descriptor: int | None = None
+    try:
+        for _ in range(8):
+            candidate = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+            try:
+                descriptor = os.open(candidate, flags, 0o600)
+            except FileExistsError:
+                continue
+            temporary = candidate
+            break
+        if descriptor is None or temporary is None:
+            raise OSError("could not reserve a cache temporary file")
+
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("cache temporary is not a regular file")
+        _protect_windows_file(api, temporary)
+        view = memoryview(serialized)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short cache write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+
+        os.replace(temporary, path)
+        temporary = None
+        _protect_windows_file(api, path)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _persist_posix(serialized: bytes) -> None:

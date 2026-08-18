@@ -108,8 +108,23 @@ def _validate_windows_path(path: Path, opened, *, directory: bool) -> None:
         raise OSError(f"cache path is not a {kind}")
 
 
-def _protect_windows_directory(api: _WindowsAclApi, path: Path) -> None:
-    _validate_windows_path(path, path.lstat(), directory=True)
+def _snapshot_windows_path(path: Path, *, directory: bool):
+    opened = path.lstat()
+    _validate_windows_path(path, opened, directory=directory)
+    return opened
+
+
+def _require_same_windows_identity(expected, actual) -> None:
+    try:
+        same = os.path.samestat(expected, actual)
+    except (AttributeError, OSError, TypeError) as error:
+        raise OSError("could not verify cache path identity") from error
+    if not same:
+        raise OSError("cache path identity changed")
+
+
+def _protect_windows_directory(api: _WindowsAclApi, path: Path):
+    before = _snapshot_windows_path(path, directory=True)
     try:
         api.restrict_directory_to_current_user(path)
         inspection = api.inspect_directory_acl(path)
@@ -117,10 +132,13 @@ def _protect_windows_directory(api: _WindowsAclApi, path: Path) -> None:
             raise OSError("cache directory ACL is not private")
     except Exception as error:
         raise OSError("could not protect cache directory") from error
+    after = _snapshot_windows_path(path, directory=True)
+    _require_same_windows_identity(before, after)
+    return after
 
 
-def _protect_windows_file(api: _WindowsAclApi, path: Path) -> None:
-    _validate_windows_path(path, path.lstat(), directory=False)
+def _protect_windows_file(api: _WindowsAclApi, path: Path):
+    before = _snapshot_windows_path(path, directory=False)
     try:
         api.restrict_file_to_current_user(path)
         inspection = api.inspect_file_acl(path)
@@ -128,6 +146,9 @@ def _protect_windows_file(api: _WindowsAclApi, path: Path) -> None:
             raise OSError("cache file ACL is not private")
     except Exception as error:
         raise OSError("could not protect cache file") from error
+    after = _snapshot_windows_path(path, directory=False)
+    _require_same_windows_identity(before, after)
+    return after
 
 
 def _read_cache_windows() -> str | None:
@@ -137,12 +158,16 @@ def _read_cache_windows() -> str | None:
     except FileNotFoundError:
         return None
     api = _load_windows_acl_api()
-    _protect_windows_directory(api, path.parent)
+    parent_identity = _protect_windows_directory(api, path.parent)
     try:
         path.lstat()
     except FileNotFoundError:
         return None
-    _protect_windows_file(api, path)
+    file_identity = _protect_windows_file(api, path)
+    _require_same_windows_identity(
+        parent_identity,
+        _snapshot_windows_path(path.parent, directory=True),
+    )
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     descriptor: int | None = None
@@ -151,8 +176,17 @@ def _read_cache_windows() -> str | None:
             descriptor = os.open(path, flags)
         except FileNotFoundError:
             return None
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError("opened cache is not a regular file")
+        opened = os.fstat(descriptor)
+        _validate_windows_path(path, opened, directory=False)
+        _require_same_windows_identity(file_identity, opened)
+        _require_same_windows_identity(
+            file_identity,
+            _snapshot_windows_path(path, directory=False),
+        )
+        _require_same_windows_identity(
+            parent_identity,
+            _snapshot_windows_path(path.parent, directory=True),
+        )
         chunks: list[bytes] = []
         total = 0
         while True:
@@ -243,7 +277,7 @@ def _persist_windows(serialized: bytes) -> None:
     path = cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     api = _load_windows_acl_api()
-    _protect_windows_directory(api, path.parent)
+    parent_identity = _protect_windows_directory(api, path.parent)
     try:
         destination = path.lstat()
     except FileNotFoundError:
@@ -266,9 +300,19 @@ def _persist_windows(serialized: bytes) -> None:
         if descriptor is None or temporary is None:
             raise OSError("could not reserve a cache temporary file")
 
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError("cache temporary is not a regular file")
-        _protect_windows_file(api, temporary)
+        opened_identity = os.fstat(descriptor)
+        _validate_windows_path(temporary, opened_identity, directory=False)
+        _require_same_windows_identity(
+            parent_identity,
+            _snapshot_windows_path(path.parent, directory=True),
+        )
+        temporary_identity = _protect_windows_file(api, temporary)
+        _require_same_windows_identity(temporary_identity, opened_identity)
+        _require_same_windows_identity(temporary_identity, os.fstat(descriptor))
+        _require_same_windows_identity(
+            parent_identity,
+            _snapshot_windows_path(path.parent, directory=True),
+        )
         view = memoryview(serialized)
         while view:
             written = os.write(descriptor, view)
@@ -276,20 +320,50 @@ def _persist_windows(serialized: bytes) -> None:
                 raise OSError("short cache write")
             view = view[written:]
         os.fsync(descriptor)
+        temporary_identity = os.fstat(descriptor)
+        _validate_windows_path(temporary, temporary_identity, directory=False)
+        _require_same_windows_identity(
+            temporary_identity,
+            _snapshot_windows_path(temporary, directory=False),
+        )
+        _require_same_windows_identity(
+            parent_identity,
+            _snapshot_windows_path(path.parent, directory=True),
+        )
         os.close(descriptor)
         descriptor = None
 
         os.replace(temporary, path)
+        final_identity = _snapshot_windows_path(path, directory=False)
+        _require_same_windows_identity(temporary_identity, final_identity)
+        _require_same_windows_identity(
+            parent_identity,
+            _snapshot_windows_path(path.parent, directory=True),
+        )
+        protected_final_identity = _protect_windows_file(api, path)
+        _require_same_windows_identity(temporary_identity, protected_final_identity)
+        _require_same_windows_identity(
+            parent_identity,
+            _snapshot_windows_path(path.parent, directory=True),
+        )
         temporary = None
-        _protect_windows_file(api, path)
     finally:
+        cleanup_error: OSError | None = None
         if descriptor is not None:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                cleanup_error = error
         if temporary is not None:
             try:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+            except OSError as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def _persist_posix(serialized: bytes) -> None:

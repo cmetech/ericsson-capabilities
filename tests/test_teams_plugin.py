@@ -51,10 +51,11 @@ class _ChangedCache:
 
 
 class _FakeWindowsAcl:
-    def __init__(self, events=None, *, insecure=None, fail=None):
+    def __init__(self, events=None, *, insecure=None, fail=None, on_call=None):
         self.events = events if events is not None else []
         self.insecure = insecure
         self.fail = fail
+        self.on_call = on_call
         self._counts = {}
 
     def _record(self, name, path):
@@ -64,6 +65,8 @@ class _FakeWindowsAcl:
         occurrence = self._counts[name]
         if self.fail == (name, occurrence):
             raise RuntimeError("must-not-leak-host-failure")
+        if self.on_call is not None:
+            self.on_call(name, path, occurrence)
         return SimpleNamespace(
             secure=self.insecure != (name, occurrence),
             detail=("must-not-leak-acl-detail" if self.insecure == (name, occurrence)
@@ -327,6 +330,174 @@ def test_windows_persist_final_acl_failure_is_redacted_and_leaves_no_temp(
     assert _temporary_cache_files() == []
     assert "secret-refresh-token" not in str(caught.value)
     assert "must-not-leak-host-failure" not in str(caught.value)
+
+
+def test_windows_persist_rejects_parent_swap_during_temp_open(home, monkeypatch):
+    cache = graph_auth.cache_path()
+    replaced_parent = home / "replaced-ericsson-parent"
+    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
+    real_open = graph_auth.os.open
+    swapped = False
+
+    def swapping_open(path, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path).parent == cache.parent:
+            swapped = True
+            cache.parent.rename(replaced_parent)
+            cache.parent.mkdir()
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(graph_auth.os, "open", swapping_open)
+
+    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
+        graph_auth._persist(_ChangedCache("secret-refresh-token"))
+
+    assert swapped is True
+    assert not cache.exists()
+    assert _temporary_cache_files() == []
+    assert "secret-refresh-token" not in str(caught.value)
+
+
+def test_windows_persist_rejects_temp_path_swap_before_first_write(home, monkeypatch):
+    swapped = False
+
+    def swap_temp(name, path, occurrence):
+        nonlocal swapped
+        if name == "inspect_file" and occurrence == 1:
+            replacement = path.parent / "attacker-temp-replacement"
+            replacement.write_text("attacker-cache", encoding="utf-8")
+            os.replace(replacement, path)
+            swapped = True
+
+    _install_windows_acl(monkeypatch, _FakeWindowsAcl(on_call=swap_temp))
+    real_write = graph_auth.os.write
+    writes = []
+
+    def recording_write(descriptor, data):
+        writes.append(bytes(data))
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(graph_auth.os, "write", recording_write)
+
+    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
+        graph_auth._persist(_ChangedCache("secret-refresh-token"))
+
+    assert swapped is True
+    assert writes == []
+    assert _temporary_cache_files() == []
+    assert "secret-refresh-token" not in str(caught.value)
+
+
+def test_windows_read_rejects_protected_target_swap_before_open(home, monkeypatch):
+    cache = graph_auth.cache_path()
+    cache.parent.mkdir(parents=True)
+    cache.write_text("protected-cache", encoding="utf-8")
+    attacker = cache.parent / "attacker-cache"
+    attacker.write_text("attacker-cache", encoding="utf-8")
+    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
+    real_open = graph_auth.os.open
+    real_read = graph_auth.os.read
+    reads = []
+    swapped = False
+
+    def swapping_open(path, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path) == cache:
+            os.replace(attacker, cache)
+            swapped = True
+        return real_open(path, *args, **kwargs)
+
+    def recording_read(descriptor, size):
+        reads.append(size)
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(graph_auth.os, "open", swapping_open)
+    monkeypatch.setattr(graph_auth.os, "read", recording_read)
+
+    with pytest.raises(graph_auth.AuthRequired, match="could not read.*securely") as caught:
+        graph_auth._read_cache_text()
+
+    assert swapped is True
+    assert reads == []
+    assert "attacker-cache" not in str(caught.value)
+
+
+def test_windows_read_rejects_parent_swap_even_when_target_identity_matches(
+        home, monkeypatch):
+    cache = graph_auth.cache_path()
+    cache.parent.mkdir(parents=True)
+    cache.write_text("protected-cache", encoding="utf-8")
+    replaced_parent = home / "replaced-ericsson-parent"
+    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
+    real_open = graph_auth.os.open
+    swapped = False
+
+    def swapping_open(path, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path) == cache:
+            swapped = True
+            cache.parent.rename(replaced_parent)
+            cache.parent.mkdir()
+            os.link(replaced_parent / cache.name, cache)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(graph_auth.os, "open", swapping_open)
+
+    with pytest.raises(graph_auth.AuthRequired, match="could not read.*securely"):
+        graph_auth._read_cache_text()
+
+    assert swapped is True
+
+
+def test_windows_persist_rejects_final_target_swap_after_replace(home, monkeypatch):
+    cache = graph_auth.cache_path()
+    _install_windows_acl(monkeypatch, _FakeWindowsAcl())
+    real_replace = graph_auth.os.replace
+    swapped = False
+
+    def swapping_replace(source, destination):
+        nonlocal swapped
+        real_replace(source, destination)
+        attacker = cache.parent / "attacker-final"
+        attacker.write_text("attacker-cache", encoding="utf-8")
+        real_replace(attacker, destination)
+        swapped = True
+
+    monkeypatch.setattr(graph_auth.os, "replace", swapping_replace)
+
+    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
+        graph_auth._persist(_ChangedCache("secret-refresh-token"))
+
+    assert swapped is True
+    assert cache.read_text(encoding="utf-8") == "attacker-cache"
+    assert _temporary_cache_files() == []
+    assert "secret-refresh-token" not in str(caught.value)
+
+
+def test_windows_persist_unlinks_temp_when_close_reports_failure(home, monkeypatch):
+    _install_windows_acl(
+        monkeypatch,
+        _FakeWindowsAcl(fail=("restrict_file", 1)),
+    )
+    real_close = graph_auth.os.close
+    close_failed = False
+
+    def close_then_fail(descriptor):
+        nonlocal close_failed
+        real_close(descriptor)
+        if not close_failed:
+            close_failed = True
+            raise OSError("must-not-leak-close-failure")
+
+    monkeypatch.setattr(graph_auth.os, "close", close_then_fail)
+
+    with pytest.raises(graph_auth.AuthRequired, match="could not store.*securely") as caught:
+        graph_auth._persist(_ChangedCache("secret-refresh-token"))
+
+    assert close_failed is True
+    assert _temporary_cache_files() == []
+    assert "must-not-leak-close-failure" not in str(caught.value)
+    assert "secret-refresh-token" not in str(caught.value)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")

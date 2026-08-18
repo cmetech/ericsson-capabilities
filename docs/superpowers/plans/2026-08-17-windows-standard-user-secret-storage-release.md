@@ -30,12 +30,25 @@ release workflows.
 **Approved design:**
 `docs/superpowers/specs/2026-08-17-windows-standard-user-secret-storage-release-design.md`
 
+**Repository path variables:** Set these once in the execution shell before
+running the commands below. They intentionally identify the checked-out release
+repositories without depending on one developer's home directory.
+
+```bash
+WORKSPACE_ROOT=/path/to/otto_hermes
+ERICSSON_REPO="$WORKSPACE_ROOT/ericsson-capabilities"
+HERMES_REPO="$WORKSPACE_ROOT/hermes-agent"
+HERMES_SECRET_STORAGE_REPO="$WORKSPACE_ROOT/hermes-agent-windows-secret-storage"
+OTTO_RELEASES_REPO="$WORKSPACE_ROOT/otto-releases"
+LOOP24_RELEASES_REPO="$WORKSPACE_ROOT/loop24-releases"
+```
+
 **Repositories:**
 
-- Ericsson source: `/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities`
-- Hermes source/brands: `/Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent`
-- OTTO release dispatcher: `/Users/coreyellis/code/github.com/cmetech/otto_hermes/otto-releases`
-- LOOP24 release dispatcher: `/Users/coreyellis/code/github.com/cmetech/otto_hermes/loop24-releases`
+- Ericsson source: `$ERICSSON_REPO`
+- Hermes source/brands: `$HERMES_REPO`
+- OTTO release dispatcher: `$OTTO_RELEASES_REPO`
+- LOOP24 release dispatcher: `$LOOP24_RELEASES_REPO`
 
 **Release boundary:** Do not add a Python 3.13 migration to this patch. The
 approved design changes credential security and publishes `v5.8.4`; Python
@@ -91,7 +104,7 @@ runtime/toolchain migration needs its own dependency and packaging audit.
 Run:
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities
+cd "$ERICSSON_REPO"
 git fetch origin
 git status --short --branch
 git branch --show-current
@@ -115,7 +128,7 @@ preconditions. Stop if tracked user changes overlap any task-owned file.
 Run:
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent
+cd "$HERMES_REPO"
 git fetch origin
 git branch --show-current
 git status --short --branch
@@ -134,11 +147,11 @@ Use `superpowers:using-git-worktrees`. Resolve a sibling path rather than
 placing a worktree under the repository:
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent
+cd "$HERMES_REPO"
 git worktree add \
-  /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent-windows-secret-storage \
+  "$HERMES_SECRET_STORAGE_REPO" \
   -b fix/windows-standard-user-secret-storage origin/base
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent-windows-secret-storage status --short --branch
+git -C "$HERMES_SECRET_STORAGE_REPO" status --short --branch
 ```
 
 If the branch or worktree already exists, inspect and reuse it only when it is
@@ -149,8 +162,8 @@ clean and points at the intended work. Never delete an unknown worktree.
 Run and save the output in the execution notes:
 
 ```bash
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities rev-parse HEAD
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent rev-parse origin/base
+git -C "$ERICSSON_REPO" rev-parse HEAD
+git -C "$HERMES_REPO" rev-parse origin/base
 git ls-remote --tags https://github.com/cmetech/otto.git 'refs/tags/v*' | tail -20
 git ls-remote --tags https://github.com/cmetech/loop24.git 'refs/tags/v*' | tail -20
 ```
@@ -163,10 +176,10 @@ This is informational now; Task 12 repeats the check as a hard release gate.
 Run:
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities
+cd "$ERICSSON_REPO"
 .venv/bin/pytest tests/test_teams_plugin.py -q
 
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent-windows-secret-storage
+cd "$HERMES_SECRET_STORAGE_REPO"
 uv sync --locked --python 3.11 --extra all --extra dev
 uv run --no-sync bash scripts/run_tests.sh \
   tests/hermes_cli/test_windows_permissions.py \
@@ -767,10 +780,9 @@ Stop if `origin/main` advanced incompatibly. Record the exact merge commit as
 ### Step 1: Verify the source revision is clean and exact
 
 ```bash
-ERICSSON_SOURCE=/Users/coreyellis/code/github.com/cmetech/otto_hermes/ericsson-capabilities
-git -C "$ERICSSON_SOURCE" status --porcelain
-git -C "$ERICSSON_SOURCE" rev-parse HEAD
-git -C "$ERICSSON_SOURCE" rev-parse origin/main
+git -C "$ERICSSON_REPO" status --porcelain
+git -C "$ERICSSON_REPO" rev-parse HEAD
+git -C "$ERICSSON_REPO" rev-parse origin/main
 ```
 
 Expected: no output from status and identical HEAD/origin-main revisions.
@@ -786,7 +798,7 @@ Expected: pass.
 ### Step 3: Vendor only through the manifest-driven script
 
 ```bash
-ERICSSON_CAPABILITIES_DIR="$ERICSSON_SOURCE" node scripts/vendor-ericsson.mjs
+ERICSSON_CAPABILITIES_DIR="$ERICSSON_REPO" node scripts/vendor-ericsson.mjs
 ```
 
 Expected: output names the exact `ERICSSON_SOURCE_REVISION`, and
@@ -1085,7 +1097,7 @@ gh pr view "$PR_NUMBER" --repo cmetech/hermes-agent \
   --json mergeable,reviewDecision,statusCheckRollup,headRefOid,baseRefName
 gh pr merge "$PR_NUMBER" --repo cmetech/hermes-agent --merge --delete-branch=false
 
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent
+cd "$HERMES_REPO"
 git fetch origin
 git status --short --branch
 git diff --quiet
@@ -1134,7 +1146,7 @@ policy, this task makes it a release gate explicitly.
 Run:
 
 ```bash
-cd /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent
+cd "$HERMES_REPO"
 for descriptor in brands/*.json; do
   brand="$(basename "$descriptor" .json)"
   case "$brand" in
@@ -1153,7 +1165,7 @@ For each discovered brand, fetch its remote branch and create/reuse a clean
 sibling worktree. Example shape:
 
 ```bash
-git worktree add "/Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent-brand-$brand" \
+git worktree add "$WORKSPACE_ROOT/hermes-agent-brand-$brand" \
   "$brand"
 ```
 
@@ -1164,7 +1176,7 @@ Stop if a brand checkout has unknown changes.
 For every brand:
 
 ```bash
-brand_root="/Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent-brand-$brand"
+brand_root="$WORKSPACE_ROOT/hermes-agent-brand-$brand"
 git -C "$brand_root" fetch origin
 git -C "$brand_root" pull --ff-only origin "$brand"
 git -C "$brand_root" merge --no-ff origin/base \
@@ -1257,8 +1269,8 @@ release changes.
 
 ```bash
 gh auth status
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/otto-releases status --short --branch
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/loop24-releases status --short --branch
+git -C "$OTTO_RELEASES_REPO" status --short --branch
+git -C "$LOOP24_RELEASES_REPO" status --short --branch
 ```
 
 Expected: both dispatcher repos clean on `main`; workflow text still explicitly
@@ -1288,9 +1300,9 @@ and report; do not overwrite or guess the next version.
 ### Step 3: Verify source branches at their recorded SHAs
 
 ```bash
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent fetch origin
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent rev-parse origin/otto
-git -C /Users/coreyellis/code/github.com/cmetech/otto_hermes/hermes-agent rev-parse origin/loop24
+git -C "$HERMES_REPO" fetch origin
+git -C "$HERMES_REPO" rev-parse origin/otto
+git -C "$HERMES_REPO" rev-parse origin/loop24
 ```
 
 Expected: exact equality with Task 11's recorded SHAs.

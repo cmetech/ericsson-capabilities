@@ -20,6 +20,7 @@ ORIGIN = "https://gitlab.example.test"
 PROJECT_API = f"{ORIGIN}/api/v4/projects/42"
 WRITE_TOOLS = {
     "gitlab_create_branch",
+    "gitlab_create_named_branch",
     "gitlab_commit_changes",
     "gitlab_create_merge_request",
 }
@@ -249,6 +250,218 @@ def test_branch_dry_run_requires_no_mutating_request_and_returns_bounded_preview
         "reused": False,
         "dry_run": True,
     }
+
+
+def test_named_branch_schema_is_bounded_and_tools_invoke_dispatches(monkeypatch):
+    _auth, _client, _models, _operations_module, tools = _modules()
+    schema = tools.SCHEMAS["gitlab_create_named_branch"]["parameters"]
+    assert schema["required"] == ["project", "branch", "ref"]
+    assert set(schema["properties"]) == {"project", "branch", "ref", "dry_run"}
+    assert schema["properties"]["branch"]["maxLength"] == 512
+    assert schema["properties"]["ref"]["maxLength"] == 512
+
+    seen = []
+
+    class Operations:
+        client = type("Client", (), {"close": lambda self: None})()
+
+        def create_named_branch(self, project, *, branch, ref, dry_run=False):
+            seen.append((project, branch, ref, dry_run))
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        tools, "operations_from_configuration", lambda *args, **kwargs: Operations()
+    )
+    assert tools.invoke(
+        "gitlab_create_named_branch",
+        {
+            "project": "group/repo",
+            "branch": "release/1.2",
+            "ref": "main",
+            "dry_run": True,
+        },
+        object(),
+    ) == {"ok": True}
+    assert seen == [("group/repo", "release/1.2", "main", True)]
+
+
+@pytest.mark.parametrize(
+    ("branch", "ref"),
+    [
+        ("bad branch", "main"),
+        ("bad..branch", "main"),
+        ("release/1.2", "bad ref"),
+        ("release/1.2", "bad@{ref"),
+    ],
+)
+def test_named_branch_rejects_invalid_branch_and_ref_before_transport(branch, ref):
+    operations = _operations()
+    with respx.mock:
+        with pytest.raises(Exception) as caught:
+            operations.create_named_branch("42", branch=branch, ref=ref)
+        assert respx.calls.call_count == 0
+    assert getattr(caught.value, "category", None) == "invalid_input"
+
+
+def test_named_branch_dry_run_resolves_exact_commit_and_target_without_mutation():
+    operations = _operations()
+    commit_id = "a" * 40
+    branch = "release/1.2"
+    with respx.mock:
+        _mock_project()
+        ref_route = respx.get(f"{PROJECT_API}/repository/commits/main").mock(
+            return_value=httpx.Response(200, json={"id": commit_id})
+        )
+        branch_route = respx.get(
+            f"{PROJECT_API}/repository/branches/release%2F1.2"
+        ).mock(return_value=httpx.Response(404, json={"message": "missing"}))
+        result = operations.create_named_branch(
+            "42", branch=branch, ref="main", dry_run=True
+        )
+        assert not any(call.request.method not in {"GET", "HEAD"} for call in respx.calls)
+    assert ref_route.called and branch_route.called
+    assert result == {
+        "project": "42",
+        "branch": branch,
+        "source_ref": "main",
+        "commit_id": commit_id,
+        "created": False,
+        "reused": False,
+        "dry_run": True,
+    }
+
+
+def test_named_branch_reuses_only_preexisting_exact_commit_and_conflicts_otherwise():
+    operations = _operations()
+    commit_id = "a" * 40
+    branch = "release/1.2"
+    with respx.mock:
+        project_route = respx.get(PROJECT_API)
+        project_route.side_effect = [
+            httpx.Response(200, json=_project()),
+            httpx.Response(200, json=_project()),
+        ]
+        ref_route = respx.get(f"{PROJECT_API}/repository/commits/main")
+        ref_route.side_effect = [
+            httpx.Response(200, json={"id": commit_id}),
+            httpx.Response(200, json={"id": commit_id}),
+        ]
+        branch_route = respx.get(
+            f"{PROJECT_API}/repository/branches/release%2F1.2"
+        )
+        branch_route.side_effect = [
+            httpx.Response(200, json=_branch(branch, commit_id)),
+            httpx.Response(200, json=_branch(branch, "b" * 40)),
+        ]
+        reused = operations.create_named_branch("42", branch=branch, ref="main")
+        with pytest.raises(Exception) as caught:
+            operations.create_named_branch("42", branch=branch, ref="main")
+        assert not any(call.request.method not in {"GET", "HEAD"} for call in respx.calls)
+    assert reused["commit_id"] == commit_id
+    assert reused["created"] is False and reused["reused"] is True
+    assert getattr(caught.value, "category", None) == "conflict"
+
+
+def test_named_branch_posts_immutable_commit_then_reconciles_exact_identity():
+    operations = _operations(max_retries=0)
+    commit_id = "a" * 40
+    branch = "release/1.2"
+    seen = []
+
+    def create(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json={"name": branch})
+
+    with respx.mock:
+        _mock_project()
+        respx.get(f"{PROJECT_API}/repository/commits/main").mock(
+            return_value=httpx.Response(200, json={"id": commit_id})
+        )
+        branch_route = respx.get(
+            f"{PROJECT_API}/repository/branches/release%2F1.2"
+        )
+        branch_route.side_effect = [
+            httpx.Response(404, json={"message": "missing"}),
+            httpx.Response(200, json=_branch(branch, commit_id)),
+        ]
+        post = respx.post(f"{PROJECT_API}/repository/branches").mock(
+            side_effect=create
+        )
+        result = operations.create_named_branch("42", branch=branch, ref="main")
+    assert post.call_count == 1
+    assert seen == [{"branch": branch, "ref": commit_id}]
+    assert result["commit_id"] == commit_id
+    assert result["created"] is True and result["reused"] is False
+
+
+@pytest.mark.parametrize(
+    ("post_status", "post_payload"),
+    [
+        (201, {"name": "release/1.2"}),
+        (409, {"message": "Branch already exists"}),
+    ],
+)
+def test_named_branch_requires_exact_post_dispatch_reconciliation_or_is_ambiguous(
+    post_status, post_payload
+):
+    operations = _operations(max_retries=0)
+    commit_id = "a" * 40
+    branch = "release/1.2"
+    with respx.mock:
+        _mock_project()
+        respx.get(f"{PROJECT_API}/repository/commits/main").mock(
+            return_value=httpx.Response(200, json={"id": commit_id})
+        )
+        branch_route = respx.get(
+            f"{PROJECT_API}/repository/branches/release%2F1.2"
+        )
+        branch_route.side_effect = [
+            httpx.Response(404, json={"message": "missing"}),
+            httpx.Response(200, json=_branch(branch, "b" * 40)),
+        ]
+        post = respx.post(f"{PROJECT_API}/repository/branches").mock(
+            return_value=httpx.Response(post_status, json=post_payload)
+        )
+        with pytest.raises(Exception) as caught:
+            operations.create_named_branch("42", branch=branch, ref="main")
+    assert post.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+
+
+@pytest.mark.parametrize("failure", ["transport", "retryable_5xx"])
+def test_named_branch_uncertain_write_is_ambiguous_redacted_and_never_retried(
+    failure,
+):
+    operations = _operations(max_retries=4)
+    commit_id = "a" * 40
+    branch = "release/1.2"
+    with respx.mock:
+        _mock_project()
+        respx.get(f"{PROJECT_API}/repository/commits/main").mock(
+            return_value=httpx.Response(200, json={"id": commit_id})
+        )
+        respx.get(f"{PROJECT_API}/repository/branches/release%2F1.2").mock(
+            return_value=httpx.Response(404, json={"message": "missing"})
+        )
+        route = respx.post(f"{PROJECT_API}/repository/branches")
+        if failure == "transport":
+            route.mock(
+                side_effect=httpx.ReadTimeout("private transport outcome unknown")
+            )
+        else:
+            route.mock(
+                return_value=httpx.Response(
+                    503, text="private retryable server diagnostic"
+                )
+            )
+        with pytest.raises(Exception) as caught:
+            operations.create_named_branch(
+                "42", branch=branch, ref="main", dry_run=False
+            )
+    assert route.call_count == 1
+    assert getattr(caught.value, "category", None) == "write_ambiguous"
+    assert str(caught.value) == "GitLab write outcome is unknown"
+    assert "private" not in str(caught.value)
 
 
 def test_branch_public_contract_builds_exact_legacy_slug_and_does_not_accept_full_branch():

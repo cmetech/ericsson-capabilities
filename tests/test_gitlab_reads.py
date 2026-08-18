@@ -692,6 +692,158 @@ def test_pipeline_list_rejects_cross_origin_web_urls():
         with pytest.raises(Exception) as caught:
             operations.list_pipelines("42")
     assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+def _pipeline_json(pipeline_id=918, **overrides):
+    payload = {
+        "id": pipeline_id,
+        "status": "success",
+        "ref": "main",
+        "sha": "a" * 40,
+        "source": "push",
+        "web_url": f"{ORIGIN}/division/platform/team/repo/-/pipelines/{pipeline_id}",
+        "created_at": "2026-08-18T10:00:00Z",
+        "updated_at": "2026-08-18T10:01:00Z",
+        "started_at": None,
+        "finished_at": "2026-08-18T10:02:00Z",
+        "user": {"name": "must not escape"},
+        "variables": [{"key": "SECRET", "value": "must not escape"}],
+        "jobs": [{"name": "must not escape"}],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_read_pipeline_resolves_project_and_returns_only_exact_bounded_contract():
+    operations = _operations()
+    with respx.mock:
+        project = respx.get(f"{ORIGIN}/api/v4/projects/division%2Fplatform%2Fteam%2Frepo").mock(
+            return_value=httpx.Response(200, json=_project_json())
+        )
+        pipeline = respx.get(f"{ORIGIN}/api/v4/projects/42/pipelines/918").mock(
+            return_value=httpx.Response(200, json=_pipeline_json())
+        )
+        result = operations.read_pipeline("division/platform/team/repo", 918)
+    assert project.called and pipeline.called
+    assert result == {
+        "project": {"id": 42, "path": "division/platform/team/repo"},
+        "pipeline_id": 918,
+        "status": "success",
+        "ref": "main",
+        "sha": "a" * 40,
+        "source": "push",
+        "web_url": f"{ORIGIN}/division/platform/team/repo/-/pipelines/918",
+        "created_at": "2026-08-18T10:00:00Z",
+        "updated_at": "2026-08-18T10:01:00Z",
+        "started_at": None,
+        "finished_at": "2026-08-18T10:02:00Z",
+    }
+    assert "user" not in repr(result)
+    assert "variables" not in repr(result)
+    assert "jobs" not in repr(result)
+
+
+@pytest.mark.parametrize("pipeline_id", [True, 0, -1, 1.5, "918"])
+def test_read_pipeline_rejects_nonpositive_or_wrongly_typed_id_before_transport(
+    pipeline_id,
+):
+    operations = _operations()
+    with respx.mock:
+        with pytest.raises(Exception) as caught:
+            operations.read_pipeline("42", pipeline_id)
+        assert respx.calls.call_count == 0
+    assert getattr(caught.value, "category", None) == "invalid_input"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"id": 919},
+        {"project_id": 99},
+        {"status": None},
+        {"ref": 7},
+        {"sha": "x" * 2049},
+        {"source": ""},
+        {"web_url": "https://foreign.example.test/pipelines/918"},
+        {"created_at": "x" * 129},
+        {"updated_at": 7},
+    ],
+)
+def test_read_pipeline_rejects_missing_wrong_overbound_cross_origin_or_inconsistent_data(
+    override,
+):
+    operations = _operations()
+    payload = _pipeline_json(**override)
+    with respx.mock:
+        respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+            return_value=httpx.Response(200, json=_project_json())
+        )
+        respx.get(f"{ORIGIN}/api/v4/projects/42/pipelines/918").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        with pytest.raises(Exception) as caught:
+            operations.read_pipeline("42", 918)
+    assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+def test_read_pipeline_requires_every_public_remote_field():
+    operations = _operations()
+    for missing in (
+        "status",
+        "ref",
+        "sha",
+        "source",
+        "web_url",
+        "created_at",
+        "updated_at",
+        "started_at",
+        "finished_at",
+    ):
+        payload = _pipeline_json()
+        payload.pop(missing)
+        with respx.mock:
+            respx.get(f"{ORIGIN}/api/v4/projects/42").mock(
+                return_value=httpx.Response(200, json=_project_json())
+            )
+            respx.get(f"{ORIGIN}/api/v4/projects/42/pipelines/918").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            with pytest.raises(Exception) as caught:
+                operations.read_pipeline("42", 918)
+        assert getattr(caught.value, "category", None) == "invalid_remote_data"
+
+
+def test_read_pipeline_schema_is_bounded_and_tools_invoke_dispatches(monkeypatch):
+    tools = importlib.import_module("tools")
+    schema = tools.SCHEMAS["gitlab_read_pipeline"]["parameters"]
+    assert schema["required"] == ["project", "pipeline_id"]
+    assert set(schema["properties"]) == {"project", "pipeline_id"}
+    assert schema["properties"]["pipeline_id"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2147483647,
+    }
+
+    seen = []
+
+    class Operations:
+        client = type("Client", (), {"close": lambda self: None})()
+
+        def read_pipeline(self, project, pipeline_id):
+            seen.append((project, pipeline_id))
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        tools, "operations_from_configuration", lambda *args, **kwargs: Operations()
+    )
+    assert tools.invoke(
+        "gitlab_read_pipeline",
+        {"project": "group/repo", "pipeline_id": 918},
+        object(),
+    ) == {"ok": True}
+    assert seen == [("group/repo", 918)]
+
+
 def test_project_endpoint_rejects_nonpositive_numeric_strings_before_transport():
     _auth, _client, _models, operations = _modules()
     with pytest.raises(operations.GitLabError, match="input is invalid"):

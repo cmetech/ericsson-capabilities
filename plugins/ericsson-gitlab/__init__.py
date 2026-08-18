@@ -13,6 +13,7 @@ from .models import GitLabError, SAFE_ERROR_MESSAGES  # noqa: E402
 _WRITE_TOOLS = frozenset(
     {
         "gitlab_create_branch",
+        "gitlab_create_named_branch",
         "gitlab_commit_changes",
         "gitlab_create_merge_request",
         "gitlab_create_mr_note",
@@ -43,6 +44,10 @@ def _arg_or_default(args: dict, name: str, default: object) -> str:
 WRITE_APPROVALS = {
     "gitlab_create_branch": lambda a: (
         f"Project: {_arg(a, 'project')}\nTicket: {_arg(a, 'ticket_key')}"
+    ),
+    "gitlab_create_named_branch": lambda a: (
+        f"Project: {_arg(a, 'project')}\nBranch: {_arg(a, 'branch')}\n"
+        f"Ref: {_arg(a, 'ref')}"
     ),
     "gitlab_commit_changes": lambda a: (
         f"Project: {_arg(a, 'project')}\nBranch: {_arg(a, 'branch')}\n"

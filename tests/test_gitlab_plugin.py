@@ -30,9 +30,11 @@ EXPECTED_TOOLS = {
     "gitlab_read_file",
     "gitlab_read_merge_request",
     "gitlab_list_pipelines",
+    "gitlab_read_pipeline",
     "gitlab_inspect_ci",
     "gitlab_job_log",
     "gitlab_create_branch",
+    "gitlab_create_named_branch",
     "gitlab_commit_changes",
     "gitlab_create_merge_request",
     "gitlab_create_mr_note",
@@ -114,7 +116,7 @@ def test_descriptor_is_standalone_static_and_declares_exact_current_tools():
     assert manifest["name"] == "ericsson-gitlab"
     assert manifest["kind"] == "standalone"
     assert manifest["config_schema"] == "config.schema.json"
-    assert len(EXPECTED_TOOLS) == 28
+    assert len(EXPECTED_TOOLS) == 30
     assert set(manifest["provides_tools"]) == EXPECTED_TOOLS
     assert {field["id"] for field in descriptor["fields"]} == {
         "origin",
@@ -165,6 +167,7 @@ def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
         kwargs = {}
         if name in {
             "gitlab_create_branch",
+            "gitlab_create_named_branch",
             "gitlab_commit_changes",
             "gitlab_create_merge_request",
             "gitlab_create_mr_note",

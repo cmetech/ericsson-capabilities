@@ -103,5 +103,14 @@ class TestApprovalMessage:
         )["message"]
         assert "Set resolved: true" in message
 
+    def test_named_branch_approval_names_project_branch_and_ref(self):
+        message = _hook()(
+            "gitlab_create_named_branch",
+            {"project": "group/proj", "branch": "release/1.2", "ref": "main"},
+        )["message"]
+        assert "group/proj" in message
+        assert "release/1.2" in message
+        assert "main" in message
+
     def test_read_tools_are_not_gated(self):
         assert _hook()("gitlab_read_file", {"project": "g/p"}) is None

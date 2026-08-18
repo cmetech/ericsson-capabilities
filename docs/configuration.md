@@ -104,12 +104,38 @@ is organization-owned and must not be guessed.
 
 ## Teams and Microsoft Graph
 
-The current plugin uses `teams_auth` and an MSAL public-client device-code flow. It caches refreshable authentication beneath the active `HERMES_HOME` in `ericsson/msal_token_cache.json`.
+The current plugin uses `teams_auth` and an MSAL public-client device-code flow. It
+caches refreshable authentication at
+`$HERMES_HOME/ericsson/msal_token_cache.json`.
 
 - No client secret is required.
 - `ERICSSON_GRAPH_CLIENT_ID` optionally overrides the built-in public client ID when the organization supplies another app registration.
 - The user starts `teams_auth`, opens the verification URL, enters the device code, completes sign-in, then calls `teams_auth` again with completion requested.
 - `teams_list` and `teams_channels` are safe readiness checks. Read/send/reply permissions depend on tenant consent and Graph policy.
+
+### Windows cache boundary
+
+On Windows, the cache parent directory, each publication temporary, and the final
+cache file use the Hermes generic protected current-user ACL. The rule is applied
+and verified while the artifact is handled: the current user owns it, inheritance
+is protected, and access is restricted to the current user. A normal standard-user
+session is the supported environment; neither elevation nor `SeSecurityPrivilege`
+is required.
+
+The cache is an interactive-session artifact, not a plugin descriptor secret and
+not a substitute for protected Tools & Keys configuration. It is also independent
+of `hermes secrets doctor --write-probe`, which exercises the core secret-store
+write probe rather than the Teams MSAL cache. Do not use that probe as evidence
+that Teams sign-in storage is healthy, and do not copy, edit, or inspect cache
+contents to troubleshoot sign-in.
+
+Never paste a device code, token, cache content, or authentication response into
+chat, logs, or diagnostics. An ACL, ownership, path-type, or reparse-point failure
+fails closed: the plugin does not use an unprotected cache. Correct the local
+filesystem condition through the approved support process, remove the disposable
+test session when appropriate, and run `teams_auth` again to create a fresh
+session. The installed-release procedure is documented in
+[Windows Teams cache release validation](onboarding/windows-teams-cache-release-validation.md).
 
 The original Langflow components sometimes used a short-lived Graph Explorer token file for `ChannelMessage.Read.All`. That is source-only behavior and should not be reproduced casually: raw bearer-token files expire quickly and increase exposure. The Hermes target should use approved delegated permissions and actionable consent guidance.
 

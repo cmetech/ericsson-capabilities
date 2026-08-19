@@ -1200,6 +1200,7 @@ class TestRetryPipeline:
 def test_ci_write_unusable_real_http_success_is_ambiguous_without_retry(
     method_name, identifier, endpoint, http_status
 ):
+    _auth, _client, _models, operations_module, _tools = _modules()
     operations = _operations(max_retries=4)
     with respx.mock:
         _mock_project()
@@ -1209,7 +1210,7 @@ def test_ci_write_unusable_real_http_success_is_ambiguous_without_retry(
                 json={"id": identifier, "status": "unknown"},
             )
         )
-        with pytest.raises(GitLabError) as excinfo:
+        with pytest.raises(operations_module.GitLabError) as excinfo:
             getattr(operations, method_name)("42", identifier, confirm=True)
     assert excinfo.value.category == "write_ambiguous"
     assert route.call_count == 1
@@ -1226,13 +1227,14 @@ def test_ci_write_unusable_real_http_success_is_ambiguous_without_retry(
 def test_ci_write_real_transport_uncertainty_is_ambiguous_without_retry(
     method_name, identifier, endpoint
 ):
+    _auth, _client, _models, operations_module, _tools = _modules()
     operations = _operations(max_retries=4)
     with respx.mock:
         _mock_project()
         route = respx.post(f"{PROJECT_API}/{endpoint}").mock(
             side_effect=httpx.ReadTimeout("private outcome unknown")
         )
-        with pytest.raises(GitLabError) as excinfo:
+        with pytest.raises(operations_module.GitLabError) as excinfo:
             getattr(operations, method_name)("42", identifier, confirm=True)
     assert excinfo.value.category == "write_ambiguous"
     assert "private" not in str(excinfo.value)

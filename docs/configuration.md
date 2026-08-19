@@ -7,7 +7,9 @@ This is the configuration source of truth for the documented flows and the imple
 1. Store static secrets through the OTTO/LOOP24 Keys interface or the product's protected environment file, never in workflow YAML, prompts, chat transcripts, source files, or this documentation.
 2. A setup assistant may ask whether a value is configured, open the appropriate configuration surface, and run a non-destructive validation. It must not ask the user to paste a token into ordinary chat.
 3. Redact tokens, authorization headers, cookies, certificate contents, email bodies, and document contents from diagnostics.
-4. Prefer least privilege. Write-capable Jira, GitLab, Teams, and Outlook operations require explicit user intent; preview/draft or approval steps should precede consequential writes.
+4. Prefer least privilege. Write-capable Jira, GitLab, Confluence, ARM, Teams,
+   and Outlook operations require explicit user intent; preview/draft or approval
+   steps should precede consequential writes.
 5. Treat source Langflow field names and planned Hermes keys as different contracts. A planned key is not available until it is added to the capability manifest and implementation.
 
 ## Quick readiness matrix
@@ -19,6 +21,8 @@ This is the configuration source of truth for the documented flows and the imple
 | Teams | `teams_auth`; optional `ERICSSON_GRAPH_CLIENT_ID` | MSAL device-code sign-in | Teams list/read/send/reply and future notifications |
 | Outlook | No API key | Logged-in desktop Outlook through PowerShell→COM | Email search/read/send and inbox digest |
 | GitLab | `origin`, protected `pat`; optional `client_certificate_path` and `client_key_path` | PAT with appropriate scope; optional mTLS | Repository research; CI inspection; Jira→GitLab |
+| Confluence | `base_url`, protected `pat`; optional `api_base_override` | Bearer PAT | Bounded page research and authoring |
+| ARM/Artifactory | `base_url`, `auth_mode`, protected `token`; optional mTLS paths and `deploy_root` | Bearer token or `X-JFrog-Art-Api`; optional mTLS | Repository/artifact research, deployment, and deletion |
 | SharePoint | Profile-scoped connector settings and protected secret storage | Delegated MSAL, app-only, or existing Azure CLI identity; enrolled browser only for audits | Bounded files/folders, owned sites, and permission audits |
 | Document parsing/export | Local Python packages | No key | TOL generation; 3PP tracker |
 | Opportunity Visuals | Python/local files; optional openpyxl and Playwright/Chromium | No API key | Opportunity progression visual artifacts |
@@ -34,8 +38,9 @@ This is the configuration source of truth for the documented flows and the imple
 connectors without a capability-set toggle:
 
 - a string in `plugins[]` is an existing enabled backend; the Teams entry retains its
-  current behavior, and `plugins/workflow` records Hermes' enabled built-in
-  workflow backend;
+  current behavior, `plugins/workflow` records Hermes' enabled built-in workflow
+  backend, and `plugins/ericsson-connector-cli` is the always-loaded direct-command
+  facade;
 - a `{path, id, enabled: false}` object is a standalone connector bundled for explicit
   per-profile opt-in. Every new profile starts every such connector disabled; and
 - optional `lifecycleMigration` metadata is reserved for a disabled standalone connector
@@ -43,13 +48,70 @@ connectors without a capability-set toggle:
   `from: auto_seeded_backend` transition live only in the manifest.
 
 Do not use connector metadata to disable source skills or workflows, add a set-wide
-`disabledByDefault` switch, or infer that a declared connector is implemented. The
-GitLab object declares the Release 1 lifecycle contract. Jira declares the one-time
+`disabledByDefault` switch, or infer that a declared connector is implemented. Jira,
+GitLab, Confluence, and ARM have standalone lifecycle objects with `enabled: false`.
+Jira declares the one-time
 `ericsson-jira-backend-to-standalone-v1` transition that removes only historical
 automatic enablement and records its completion. Existing Jira settings or credentials
-never imply consent to enable the connector. Both implemented connectors remain disabled
-until explicit per-profile opt-in. SharePoint and Confluence have no production connector
-placeholders in this release.
+never imply consent to enable the connector. Every standalone connector remains disabled
+until explicit per-profile opt-in. SharePoint has its own standalone lifecycle contract.
+
+## Direct connector CLI
+
+`ericsson-connector-cli` is an always-loaded backend string entry, not a
+standalone connector. It owns the `jira`, `gitlab`, `confluence`, and `arm`
+command trees for OTTO and LOOP24, so help remains available while a standalone
+connector is disabled. Do not enable `ericsson-connector-cli`; it has no
+credentials or configuration of its own. Execution resolves the active profile
+and requires the selected standalone connector to be enabled, configured, and
+ready.
+
+Natural-language CLI/TUI use and direct shell use coexist. The agent-facing tool
+adapter and direct adapter use the same connector application executor after
+their separate authority checks. Direct commands are model-free and deterministic;
+they do not add a second configuration path. Replace `<brand>` with `otto` or
+`loop24`:
+
+```bash
+<brand> jira issue get ERIC-123
+<brand> gitlab pipeline view group/project 918 --json
+<brand> confluence page update 12345 --body-file page.md --dry-run
+<brand> arm artifact deploy release-local team/app.tgz --file app.tgz --confirm
+```
+
+Connector credentials, origins, certificate paths, or profile selection on argv
+are forbidden. Store those values in the active profile's protected Tools
+configuration and switch profiles with the existing product commands. Large or
+structured content uses bounded file/stdin inputs rather than secrets or content
+embedded in process listings. Every write requires exactly one of `--dry-run`
+and `--confirm`: omission or conflict is rejected before file reads,
+configuration, provider lookup, or network activity.
+
+With `--json`, stdout contains exactly one `ericsson.connector-cli/v1` envelope.
+The exact success shape is:
+
+```json
+{"schema_version":"ericsson.connector-cli/v1","ok":true,"connector":"jira","operation":"jira_get_issue","mode":"read","data":{},"warnings":[],"meta":{}}
+```
+
+The exact error shape replaces `data`, `warnings`, and `meta` with
+`"error":{"category":"...","message":"..."}` and may add one bounded
+`remediation` string inside `error`:
+
+```json
+{"schema_version":"ericsson.connector-cli/v1","ok":false,"connector":"gitlab","operation":"gitlab_retry_pipeline","mode":"confirm","error":{"category":"write_ambiguous","message":"The write outcome is unknown.","remediation":"Reconcile remote state before another write."}}
+```
+
+Human output is terminal-sanitized and bounded; JSON output is also structurally
+and size bounded. The stable exit codes are `0` for success,
+`2` for usage/schema/local-input/intent failure, `3` for disabled or unready
+configuration, `4` for a classified connector failure, and `5` for
+`write_ambiguous`. Exit code `5` means the remote write outcome is unknown:
+reconcile remote state with a safe read and never blindly retry it.
+
+The reviewed source-command mapping and all supported gaps are in
+`docs/cli-migration/supercli-0.14.1.md`. Existing SuperCLI scripts are not
+drop-in compatible.
 
 ## Jira
 
@@ -63,12 +125,13 @@ basic auth also requires the Jira account email. Secret values are write-only an
 never projected back into the UI, CLI output, logs, or tool results. Do not put Jira
 credentials in `.env`, workflow YAML, prompts, or chat.
 
-The plugin preserves `jira_my_tickets`, `jira_get_issue`, and `jira_add_comment`,
-and adds bounded `jira_search_issues` with explicit JQL, result limit, safe fields,
-filters, and truncation facts. Qualified `ericsson-jira:ticket-research` and
-`ericsson-jira:defect-triage` guidance appears only while the plugin is enabled.
-Browsing issues requires read permission; `jira_add_comment` additionally requires
-comment permission and host-authored approval.
+The plugin exposes 15 operations: eight bounded reads for assigned work, JQL
+search, issue details, fields, project metadata, transitions, assignable users,
+and link types; plus seven writes for comments, transitions, assignment, bounded
+field or label changes, issue creation, and issue links. Qualified
+`ericsson-jira:ticket-research` and `ericsson-jira:defect-triage` guidance appears
+only while the plugin is enabled. Reads require the corresponding Jira permission;
+writes additionally require exact direct-command intent or model admission.
 
 ### Configure and validate
 
@@ -193,14 +256,64 @@ The manifest bundles `ericsson-gitlab` at `plugins/ericsson-gitlab` with `enable
 
 After enablement start a fresh conversation, then validate by resolving a permitted project and reading its default branch before bounded repository or CI inspection. Only with explicit intent, a dry-run preview, and host approval should a test project receive a branch, atomic commit, or merge request. Never validate by pushing to a production default branch. Use least privilege supported by the server; the full write path commonly requires GitLab `api`.
 
-The read surface is `gitlab_resolve_project`, `gitlab_list_repository_tree`,
-`gitlab_read_file`, `gitlab_read_merge_request`, `gitlab_list_pipelines`, and
-`gitlab_inspect_ci`. The write surface is `gitlab_create_branch`,
-`gitlab_commit_changes`, and `gitlab_create_merge_request`. Enabled profiles also
+The 30-operation surface contains 18 bounded reads and 12 writes. Reads cover
+project/group discovery, repository files and trees, commits and feedback, merge
+requests and discussions, exact pipeline metadata, job-log tails, approval state,
+and CI structure without variable values. Writes cover ticket-derived and explicitly
+named branches, atomic commits, merge-request creation/review/approval/SHA-pinned
+merge/update, and one-shot CI recovery. A named branch resolves its ref to an exact
+commit identity; a conflicting existing branch is not reused. Enabled profiles also
 receive the qualified `ericsson-gitlab:repository-research`,
 `ericsson-gitlab:merge-request-review`, and
-`ericsson-gitlab:ci-investigation` skills. The reviewed cross-connector workflow is
-`jira-to-gitlab`.
+`ericsson-gitlab:ci-investigation` skills, plus the qualified
+`ericsson-gitlab:gitlab-activity-digest` skill. The reviewed cross-connector
+workflow is `jira-to-gitlab`.
+
+## Confluence
+
+`ericsson-confluence` is a standalone connector and is disabled by default. Enable
+it for the intended profile, configure the exact HTTP(S) `base_url`, and store the
+bearer `pat` through the protected write-only Tools field. Confluence Cloud normally
+includes `/wiki` in the configured origin. Use `api_base_override` only for a
+deployment whose REST route cannot be derived, and keep timeout/result defaults
+inside their documented finite ranges.
+
+The nine-operation surface provides six bounded reads for CQL search, spaces,
+pages, page bodies, direct children, and comments, plus three writes for page create,
+optimistic-concurrency update, and comments. Remote page/comment content remains
+untrusted data. Markdown writes escape raw HTML and macro markup before storage.
+Every write requires a dry-run or confirmation and preserves version conflicts and
+ambiguous outcomes.
+
+After configuration, start a fresh conversation and validate with a small read-only
+space list or CQL search. Do not use a page/comment write to test readiness. The
+qualified `ericsson-confluence:page-research` skill is available only while the
+connector is enabled. Browser-based research is a read-only fallback for deployments
+whose PAT route is blocked by interactive SSO; it does not replace connector writes.
+
+## ARM/Artifactory
+
+`ericsson-arm` is a standalone connector and is disabled by default. Configure the
+exact Artifactory origin as `base_url`, choose `bearer` or `api_key` authentication,
+and store the token in protected write-only storage. When the edge requires mTLS,
+configure both `client_cert_path` and `client_key_path`; certificate expiry and
+edge-authentication failure are checked and classified separately from token
+authentication.
+
+The six-operation surface provides bounded repository listing, artifact/folder
+metadata, build properties, and AQL search, plus checksum-first deployment and exact
+path deletion. AQL input cannot include its own `.limit()` clause. Deployment reads
+one bounded regular file, attempts checksum publication first, and falls back to a
+full upload only when necessary. An optional `deploy_root` confines upload sources
+with POSIX descriptor traversal and fails closed on Windows and unsupported
+platforms. Configure `max_deploy_megabytes`, request timeout, and result defaults
+only within their schema bounds.
+
+Start a fresh conversation after enablement/configuration and validate with a
+read-only repository or artifact lookup. Never deploy or delete merely to prove
+readiness. The qualified `ericsson-arm:artifact-research` skill appears only while
+the connector is enabled. Any uncertain deployment or deletion remains
+`write_ambiguous` and must not be blindly retried.
 
 ## Model and embedded Langflow LLM settings
 
@@ -339,10 +452,15 @@ Validation should run read-only collection, confirm timeout/cancellation, redact
 
 ## Additional Loop24 source capabilities
 
-Loop24 also contains SharePoint and Confluence utilities/components that are not directly wired into the eleven JSON flows in this inventory. They are future capability inputs, not current requirements:
+Loop24 also contains utilities/components that are not directly wired into the
+eleven JSON flows in this inventory. Their source presence is context, not proof
+that an unrelated end-to-end flow is implemented:
 
 - SharePoint utilities use Microsoft Graph with cached Azure/MSAL identity, Azure CLI fallback, or interactive browser login. A Hermes port should reuse an approved Graph identity surface rather than create another token cache.
-- Confluence retrieval can use Playwright and an interactive SSO browser session. A port must not export cookies or ask users to paste session cookies; it needs a separately approved auth and sandbox design.
+- Historical Confluence retrieval can use Playwright and an interactive SSO browser
+  session. The implemented connector now owns bounded PAT-backed reads and writes;
+  the enrolled-browser path remains a separately bounded read-only fallback and
+  must never export cookies or ask users to paste session cookies.
 - Document-generation components use `python-docx` and the active model to extract structure, generate changed sections, assemble a DOCX, and report a diff. No cataloged flow currently wires that entire pipeline.
 
 Document these as their own flow/capability pages when a concrete port is selected. Do not imply they are installed merely because their source components exist.

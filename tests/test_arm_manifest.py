@@ -483,32 +483,8 @@ def test_catalog_validator_recognizes_all_arm_tool_handlers():
 
     payload = json.loads(result.stdout)
     problems = set(payload["problems"])
-    arm_handler_problems = {
-        problem
-        for problem in problems
-        if "plugins/ericsson-arm" in problem
-    }
-    expected_onboarding_gap = {
-        f"unrepresented plugin tool: {name}"
-        for name in (
-            "arm_artifact_info",
-            "arm_delete",
-            "arm_deploy",
-            "arm_get_properties",
-            "arm_list_repositories",
-            "arm_search_artifacts",
-        )
-    }
-    expected_onboarding_gap.update(
-        {
-            "unrepresented manifest plugin: plugins/ericsson-connector-cli",
-            "unrepresented plugin tool: gitlab_create_named_branch",
-            "unrepresented plugin tool: gitlab_read_pipeline",
-        }
-    )
-
-    assert arm_handler_problems == set()
-    assert problems <= expected_onboarding_gap
+    assert payload["ok"] is True
+    assert problems == set()
 
 
 def test_standalone_loader_keeps_foreign_generic_modules_intact(monkeypatch):

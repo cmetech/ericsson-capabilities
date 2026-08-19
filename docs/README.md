@@ -18,6 +18,38 @@ The goal is to port each flow's intent, controls, and user outcome—not reprodu
 - an embedded Langflow LLM node becomes work performed by the active Hermes agent;
 - secrets stay in Hermes configuration, never in workflows or these documents.
 
+## Connector command line and natural-language use
+
+Jira, GitLab, Confluence, and ARM are available through two complementary
+interfaces. Natural-language CLI and TUI conversations let the active agent
+research, reason, and coordinate workflows. Direct shell commands provide a
+deterministic, model-free path for users and scripts that already know the exact
+operation. Neither interface replaces the other, and both converge on the same
+connector application executor and safety behavior.
+
+The always-loaded `ericsson-connector-cli` backend owns four command families and
+60 operations: Jira 15, GitLab 30, Confluence 9, and ARM 6. Replace `<brand>` with
+the active product executable, `otto` or `loop24`:
+
+```bash
+<brand> jira issue get ERIC-123
+<brand> gitlab pipeline view group/project 918 --json
+<brand> confluence page get 12345
+<brand> arm artifact info release-local team/app.tgz
+```
+
+Command help is present even before a standalone connector is enabled. Running an
+operation still requires its domain connector to be enabled and configured in the
+active profile. Connector origins, credentials, certificate paths, and profile
+selection stay off argv. Every write requires exactly one of `--dry-run` and
+`--confirm`.
+
+See the [configuration guide](configuration.md#direct-connector-cli) for the
+runtime, JSON, and exit-code contract and the
+[SuperCLI 0.14.1 migration guide](cli-migration/supercli-0.14.1.md) for the
+reviewed command-by-command mapping. Existing SuperCLI scripts are not drop-in
+compatible.
+
 ## Reviewed legacy flow inventory
 
 The source snapshot contains 30 live flow JSON files. The table below covers the 11
@@ -35,20 +67,26 @@ those pages would falsely claim review of newer live replacements and newly adde
 | [Image Generation](flows/image-generation.md) | Intent ported | [`opportunity-visuals` skill](../skills/ericsson/opportunity-visuals/SKILL.md); [reproducible showcase](showcases/opportunity-visuals.md) |
 | [Jira to GitLab](flows/jira-to-gitlab.md) | Intent ported | Jira and GitLab tools plus the approved `jira-to-gitlab` workflow |
 | [Jira Assigned Tickets Summary](flows/jira-assigned-tickets-summary.md) | Intent ported | Jira tools plus `my-tickets-summary` workflow |
-| [Jira Defect Loop](flows/jira-defect-loop.md) | Partially ported | Jira tools exist; triage, GitLab tools, loop, reviews, and summary remain |
+| [Jira Defect Loop](flows/jira-defect-loop.md) | Partially ported | Jira and GitLab tools, triage guidance, and single-ticket orchestration exist; multi-ticket iteration, aggregation, and safe batch recovery remain deferred |
 | [3PP Support and LCM Tracker](flows/third-party-support-lcm-tracker.md) | Not ported | Spreadsheet tools plus lifecycle-research workflow |
 | [Pseudonymization](flows/pseudonymization.md) | Not supported; no port planned | Historical tombstone only |
 | [Re-Identification](flows/re-identification.md) | Planned, not implemented | No runnable mapping capability is available |
 | [Windows Laptop Diagnostic](flows/windows-laptop-diagnostic.md) | Not ported | Windows-only diagnostic skill with reviewed script |
 | [SharePoint Document Intake](flows/sharepoint-document-intake.md) | Intent ported | SharePoint connector plus bounded acquisition workflow; document processing remains separate |
 
-Supporting foundations already exist independently of a complete flow port: Jira REST tools, Teams Graph/MSAL tools, the Outlook MCP server, Glean MCP configuration, and Hermes' enabled built-in workflow backend and skills. The implemented GitLab standalone connector is bundled disabled for explicit opt-in; after enablement, configuration, readiness, and a fresh conversation it exposes bounded reads, approval-gated writes, and three qualified skills.
+Supporting foundations already exist independently of a complete flow port: Jira,
+GitLab, Confluence, and ARM standalone connectors; their deterministic direct
+command facade; Teams Graph/MSAL tools; the Outlook MCP server; Glean MCP
+configuration; and Hermes' enabled built-in workflow backend and skills. Each
+standalone connector remains disabled for explicit per-profile opt-in; its direct
+help remains visible, but execution requires enablement, configuration, readiness,
+and a fresh conversation.
 
 GitLab repository, merge-request, and CI conversations route to the qualified
 `ericsson-gitlab:repository-research`, `ericsson-gitlab:merge-request-review`, and
 `ericsson-gitlab:ci-investigation` skills. Ticket delivery uses the reviewed
 `jira-to-gitlab` skill and workflow. See the [configuration guide](configuration.md#gitlab)
-for the exact nine-tool surface and approval boundary.
+for the exact 30-operation surface and approval boundary.
 
 ## Onboarding, configuration, and maintenance
 

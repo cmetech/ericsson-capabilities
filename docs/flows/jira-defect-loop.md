@@ -40,6 +40,15 @@ Batching magnifies risk. Default to review-required rather than autonomous write
 
 Partially ported through Jira/GitLab tools, triage guidance, the Jira-to-GitLab workflow, and the explicitly single-ticket showcase. Exact multi-ticket parity is deliberately deferred to Phase 6 `loop_group`: no Release 2 artifact loops over assigned issues, aggregates per-ticket side effects, or claims safe batch reruns. The future composition must preserve per-ticket approvals, idempotency, uncertainty, and terminal status before aggregation.
 
+## Direct command coexistence
+
+Natural-language single-ticket work and deterministic leaves such as
+`<brand> jira issue get ERIC-123` or `<brand> gitlab mr show group/project 42`
+are available after connector enablement. They do not implement safe batch
+iteration, per-ticket aggregation, or batch recovery. The command facade
+does not change this flow's status: Jira Defect Loop remains partially ported
+and must not be presented as runnable end to end.
+
 ## How Hermes should explain and configure it
 
 Do not collect or authorize a batch. Explain the Phase 6 `loop_group` deferral and offer assigned-ticket summarization, bounded search, or exactly one manually supervised ticket through the current showcase/Jira-to-GitLab flow.

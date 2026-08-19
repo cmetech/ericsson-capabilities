@@ -100,7 +100,10 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         EMPTY_IMPLEMENTATION
         | {
             "skills": ["skills/ericsson/jira"],
-            "plugins": ["plugins/ericsson-jira"],
+            "plugins": [
+                "plugins/ericsson-jira",
+                "plugins/ericsson-connector-cli",
+            ],
             "workflows": ["workflows/jira-single-ticket-showcase.yml"],
             "tools": [
                 "jira_my_tickets",
@@ -127,7 +130,10 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         EMPTY_IMPLEMENTATION
         | {
             "skills": ["skills/ericsson/gitlab"],
-            "plugins": ["plugins/ericsson-gitlab"],
+            "plugins": [
+                "plugins/ericsson-gitlab",
+                "plugins/ericsson-connector-cli",
+            ],
             "tools": [
                 "gitlab_resolve_project",
                 "gitlab_list_group_projects",
@@ -142,12 +148,14 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
                 "gitlab_list_merge_request_commits",
                 "gitlab_list_merge_request_discussions",
                 "gitlab_list_pipelines",
+                "gitlab_read_pipeline",
                 "gitlab_inspect_ci",
                 "gitlab_job_log",
                 "gitlab_retry_job",
                 "gitlab_play_job",
                 "gitlab_retry_pipeline",
                 "gitlab_create_branch",
+                "gitlab_create_named_branch",
                 "gitlab_commit_changes",
                 "gitlab_create_merge_request",
                 "gitlab_create_mr_note",
@@ -298,7 +306,10 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         True,
         EMPTY_IMPLEMENTATION
         | {
-            "plugins": ["plugins/ericsson-confluence"],
+            "plugins": [
+                "plugins/ericsson-confluence",
+                "plugins/ericsson-connector-cli",
+            ],
             "tools": [
                 "confluence_get_page",
                 "confluence_get_page_body",
@@ -317,7 +328,10 @@ EXPECTED_REAL_ENTRY_CONTRACT = {
         True,
         EMPTY_IMPLEMENTATION
         | {
-            "plugins": ["plugins/ericsson-arm"],
+            "plugins": [
+                "plugins/ericsson-arm",
+                "plugins/ericsson-connector-cli",
+            ],
             "tools": [
                 "arm_list_repositories",
                 "arm_artifact_info",

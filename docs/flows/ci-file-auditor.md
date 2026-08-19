@@ -43,6 +43,15 @@ Use read-only GitLab access where possible. Never retrieve CI variable values. A
 
 Partially ported: project resolution, bounded CI files/includes, pipeline facts, branch selection, and variable metadata are implemented with explicit warning and truncation facts. A future deterministic workflow must still iterate projects, store evidence, run two active-agent analysis nodes with validated outputs, and assemble reports.
 
+## Direct command coexistence
+
+Natural-language CI investigation and deterministic reads such as
+`<brand> gitlab ci inspect group/project --branch-spec RECENT` can collect
+bounded evidence from one enabled and configured connector. They do not perform
+the legacy multi-project policy analysis or produce its reports. The direct
+command does not change this flow's status; CI File Auditor remains partially
+ported.
+
 ## How Hermes should explain and configure it
 
 Ask which projects, desired branch scope, lookback period, and whether the user wants current evidence or the deferred findings/policy reports. Confirm GitLab readiness with identity/project/default-branch reads before collection and never present bounded inspection as a completed policy audit.

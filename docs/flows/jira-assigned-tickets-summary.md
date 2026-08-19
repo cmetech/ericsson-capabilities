@@ -37,6 +37,15 @@ The summary must not invent status or priority, omit tickets without saying so, 
 
 Intent is ported through the standalone-disabled `ericsson-jira` plugin and flat `workflows/my-tickets-summary.yml`. The tool layer uses bounded native HTTP with a private compatibility transport; summarization belongs to the active agent. The thin Jira router remains indexed while connector tools and qualified plugin skills appear only after explicit per-profile enablement. Readiness requires configured authentication and a safe read.
 
+## Direct command coexistence
+
+Natural-language use and the packaged summary workflow remain the complete
+digest experience. The always-visible direct facade can run bounded leaves such
+as `<brand> jira issue search --jql 'assignee = currentUser()' --max-results 25`,
+but it does not perform the workflow's prioritization or summary. Adding that
+deterministic leaf does not change this flow's status or its fixed workflow
+bound; the standalone Jira connector must still be enabled and configured.
+
 ## How Hermes should explain and configure it
 
 Explain the fixed 25-ticket workflow bound and offer `jira_search_issues` for a different explicit bounded query. Validate Jira with a small read-only query and preserve truncation or failure warnings in the summary.

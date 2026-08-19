@@ -44,6 +44,9 @@ class FakeCtx:
     def register_hook(self, event, fn):
         self.hooks[event] = fn
 
+    def register_application_commands(self, **registration):
+        self.application_commands = registration
+
 
 class TestErrorShape:
     def test_error_json_includes_remediation_when_present(self, monkeypatch):

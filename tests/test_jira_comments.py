@@ -398,6 +398,9 @@ class Context:
     def register_hook(self, name, callback):
         self.hooks[name] = callback
 
+    def register_application_commands(self, **registration):
+        self.application_commands = registration
+
 
 def load_plugin():
     name = f"ericsson_jira_comments_{uuid.uuid4().hex}"
@@ -444,14 +447,18 @@ def test_registered_comment_requires_exact_host_admission_before_configuration(m
     assert context.configuration_calls == 0
     assert calls == []
 
-    result = json.loads(
+    lookalike = json.loads(
         handler(
             {"key": "ABC-1", "body": "x"},
             tool_admission=admission(),
         )
     )
-    assert result == {"success": True, "result": {"ok": True}}
-    assert calls == ["jira_add_comment"]
+    assert lookalike == {
+        "success": False,
+        "error": {"category": "permission", "message": "Jira permission denied"},
+    }
+    assert context.configuration_calls == 0
+    assert calls == []
 
 
 def test_comment_hook_binds_host_approval_to_exact_issue_and_body():

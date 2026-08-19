@@ -98,6 +98,9 @@ class Context:
     def register_hook(self, name, callback):
         pass
 
+    def register_application_commands(self, **registration):
+        self.application_commands = registration
+
 
 def _load_plugin():
     module_name = f"ericsson_jira_task3_test_{uuid.uuid4().hex}"

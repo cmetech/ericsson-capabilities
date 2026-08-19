@@ -1065,6 +1065,9 @@ class Context:
     def register_hook(self, name, callback):
         self.hooks[name] = callback
 
+    def register_application_commands(self, **registration):
+        self.application_commands = registration
+
 
 def _load_plugin():
     name = f"ericsson_jira_writes_{uuid.uuid4().hex}"
@@ -1117,14 +1120,15 @@ def test_transition_requires_exact_host_admission_before_configuration(monkeypat
     assert context.configuration_calls == 0
     assert calls == []
 
-    result = json.loads(
+    lookalike = json.loads(
         handler(
             {"key": "ABC-1", "transition_id": "21", "confirm": True},
             tool_admission=_admission(),
         )
     )
-    assert result == {"success": True, "result": {"ok": True}}
-    assert calls == ["jira_transition_issue"]
+    assert lookalike["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
 
 
 def test_transition_approval_is_argument_scoped_and_names_the_transition():
@@ -1243,12 +1247,13 @@ def test_update_fields_requires_matching_host_admission_before_configuration(
     assert context.configuration_calls == 0
     assert calls == []
 
-    accepted = json.loads(
+    lookalike = json.loads(
         handler(args, tool_admission=_admission("jira_update_fields"))
     )
 
-    assert accepted == {"success": True, "result": {"ok": True}}
-    assert calls == ["jira_update_fields"]
+    assert lookalike["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
 
 
 def test_update_fields_approval_is_bounded_and_argument_scoped():
@@ -1365,12 +1370,13 @@ def test_manage_labels_requires_matching_host_admission_before_configuration(
     assert context.configuration_calls == 0
     assert calls == []
 
-    accepted = json.loads(
+    lookalike = json.loads(
         handler(args, tool_admission=_admission("jira_manage_labels"))
     )
 
-    assert accepted == {"success": True, "result": {"ok": True}}
-    assert calls == ["jira_manage_labels"]
+    assert lookalike["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
 
 
 class TestCreateIssue:
@@ -1602,11 +1608,12 @@ def test_create_issue_requires_matching_host_admission_before_configuration(monk
     assert context.configuration_calls == 0
     assert calls == []
 
-    accepted = json.loads(
+    lookalike = json.loads(
         handler(args, tool_admission=_admission("jira_create_issue"))
     )
-    assert accepted == {"success": True, "result": {"ok": True}}
-    assert calls == ["jira_create_issue"]
+    assert lookalike["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []
 
 
 class TestLinkTypes:
@@ -1980,8 +1987,9 @@ def test_link_issues_requires_matching_host_admission_before_configuration(monke
     assert context.configuration_calls == 0
     assert calls == []
 
-    accepted = json.loads(
+    lookalike = json.loads(
         handler(args, tool_admission=_admission("jira_link_issues"))
     )
-    assert accepted == {"success": True, "result": {"ok": True}}
-    assert calls == ["jira_link_issues"]
+    assert lookalike["error"]["category"] == "permission"
+    assert context.configuration_calls == 0
+    assert calls == []

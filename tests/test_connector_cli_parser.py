@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -223,6 +225,141 @@ def test_unknown_commands_flags_missing_values_enums_and_integer_bounds_fail(
         with pytest.raises(SystemExit) as stopped:
             parser.parse_args(argv)
         assert stopped.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("argv", "connector", "operation", "mode"),
+    [
+        (["unknown", "--json"], "connector", "invalid_command", "invalid"),
+        (["jira", "unknown", "--json"], "jira", "invalid_command", "invalid"),
+        (
+            ["jira", "issue", "get", "ABC-1", "--unknown", "--json"],
+            "jira",
+            "jira_get_issue",
+            "read",
+        ),
+        (
+            ["jira", "issue", "get", "--json"],
+            "jira",
+            "jira_get_issue",
+            "read",
+        ),
+        (
+            [
+                "jira", "issue", "label", "ABC-1", "replace", "x",
+                "--dry-run", "--json",
+            ],
+            "jira",
+            "jira_manage_labels",
+            "dry_run",
+        ),
+        (
+            ["gitlab", "pipeline", "view", "group/project", "0", "--json"],
+            "gitlab",
+            "gitlab_read_pipeline",
+            "read",
+        ),
+        (
+            ["jira", "issue", "mine", "--max-results", "--json"],
+            "jira",
+            "jira_my_tickets",
+            "read",
+        ),
+        (
+            [
+                "jira", "issue", "comment", "ABC-1", "--body-file", "body.md",
+                "--json",
+            ],
+            "jira",
+            "jira_add_comment",
+            "invalid",
+        ),
+        (
+            [
+                "jira", "issue", "comment", "ABC-1", "--body-file", "body.md",
+                "--dry-run", "--confirm", "--json",
+            ],
+            "jira",
+            "jira_add_comment",
+            "invalid",
+        ),
+    ],
+)
+def test_json_parse_failures_emit_one_stable_envelope_before_any_work(
+    facade, capsys, monkeypatch, argv, connector, operation, mode
+):
+    context = RecordingContext()
+    parser = facade.build_parser(prog="otto", ctx=context)
+    touched = []
+    monkeypatch.setattr(
+        facade.local_io.BoundedInputReader,
+        "read_text",
+        lambda *args, **kwargs: touched.append("file") or "unexpected",
+    )
+    monkeypatch.setattr(
+        facade.parser.uuid,
+        "uuid4",
+        lambda: touched.append("uuid") or uuid.UUID(int=1),
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        parser.parse_args(argv)
+
+    assert stopped.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out) == {
+        "schema_version": "ericsson.connector-cli/v1",
+        "ok": False,
+        "connector": connector,
+        "operation": operation,
+        "mode": mode,
+        "error": {
+            "category": "invalid_input",
+            "message": "Connector command usage is invalid.",
+            "remediation": "Review the command help and try again.",
+        },
+    }
+    assert "\x1b" not in captured.out
+    assert "object at" not in captured.out
+    assert touched == []
+    assert context.calls == []
+
+
+def test_human_parse_failures_keep_normal_argparse_usage(facade, capsys):
+    parser = facade.build_parser(prog="otto", ctx=RecordingContext())
+
+    with pytest.raises(SystemExit) as stopped:
+        parser.parse_args(["jira", "issue", "get"])
+
+    assert stopped.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" in captured.err
+    assert "required" in captured.err
+    assert "ericsson.connector-cli/v1" not in captured.err
+
+
+def test_host_owned_domain_parser_uses_same_json_error_contract(facade, capsys):
+    context = RecordingContext()
+    host = argparse.ArgumentParser(prog="loop24")
+    domains = host.add_subparsers(dest="command", required=True)
+    jira = domains.add_parser("jira")
+    facade.parser.add_domain_commands(jira, "jira", context)
+
+    with pytest.raises(SystemExit) as stopped:
+        host.parse_args(["jira", "unknown", "--json"])
+
+    assert stopped.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    envelope = json.loads(captured.out)
+    assert envelope["connector"] == "jira"
+    assert envelope["operation"] == "invalid_command"
+    assert envelope["mode"] == "invalid"
+    assert envelope["error"]["category"] == "invalid_input"
+    assert context.calls == []
 
 
 def test_canonical_mapping_decodes_structured_values_and_strips_cli_objects(

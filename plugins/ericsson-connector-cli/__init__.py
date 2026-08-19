@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from . import io as local_io
 from . import parser
+from . import render
 from .descriptors import DESCRIPTORS
 
 

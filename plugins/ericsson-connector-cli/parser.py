@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
+import sys
+import types
 import uuid
 from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import Any
 
 from . import io as local_io
+from . import render
 from .descriptors import ArgumentBinding, CommandDescriptor, DESCRIPTORS, SchemaContract
 
 
@@ -19,6 +24,128 @@ _STRUCTURED_TYPES = {
     "project_continuation",
     "field_assignment",
 }
+_ACTIVE_PARSE_ARGUMENTS: ContextVar[tuple[str, ...]] = ContextVar(
+    "ericsson_connector_cli_parse_arguments", default=()
+)
+_INVALID_COMMAND = "invalid_command"
+_INVALID_MODE = "invalid"
+
+
+def _parse_arguments(args) -> tuple[str, ...]:
+    if args is None:
+        return tuple(sys.argv[1:])
+    if isinstance(args, str):
+        return (args,)
+    return tuple(args)
+
+
+def _parser_error_identity(parser) -> tuple[str, str, str]:
+    descriptor = getattr(parser, "_connector_cli_error_descriptor", None)
+    if descriptor is None:
+        return (
+            getattr(parser, "_connector_cli_error_domain", "connector"),
+            _INVALID_COMMAND,
+            _INVALID_MODE,
+        )
+    if descriptor.access == "read":
+        mode = "read"
+    else:
+        active = _ACTIVE_PARSE_ARGUMENTS.get()
+        dry_run = "--dry-run" in active
+        confirm = "--confirm" in active
+        mode = (
+            "dry_run"
+            if dry_run and not confirm
+            else "confirm"
+            if confirm and not dry_run
+            else _INVALID_MODE
+        )
+    return descriptor.path_tokens[0], descriptor.operation, mode
+
+
+def _emit_json_parser_error(parser) -> None:
+    connector, operation, mode = _parser_error_identity(parser)
+    envelope = render.error_envelope(
+        connector=connector,
+        operation=operation,
+        mode=mode,
+        category="invalid_input",
+        message="Connector command usage is invalid.",
+        remediation="Review the command help and try again.",
+    )
+    render.emit(envelope, json_mode=True)
+
+
+class _ConnectorArgumentParser(argparse.ArgumentParser):
+    """Argparse parser with a parse-local JSON error contract."""
+
+    def parse_args(self, args=None, namespace=None):
+        token = _ACTIVE_PARSE_ARGUMENTS.set(_parse_arguments(args))
+        try:
+            return super().parse_args(args, namespace)
+        finally:
+            _ACTIVE_PARSE_ARGUMENTS.reset(token)
+
+    def parse_known_args(self, args=None, namespace=None):
+        token = _ACTIVE_PARSE_ARGUMENTS.set(_parse_arguments(args))
+        try:
+            parsed, extras = super().parse_known_args(args, namespace)
+            if extras and getattr(
+                self, "_connector_cli_error_descriptor", None
+            ) is not None:
+                self.error("unrecognized connector command arguments")
+            return parsed, extras
+        finally:
+            _ACTIVE_PARSE_ARGUMENTS.reset(token)
+
+    def error(self, message):
+        if "--json" in _ACTIVE_PARSE_ARGUMENTS.get():
+            _emit_json_parser_error(self)
+            raise SystemExit(2)
+        super().error(message)
+
+
+def _bound_parse_known_args(parser, args=None, namespace=None):
+    token = _ACTIVE_PARSE_ARGUMENTS.set(_parse_arguments(args))
+    try:
+        parsed, extras = parser._connector_cli_original_parse_known_args(
+            args, namespace
+        )
+        if extras and getattr(
+            parser, "_connector_cli_error_descriptor", None
+        ) is not None:
+            parser.error("unrecognized connector command arguments")
+        return parsed, extras
+    finally:
+        _ACTIVE_PARSE_ARGUMENTS.reset(token)
+
+
+def _bound_error(parser, message):
+    if "--json" in _ACTIVE_PARSE_ARGUMENTS.get():
+        _emit_json_parser_error(parser)
+        raise SystemExit(2)
+    parser._connector_cli_original_error(message)
+
+
+def _configure_error_parser(
+    parser, *, domain: str, descriptor: CommandDescriptor | None = None
+) -> None:
+    parser._connector_cli_error_domain = domain
+    parser._connector_cli_error_descriptor = descriptor
+
+
+def _bind_host_domain_parser(parser, *, domain: str) -> None:
+    """Bind one host-created parser without changing global argparse state."""
+    if not isinstance(parser, _ConnectorArgumentParser) and not hasattr(
+        parser, "_connector_cli_original_error"
+    ):
+        parser._connector_cli_original_error = parser.error
+        parser._connector_cli_original_parse_known_args = parser.parse_known_args
+        parser.error = types.MethodType(_bound_error, parser)
+        parser.parse_known_args = types.MethodType(
+            _bound_parse_known_args, parser
+        )
+    _configure_error_parser(parser, domain=domain)
 
 
 def _bounded_integer(binding: ArgumentBinding):
@@ -125,6 +252,9 @@ def _binding_dest(index: int) -> str:
 
 
 def _add_leaf_arguments(leaf, descriptor: CommandDescriptor, ctx) -> None:
+    _configure_error_parser(
+        leaf, domain=descriptor.path_tokens[0], descriptor=descriptor
+    )
     bindings = (
         descriptor.positional_bindings
         + descriptor.option_bindings
@@ -161,7 +291,9 @@ def _add_leaf_arguments(leaf, descriptor: CommandDescriptor, ctx) -> None:
         intent.add_argument("--dry-run", action="store_true", default=False)
         intent.add_argument("--confirm", action="store_true", default=False)
     leaf.set_defaults(
-        func=_leaf_handler,
+        func=functools.partial(
+            _leaf_handler, program=leaf.prog.split(" ", 1)[0]
+        ),
         _connector_cli_ctx=ctx,
         _connector_cli_descriptor=descriptor,
         _connector_cli_binding_dests=tuple(destinations),
@@ -173,9 +305,12 @@ def add_domain_commands(domain_parser, domain: str, ctx) -> None:
     descriptors = [d for d in DESCRIPTORS if d.path_tokens[0] == domain]
     if not descriptors:
         raise ValueError("unknown Ericsson connector command domain")
+    _bind_host_domain_parser(domain_parser, domain=domain)
     children: dict[tuple[str, ...], tuple[Any, Any]] = {}
     root_subparsers = domain_parser.add_subparsers(
-        dest=f"_{domain}_resource", required=True
+        dest=f"_{domain}_resource",
+        required=True,
+        parser_class=_ConnectorArgumentParser,
     )
     children[()] = (domain_parser, root_subparsers)
     for descriptor in descriptors:
@@ -195,6 +330,11 @@ def add_domain_commands(domain_parser, domain: str, ctx) -> None:
                     ),
                     description=descriptor.operation if is_leaf else None,
                 )
+                _configure_error_parser(
+                    child,
+                    domain=domain,
+                    descriptor=descriptor if is_leaf else None,
+                )
                 if is_leaf:
                     children[current_tokens] = (child, None)
                 else:
@@ -213,7 +353,8 @@ def add_domain_commands(domain_parser, domain: str, ctx) -> None:
 
 def build_parser(*, prog: str, ctx) -> argparse.ArgumentParser:
     """Build a complete standalone parser for tests and brand-neutral reuse."""
-    root = argparse.ArgumentParser(prog=prog)
+    root = _ConnectorArgumentParser(prog=prog)
+    _configure_error_parser(root, domain="connector")
     domains = root.add_subparsers(dest="_connector_cli_domain", required=True)
     for domain in ("jira", "gitlab", "confluence", "arm"):
         domain_parser = domains.add_parser(
@@ -345,12 +486,86 @@ def canonical_arguments(namespace, *, reader=None) -> dict[str, Any]:
     return arguments
 
 
-def _leaf_handler(namespace) -> int:
-    """Run local gates, then make one provisional host dispatch for Task 6."""
+def _error(
+    namespace,
+    *,
+    mode: str,
+    category: str,
+    message: str,
+    remediation: str | None = None,
+    exit_code: int,
+) -> int:
+    descriptor = namespace._connector_cli_descriptor
+    envelope = render.error_envelope(
+        connector=descriptor.path_tokens[0],
+        operation=descriptor.operation,
+        mode=mode,
+        category=category,
+        message=message,
+        remediation=remediation,
+    )
+    render.emit(envelope, json_mode=namespace._connector_cli_json)
+    return exit_code
+
+
+def _host_failure(
+    namespace, *, mode: str, program: str, error: Exception
+) -> int:
+    """Translate only public Wave 4A errors without inspecting host internals."""
     try:
-        arguments = canonical_arguments(namespace)
-    except local_io.CliInputError:
-        return 2
+        from hermes_cli.plugin_application_commands import (
+            PluginApplicationCommandDenied,
+            PluginApplicationCommandInvalid,
+            PluginApplicationCommandUnavailable,
+        )
+    except ImportError:
+        PluginApplicationCommandDenied = ()
+        PluginApplicationCommandInvalid = ()
+        PluginApplicationCommandUnavailable = ()
+
+    descriptor = namespace._connector_cli_descriptor
+    if isinstance(error, PluginApplicationCommandUnavailable):
+        domain = descriptor.path_tokens[0]
+        return _error(
+            namespace,
+            mode=mode,
+            category="unavailable",
+            message=f"{domain.title()} connector is unavailable.",
+            remediation=(
+                "Enable the connector for the active profile with: "
+                f"{program} plugins enable "
+                f"{descriptor.connector_id}"
+            ),
+            exit_code=3,
+        )
+    if isinstance(error, PluginApplicationCommandInvalid):
+        return _error(
+            namespace,
+            mode=mode,
+            category="invalid_input",
+            message="Connector command input is invalid.",
+            exit_code=2,
+        )
+    if isinstance(error, PluginApplicationCommandDenied):
+        return _error(
+            namespace,
+            mode=mode,
+            category="permission",
+            message="Connector command invocation was denied.",
+            exit_code=2,
+        )
+    return _error(
+        namespace,
+        mode=mode,
+        category="transient",
+        message="Connector command execution failed.",
+        remediation="Retry the command after the connector is available.",
+        exit_code=4,
+    )
+
+
+def _leaf_handler(namespace, *, program: str) -> int:
+    """Run local gates, dispatch once through Wave 4A, and render safely."""
     descriptor = namespace._connector_cli_descriptor
     mode = (
         "read"
@@ -359,18 +574,36 @@ def _leaf_handler(namespace) -> int:
         if namespace.dry_run
         else "confirm"
     )
+    try:
+        arguments = canonical_arguments(namespace)
+    except local_io.CliInputError as exc:
+        return _error(
+            namespace,
+            mode=mode,
+            category="invalid_input",
+            message=str(exc),
+            remediation="Review the command arguments and try again.",
+            exit_code=2,
+        )
     invocation_id = str(uuid.uuid4())
     try:
-        namespace._connector_cli_ctx.invoke_application_command(
+        result = namespace._connector_cli_ctx.invoke_application_command(
             descriptor.connector_id,
             descriptor.operation,
             arguments,
             mode=mode,
             invocation_id=invocation_id,
         )
-    except Exception:
-        return 4
-    return 0
+    except Exception as exc:
+        return _host_failure(namespace, mode=mode, program=program, error=exc)
+    envelope, exit_code = render.normalize_provider_result(
+        result,
+        connector=descriptor.path_tokens[0],
+        operation=descriptor.operation,
+        mode=mode,
+    )
+    render.emit(envelope, json_mode=namespace._connector_cli_json)
+    return exit_code
 
 
 __all__ = ["add_domain_commands", "build_parser", "canonical_arguments"]

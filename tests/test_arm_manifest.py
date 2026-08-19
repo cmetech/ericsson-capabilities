@@ -433,7 +433,7 @@ def test_registered_write_handlers_reject_invalid_admissions_before_invoke(monke
     assert invoked == []
 
 
-def test_registered_write_handlers_invoke_only_for_matching_admission(monkeypatch):
+def test_registered_write_handlers_reject_matching_lookalike_admission(monkeypatch):
     plugin = _load_skill_plugin_module()
     context = _RegisteredToolContext()
     invoked = []
@@ -460,9 +460,10 @@ def test_registered_write_handlers_invoke_only_for_matching_admission(monkeypatc
         result = json.loads(
             context.tools[tool_name](arguments, tool_admission=admission)
         )
-        assert result == {"success": True, "result": {"ok": True}}
+        assert result["success"] is False
+        assert result["error"]["category"] == "permission"
 
-    assert [call[0][0] for call in invoked] == ["arm_deploy", "arm_delete"]
+    assert invoked == []
 
 
 def test_catalog_validator_recognizes_all_arm_tool_handlers():
@@ -498,6 +499,13 @@ def test_catalog_validator_recognizes_all_arm_tool_handlers():
             "arm_search_artifacts",
         )
     }
+    expected_onboarding_gap.update(
+        {
+            "unrepresented manifest plugin: plugins/ericsson-connector-cli",
+            "unrepresented plugin tool: gitlab_create_named_branch",
+            "unrepresented plugin tool: gitlab_read_pipeline",
+        }
+    )
 
     assert arm_handler_problems == set()
     assert problems <= expected_onboarding_gap

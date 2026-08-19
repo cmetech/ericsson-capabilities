@@ -313,7 +313,7 @@ def test_direct_import_ignores_conflicting_generic_tool_and_model_modules(monkey
         module for name, module in direct_modules.items() if name.endswith(".tools")
     )
 
-    def raise_confluence_error(*_args):
+    def raise_confluence_error(*_args, **_kwargs):
         raise direct_models.ConfluenceError("not_found")
 
     monkeypatch.setattr(direct_tools, "invoke", raise_confluence_error)
@@ -370,9 +370,10 @@ def test_create_handler_requires_an_exact_host_admission(monkeypatch):
             tool_name="confluence_create_page",
         )
         payload = json.loads(handler(arguments, tool_admission=allowed))
-        assert payload == {"success": True, "result": {"ok": True}}
-        assert len(invoked) == 1
-        assert ctx.configuration_calls == 1
+        assert payload["success"] is False
+        assert payload["error"]["category"] == "permission"
+        assert invoked == []
+        assert ctx.configuration_calls == 0
     finally:
         _unload_package(module_name)
 
@@ -409,8 +410,10 @@ def test_update_handler_rejects_admission_for_another_write(monkeypatch):
             tool_name="confluence_update_page",
         )
         payload = json.loads(handler(arguments, tool_admission=allowed))
-        assert payload == {"success": True, "result": {"ok": True}}
-        assert len(invoked) == 1
+        assert payload["success"] is False
+        assert payload["error"]["category"] == "permission"
+        assert invoked == []
+        assert ctx.configuration_calls == 0
     finally:
         _unload_package(module_name)
 
@@ -447,8 +450,10 @@ def test_add_comment_handler_rejects_admission_for_another_write(monkeypatch):
             tool_name="confluence_add_comment",
         )
         payload = json.loads(handler(arguments, tool_admission=allowed))
-        assert payload == {"success": True, "result": {"ok": True}}
-        assert len(invoked) == 1
+        assert payload["success"] is False
+        assert payload["error"]["category"] == "permission"
+        assert invoked == []
+        assert ctx.configuration_calls == 0
     finally:
         _unload_package(module_name)
 

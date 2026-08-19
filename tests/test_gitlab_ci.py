@@ -34,12 +34,22 @@ def _modules():
     assert PLUGIN.is_dir(), "Task 8 GitLab plugin production surface is missing"
     if str(PLUGIN) not in sys.path:
         sys.path.insert(0, str(PLUGIN))
+    tools_name = "_ericsson_gitlab_standalone_tools"
+    if tools_name not in sys.modules:
+        tools_spec = importlib.util.spec_from_file_location(
+            tools_name,
+            PLUGIN / "tools.py",
+        )
+        assert tools_spec is not None and tools_spec.loader is not None
+        tools_module = importlib.util.module_from_spec(tools_spec)
+        sys.modules[tools_name] = tools_module
+        tools_spec.loader.exec_module(tools_module)
     return (
         importlib.import_module("auth"),
         importlib.import_module("client"),
         importlib.import_module("models"),
         importlib.import_module("operations"),
-        importlib.import_module("tools"),
+        sys.modules[tools_name],
     )
 
 

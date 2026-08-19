@@ -39,6 +39,9 @@ class FakeCtx:
     def register_hook(self, event, fn):
         self.hooks[event] = fn
 
+    def register_application_commands(self, **registration):
+        self.application_commands = registration
+
 
 def _hook():
     ctx = FakeCtx()

@@ -26,6 +26,20 @@ def _modules():
     )
 
 
+def _tools_module():
+    tools_name = "_ericsson_gitlab_standalone_tools"
+    if tools_name not in sys.modules:
+        tools_spec = importlib.util.spec_from_file_location(
+            tools_name,
+            PLUGIN / "tools.py",
+        )
+        assert tools_spec is not None and tools_spec.loader is not None
+        tools_module = importlib.util.module_from_spec(tools_spec)
+        sys.modules[tools_name] = tools_module
+        tools_spec.loader.exec_module(tools_module)
+    return sys.modules[tools_name]
+
+
 def _operations(**client_options):
     auth, client, _models, operations = _modules()
     credentials = auth.GitLabAuth(
@@ -814,7 +828,7 @@ def test_read_pipeline_requires_every_public_remote_field():
 
 
 def test_read_pipeline_schema_is_bounded_and_tools_invoke_dispatches(monkeypatch):
-    tools = importlib.import_module("tools")
+    tools = _tools_module()
     schema = tools.SCHEMAS["gitlab_read_pipeline"]["parameters"]
     assert schema["required"] == ["project", "pipeline_id"]
     assert set(schema["properties"]) == {"project", "pipeline_id"}

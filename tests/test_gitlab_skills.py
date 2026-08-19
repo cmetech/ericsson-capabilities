@@ -322,6 +322,9 @@ def test_enabled_plugin_registers_explicit_qualified_skills_from_contract() -> N
             def register_tool(self, **_kwargs) -> None:
                 pass
 
+            def register_application_commands(self, **_kwargs) -> None:
+                pass
+
             def register_skill(self, name, path, description="") -> None:
                 self.skills.append((name, Path(path), description))
 

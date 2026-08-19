@@ -107,6 +107,9 @@ class Context:
     def register_hook(self, name, callback):
         self.hooks[name] = callback
 
+    def register_application_commands(self, **registration):
+        self.application_commands = registration
+
 
 def test_descriptor_is_standalone_static_and_declares_exact_current_tools():
     # GL-AUTH-03/GL-REVIEW-03 legacy: ericsson_gitlab/README.md:Requirements; ericsson_gitlab/__init__.py:__all__
@@ -160,6 +163,9 @@ def test_every_schema_registration_binds_its_matching_tool_handler(monkeypatch):
         return {"invoked": name}
 
     monkeypatch.setattr(plugin.gitlab_tools, "invoke", invoke)
+    # Genuine claimed admission is covered through Hermes' registry by the
+    # CLI port contract; this test isolates schema-to-handler binding.
+    monkeypatch.setattr(plugin, "_has_write_admission", lambda value, name: True)
     context = Context()
     plugin.register(context)
 
@@ -218,6 +224,22 @@ def test_approve_merge_request_requires_argument_specific_write_admission(monkey
     assert approval["rule_key"] != changed_approval["rule_key"]
     assert "Approve MR: !42" in approval["message"]
 
+    forged = json.loads(
+        handler(
+            arguments,
+            tool_admission=types.SimpleNamespace(
+                approved=True,
+                policy="plugin_approve",
+                tool_name="gitlab_approve_merge_request",
+            ),
+        )
+    )
+    assert forged["error"]["category"] == "permission"
+    assert invoked == []
+
+    # The real registry path proves the host check; isolate the downstream
+    # operation invocation here once that check has succeeded.
+    monkeypatch.setattr(plugin, "_has_write_admission", lambda value, name: True)
     admitted = json.loads(
         handler(
             arguments,

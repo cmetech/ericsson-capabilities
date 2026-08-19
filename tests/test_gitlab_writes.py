@@ -30,12 +30,22 @@ def _modules():
     assert PLUGIN.is_dir(), "Task 10 GitLab plugin production surface is missing"
     if str(PLUGIN) not in sys.path:
         sys.path.insert(0, str(PLUGIN))
+    tools_name = "_ericsson_gitlab_standalone_tools"
+    if tools_name not in sys.modules:
+        tools_spec = importlib.util.spec_from_file_location(
+            tools_name,
+            PLUGIN / "tools.py",
+        )
+        assert tools_spec is not None and tools_spec.loader is not None
+        tools_module = importlib.util.module_from_spec(tools_spec)
+        sys.modules[tools_name] = tools_module
+        tools_spec.loader.exec_module(tools_module)
     return (
         importlib.import_module("auth"),
         importlib.import_module("client"),
         importlib.import_module("models"),
         importlib.import_module("operations"),
-        importlib.import_module("tools"),
+        sys.modules[tools_name],
     )
 
 
@@ -155,10 +165,13 @@ class _Context:
     def register_hook(self, name, callback):
         self.hooks[name] = callback
 
+    def register_application_commands(self, **registration):
+        self.application_commands = registration
+
 
 def _admission(name):
-    # Public handler contract is deliberately duck-typed. The real immutable,
-    # one-shot value is host-minted and delivered only by PluginContext.
+    # Deliberate lookalike used to prove structural values are rejected. The
+    # real immutable, one-shot value is host-minted and registry-claimed.
     return SimpleNamespace(approved=True, policy="plugin_approve", tool_name=name)
 
 
@@ -1819,6 +1832,7 @@ def test_registered_writes_require_exact_public_admission_before_configuration_o
                     approved=True, policy="caller", tool_name=name
                 )
             },
+            {"tool_admission": _admission(name)},
             {"tool_admission": _admission("gitlab_read_file")},
             {"tool_admission": ExplosiveAdmission()},
         ):
@@ -1859,6 +1873,9 @@ def test_registered_write_hook_requests_host_approval_and_delivers_reserved_admi
         "invoke",
         lambda name, args, configuration, **options: calls.append(name) or {"ok": True},
     )
+    # Genuine claimed admission is covered through Hermes' registry by the
+    # CLI port contract; this block isolates post-admission dispatch.
+    monkeypatch.setattr(plugin, "_has_write_admission", lambda value, name: True)
     for name in sorted(WRITE_TOOLS):
         result = json.loads(
             context.registrations[name]["handler"](

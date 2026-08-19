@@ -335,6 +335,7 @@ def test_manifest_content():
         },
         "plugins/ericsson-teams",
         "plugins/workflow",
+        "plugins/ericsson-connector-cli",
         {
             "path": "plugins/ericsson-gitlab",
             "id": "ericsson-gitlab",
